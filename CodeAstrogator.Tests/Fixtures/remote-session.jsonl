@@ -1,0 +1,15 @@
+{"type":"mode","mode":"normal","sessionId":"rs-1"}
+{"type":"permission-mode","permissionMode":"default","sessionId":"rs-1"}
+{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: …</local-command-caveat>"},"uuid":"u0","timestamp":"2026-06-03T10:00:00Z"}
+{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"},"uuid":"u0b","timestamp":"2026-06-03T10:00:00Z"}
+{"type":"user","message":{"role":"user","content":"Fix the login bug"},"uuid":"u1","timestamp":"2026-06-03T10:00:01Z"}
+{"type":"assistant","message":{"id":"a1","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"x"}]},"uuid":"x1","timestamp":"2026-06-03T10:00:02Z"}
+{"type":"assistant","message":{"id":"a1","role":"assistant","content":[{"type":"text","text":"Let me look. "}]},"uuid":"x2","timestamp":"2026-06-03T10:00:03Z"}
+{"type":"assistant","message":{"id":"a1","role":"assistant","content":[{"type":"text","text":"Reading the file now."}]},"uuid":"x3","timestamp":"2026-06-03T10:00:04Z"}
+{"type":"assistant","message":{"id":"a1","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"src/Auth.cs"}}]},"uuid":"x4","timestamp":"2026-06-03T10:00:05Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"…file…"}]},"uuid":"u2","timestamp":"2026-06-03T10:00:06Z"}
+{"type":"assistant","message":{"id":"a1","role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"run tests"}}]},"uuid":"x5","timestamp":"2026-06-03T10:00:07Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"boom"}]},"uuid":"u3","timestamp":"2026-06-03T10:00:08Z"}
+{"type":"assistant","message":{"id":"a2","role":"assistant","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":1200,"cache_read_input_tokens":24000,"cache_creation_input_tokens":800,"output_tokens":540}},"uuid":"x6","timestamp":"2026-06-03T10:00:09Z"}
+{"type":"assistant","isSidechain":true,"message":{"id":"a3","role":"assistant","content":[{"type":"text","text":"sidechain noise"}]},"uuid":"x7","timestamp":"2026-06-03T10:00:10Z"}
+{"type":"last-prompt","leafUuid":"x6","sessionId":"rs-1"}

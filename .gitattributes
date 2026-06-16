@@ -1,0 +1,33 @@
+# Normalize line endings: stored as LF in the repo, checked out native (CRLF on Windows).
+* text=auto
+
+# ── Source / text ────────────────────────────────────────────────────────────
+*.cs            text diff=csharp
+*.csproj        text
+*.slnx          text
+*.sln           text eol=crlf
+*.vsct          text
+*.vsixmanifest  text
+*.imagemanifest text
+*.json          text
+*.js            text
+*.css           text
+*.html          text
+*.md            text
+*.xml           text
+*.config        text
+*.ps1           text
+*.gitignore     text
+*.gitattributes text
+
+# ── Binary assets (never normalize, never diff as text) ──────────────────────
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.vsix  binary
+*.dll   binary
+*.exe   binary
+*.pfx   binary
+*.snk   binary
