@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="CodeAstrogator.csproj">
+    <Deploy />
+  </Project>
+  <Project Path="CodeAstrogator.Tests\CodeAstrogator.Tests.csproj" />
+</Solution>

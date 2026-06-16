@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ImageManifest xmlns="http://schemas.microsoft.com/VisualStudio/ImageManifestSchema/2014">
+  <Symbols>
+    <Guid Name="CodeAstrogatorIcons" Value="{854bf90d-a9a9-4ae4-b6ce-8546aaae07c7}" />
+    <ID Name="AstrogatorLogo" Value="1" />
+  </Symbols>
+  <Images>
+    <Image Guid="$(CodeAstrogatorIcons)" ID="$(AstrogatorLogo)">
+      <Source Uri="/CodeAstrogator;component/Resources/icon-16.png"><Size Value="16" /></Source>
+      <Source Uri="/CodeAstrogator;component/Resources/icon-20.png"><Size Value="20" /></Source>
+      <Source Uri="/CodeAstrogator;component/Resources/icon-24.png"><Size Value="24" /></Source>
+      <Source Uri="/CodeAstrogator;component/Resources/icon-32.png"><Size Value="32" /></Source>
+    </Image>
+  </Images>
+</ImageManifest>

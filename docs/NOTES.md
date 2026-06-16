@@ -1,0 +1,863 @@
+# Implementation notes (deviations / additions vs. the plan)
+
+Status: 2026-06-16 — v1 + numerous extensions. Spec = `docs/claude-vs-2026-plan.md`
+(unchanged, Parts A/B); this document records all deviations and the current state.
+The **chronological feature/version history lives in `CHANGELOG.md`** — here you only find the
+current reference/architecture knowledge (protocols, design decisions, code map, roadmap).
+Superseded/removed features are no longer kept around "for traceability" (that is in Git).
+
+**Versioning:** Version in `source.extension.vsixmanifest` (`<Identity Version>`). The convention
+is in **`CLAUDE.md`** (section "Versioning"): +0.0.1/prompt, +0.1.0/larger change,
+Major only on request.
+
+**Verification status (in VS 2026):**
+- ✓ 2026-06-03 features verified (Remote Control E2E incl. Stop fix, Ctrl+V
+  file/image, dynamic slash menu + /help, Ctx meter + /compact).
+- ✓ **Permission hook Phase 1 verified in VS (2026-06-04):** "Ask" → Edit/Write/Bash trigger the
+  permission card, Approve writes, Reject lets Claude re-plan; **one** card per tool call
+  (permission card replaces the tool card), transition running → Diff → **✓ Applied / ✗ Failed /
+  ✕ Rejected**, collapsible with chevron on the left + line numbers; read-only commands don't prompt;
+  decided card survives reload.
+- ⏳ **Still to be verified (2026-06-04, only build/mock checked):**
+  1. **Settings via the new window** (WritableSettingsStore): gear → "Advanced options…"
+     → window opens, all options editable (Model/Effort have moved into the popover),
+     theme-consistent (Dark/Light: text + field
+     backgrounds follow); "Reset to defaults" loads defaults into the form; **Save** applies +
+     persists (persistent across VS restart), **Cancel/X** discards; Theme/Verbosity take effect
+     live. On store error: ⚠ system note in the chat +
+     `%LocalAppData%\CodeAstrogator\settings-error.log`.
+  2. Active-file chip: name+`:lines`, truncation on long names, click = session toggle
+     (struck through), disappears when the option is off.
+  3. **Persistent CLI mode** (Settings → Advanced → "Use a persistent CLI session"): turns
+     run, follow-up turns noticeably faster (no spawn); **Stop** aborts in-place (process
+     survives); `session.new`/`session.load`/model switch restart the process cleanly; toggle
+     off/on takes effect (idle immediately, otherwise on reopen). The protocol was verified
+     empirically, but the C# threading/lifecycle only via build/unit test. (The permission hook
+     ran in VS — the persistent mode as its carrier is thus indirectly partly tested, but not
+     specifically.)
+
+**Defender false positive (2026-06-04, harmless):** Defender reported
+`Backdoor:ASP/Dirtelti.G!MTB` on a **CLI session log file**
+(`~/.claude/projects/<munged>/<id>.jsonl`) — a pure conversation transcript, **not**
+code/no VSIX. The heuristic (`!MTB`) triggered on Remote-Control terms + Base64
+signatures in the log. Recommendation: letting the file be removed is fine; on repetition,
+add a Defender exception for `%USERPROFILE%\.claude\projects`. The VSIX itself was not
+flagged.
+
+## Getting back in (Build / Test / Install)
+```powershell
+# Build (ONLY VS-MSBuild — dotnet build can't handle the VSIX targets):
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
+  CodeAstrogator.slnx /t:Restore,Build /p:Configuration=Release /m /v:m
+
+# Tests (78 green as of the status above — pick the path matching the build configuration!):
+& "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe" `
+  CodeAstrogator.Tests\bin\Release\net472\CodeAstrogator.Tests.dll
+
+# Install: close VS, double-click bin\Release\net472\CodeAstrogator.vsix
+# (overinstalls the old version). Debugging: F5 → Experimental Instance.
+# Test the UI in isolation: open WebUI\index.html in the browser (mock adapter).
+# JS syntax check after each change: node --check WebUI\app.js (and WebUI\qr.js)
+```
+Checked against **Claude Code CLI 2.1.161** (re-test flags/endpoints on CLI update).
+
+## Structure / code map
+- By request, **everything in one project** (`CodeAstrogator.csproj`) instead of the four
+  projects named in the plan. Tests separately in `CodeAstrogator.Tests` (xUnit, net472, NDJSON fixtures).
+- `Core/` (UI-free, testable):
+  `NdjsonParser` (stream-json → domain events), `ClaudeEvents` (event types),
+  `ClaudeCliProcessHost` + `IClaudeProcessHost` (one `claude -p` process per turn, prompt via stdin),
+  `ClaudePersistentProcessHost` (opt-in: one long-lived bidirectional stream-json process, see "Persistent CLI mode"),
+  `ClaudeSessionService` (turn orchestration, --resume, retry, Ultracode injection),
+  `ClaudeExecutableLocator` (CLI discovery + auth probe), `ClaudeUsageClient` (limits/plan),
+  `WorkspaceFileLister` (@-mention file list), `IPermissionBridge` + `McpPermissionBridge`
+  (in-process MCP server for `--permission-prompt-tool`, Phase 1, see "Permission hook"),
+  `RemoteControlHost` (+`RemoteControlOutputParser`, `claude remote-control` server),
+  `CliSessionReader` (CLI session discovery + transcript import, see "Remote Control").
+- `Bridge/WebViewBridge.cs` — complete §3 message contract host-side, thread marshaling.
+- `Services/` — `ThemeService` (VS colors → CSS vars), `SessionHistoryStore`
+  (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file).
+- `ToolWindows/` — `ClaudeChatWindow(Control)` (WebView2, virtual host `codeastrogator.local`).
+- `Options/AstrogatorOptions.cs` — in-memory snapshot of the Unified Settings (CLI path, model,
+  Effort, Theme, Verbosity, Restore last session, AutoAddActiveFile, IncludeSelectedLines,
+  UsePersistentCli);
+  definitions in `CodeAstrogatorExtension.cs` (see "Unified Settings").
+- `WebUI/` — index.html / app.css / app.js / qr.js (dependency-free; mock adapter when the
+  host is missing; qr.js = own QR encoder for the remote link).
+
+## Notice/announcement + update banner (2026-06-10, generalized + remote-gated + update check 2026-06-16)
+- **What:** Generic notice bar **below the header** (`#notice-banner` in `index.html`,
+  `.notice-banner` in `app.css`): info icon + title + Markdown content + ✕ button. **Content and
+  on/off come from a file delivered via GitHub raw** — no longer hardcoded.
+- **notice.json (repo root, delivered via GitHub raw) — exactly 5 values:**
+  - `enabled` (bool) — master switch.
+  - `from` (ISO date+time or empty) — from when to show.
+  - `to` (ISO date+time or empty) — until when to show.
+  - `title` (**plain text**, rendered bold).
+  - `content` (**Markdown** — links etc. via `renderMarkdown`).
+  **Editing this file + pushing to `master`** shows/changes/hides the banner in all
+  installed extensions — **without a VSIX release**. URL hardcoded as `NOTICE_SOURCE_URL` in `app.js`
+  (`raw.githubusercontent.com/finex7070/CodeAstrogator/master/notice.json`; raw sends
+  `Access-Control-Allow-Origin: *`, CORS fetch ok). There is **no** bundled notice.json anymore.
+- **Update banner (parallel, 2026-06-16):** Second, independent banner (`#update-banner`, class
+  `notice-banner update-banner`) **directly below** the announcement banner — **both visible at the
+  same time**. Source: **GitHub Releases API** (`UPDATE_SOURCE_URL` =
+  `api.github.com/repos/finex7070/CodeAstrogator/releases/latest`; CORS-capable, the WebView sets its own
+  user agent, 3-h throttling keeps us under the 60/h limit). `/releases/latest` = the newest
+  **non-draft/non-prerelease**; we use `tag_name` (= version, leading "v" is stripped)
+  and `html_url` (release page). `app.js` compares `tag_name` against the **installed** version
+  (`appVersion` from `session.init`) via `isNewerVersion` (numeric, dot-separated); if remote is **truly
+  newer** → banner "Update available — Version X.Y.Z … [View release ↗]" (link → system browser).
+  The host reads the installed version from the deployed `extension.vsixmanifest` (`Identity/@Version`,
+  `GetInstalledVersion()`, cached). **Releases:** upload the build + tag = version (e.g. `0.4.0` or
+  `v0.4.0`) → as soon as the version is > the installed one, the banner appears.
+- **Repo configurable (build time):** The GitHub `owner/repo` (+ `noticeBranch`) is in
+  **`WebUI/config.js`** (`window.CPFC_CONFIG`), which is loaded in `index.html` **before** `app.js`. `app.js`
+  builds `NOTICE_SOURCE_URL`/`UPDATE_SOURCE_URL` from it (fallback = `finex7070/CodeAstrogator`/`master`,
+  if config.js is missing, e.g. browser isolation test). **Only changeable before the build** (it is bundled
+  into the VSIX; no runtime/settings override) → change, rebuild, reinstall.
+- **Working phrases in config.js:** `CPFC_CONFIG.workingPhrases` (the "Space Astrogator" one-liners next to the
+  rocket). `app.js` filters out empty/non-string entries and otherwise uses the fallback `["Working…"]`
+  (if config.js is missing/empty). Editable like the rest of the config: before the build.
+- **Opt-in / consent (privacy) — shared for both banners:** Both fetches are network calls →
+  **gated**. Persisted in `AstrogatorOptions.NoticeFetchEnabled`/`NoticeFetchDecided` **and**
+  `UpdateCheckEnabled`/`UpdateCheckDecided`. As long as **one** is not yet decided, `app.js` shows
+  **one** in-window consent popup (`.modal-backdrop`/`.modal`) when the window opens, with **two checkboxes**
+  (Announcements + Updates) + "Save". Answer → **`consent.set {noticeEnabled, updateEnabled}`** (web→host)
+  → sets both enabled + both decided=true. Also changeable in the **settings window** (two checkboxes under
+  "Announcements & updates"); Save sets decided=true and pushes **`banner.settings`** (host→web, via
+  `OnOptionsChanged`/`SendBannerSettings`) → banners are loaded/hidden live.
+- **Load logic (`app.js`):** `applySessionInit` → `evaluateBanners({notice*, update*, appVersion})` (once
+  per window load, flag `bannersEvaluated`): one not decided → consent popup; otherwise, depending on opt-in,
+  `loadNotice()` and/or `loadUpdate()`; **disabled → no fetch at all, no display at all.**
+- **Fetch policy + cache (shared, `fetchThrottledCached`):** Cache in **`localStorage`** (persisted via
+  a fixed WebView2 UserDataFolder): `cpfc.notice.*` resp. `cpfc.update.*` (`.cache` = last success, `.lastFetch`
+  = ms timestamp of the last **attempt**). Fetch only if **≥3 h** (`MIN_INTERVAL`) since the last attempt
+  (timestamp set **before** the attempt → failures throttled too). Success → cache + render. **Failure
+  → render from cache; no cache → nothing.** Retry on the next open (3-h throttled).
+- **Behavior:** Banners are `hidden` by default in the HTML. ✕ (`#notice-close`/`#update-close`) sets
+  `hidden` — **only for the session, no persistence**; re-evaluated on the next open.
+- **External link:** `ClaudeChatWindowControl` now registers `core.NewWindowRequested`
+  (`OnNewWindowRequested`) → `target="_blank"` links (banner **and** rendered Markdown links) open
+  in the **system browser** (`Process.Start`, `UseShellExecute=true`; http/https only) instead of in a
+  bare WebView2 popup.
+
+## Open items / Roadmap (from plan §A8 + findings)
+1. **MCP permission bridge + inline diff review** — **Phase 1 implemented** (standard chat card,
+   allow/deny), still to be verified in real VS. **Phase 2/3 open** (extended editor inline
+   diff per hunk, pulls in #3 `updatedInput`). Details see section "Permission hook &
+   inline diff review". `Core/McpPermissionBridge` is live; `IPermissionBridge` is no longer a stub.
+2. ~~Persistent bidirectional CLI mode~~ — **implemented (opt-in, default off)**, see
+   section "Persistent CLI mode". Still to be verified in real VS.
+3. `updatedInput` (edit the diff before approve) — **redeemed with #1 (extended mode)**.
+   Remaining open: multi-tab, context injection of the active editor.
+4. Remote Control expansion (optional): worktree spawn mode (`--spawn worktree`),
+   show remote sessions in the history already **during** the run,
+   `CONTEXT_MAX_TOKENS` model-dependent instead of fixed 200k.
+
+Done (2026-06-03): `session.rename` + limits `resets_at` tooltips; theme fix
+(inline vars), copy context menu, Ctrl+V file/image paste, dynamic slash menu +
+host-side `/help`, **Remote Control** (button → QR/link → Stop → session import),
+**Ctx meter** (context instead of token sum, /compact click, near-limit colors,
+compact_boundary evaluation) — details in the respective sections below.
+
+## Contract additions (Part B §3)
+- **`attach.added` (host → web)** — not defined in the plan, but necessary: on
+  `attach.files`/`attach.context`/`attach.browse` the host opens a picker and returns the result as
+  `{ type: "attach.added", attachments: [{ name, path }] }`; the UI renders chips.
+- `prompt.send.attachments` carries `{ id, name, path? }`; the host appends `@<path>` references
+  to the prompt (the CLI reads the files itself). **Paths with spaces are quoted**
+  (`Core/CliReferenceFormatter.FormatFileReference`): otherwise the CLI's `@` parser breaks at the
+  first space → the file is silently discarded. Affects mainly **pasted
+  screenshots** (which land under `%LocalAppData%\…\pasted\`, i.e. in the user profile; a space in
+  the Windows username like "Jan Huels" dragged the path along). Quoted: `@"C:\a b\f.png"`;
+  the `#L` line suffix (active file) sits **outside** the quotes: `@"…\f.cs"#L10-20`.
+  Verified against the CLI (quoted paths are expanded, unquoted ones with a space are not).
+- **`system.note` (host → web)** `{ id, text }` — dimmed one-liners in the transcript
+  (session start, the turn footer source is `turn.result`, "Turn stopped", "Context compacted",
+  "Permission denied by user"). Stored as role `system` in the history. (Auto-approved edits are
+  no longer a system note since 2026-06-05, but a green permission card — see "Permission hook".)
+- **`thinking.start/delta/end` (host → web)** `{ id, text?, estimatedTokens? }` —
+  Extended Thinking. The UI renders a transient "✻ Thinking…" line (details see table
+  "Transcript display"); cards only if real thinking texts arrive.
+- **`accent.set` (web → host)** `{ color }` — custom brand color (CSS hex `#rgb`/`#rrggbb`, or ""
+  = default). The host validates (`NormalizeHexColor`), stores it in `AstrogatorOptions.AccentColor` +
+  `SaveOptions`. `session.init` additionally carries **`accent`**; the UI applies it via `applyAccent`
+  (`:root` inline overrides). From the gear popover (swatches + custom picker).
+- **`verbosity.set` (web → host)** `{ level: "compact"|"normal"|"detailed" }` +
+  `session.init.verbosity` — Compact hides system notes & thinking, Detailed expands
+  thinking by default. Persisted in the Unified Settings.
+- **`files.listRequest` (web → host) / `files.list` (host → web)** `{ files: [{path, isDir}] }`
+  — workspace file list for the `@`-mention autocomplete (BFS, bin/obj/.git/… excluded,
+  max. 2000 entries, 30 s cache host-side).
+- **`options.open` (web → host)** `{}` — "Advanced options…" entry at the bottom of the
+  gear popover; the host opens Tools → Options → Code Astrogator → General
+  (`Package.ShowOptionPage`). The mock shows a system note instead.
+- **`session.rename` (web → host)** `{ sessionId, title }` — the edit icon to the right of the
+  header title (visible on header hover/focus) opens a rename modal (Enter = Save,
+  Esc = Cancel). The UI sets the title optimistically; the host trims, caps at 120
+  characters and persists via `SessionHistoryStore.Rename` (recency stays untouched).
+  No echo needed — `session.list`/`session.init` deliver the title anyway.
+- **Limits with reset times:** `limits` (in `session.init`/`turn.result`) and
+  `usage.update` additionally carry `sessionResetsAt`/`weeklyResetsAt` (ISO-8601 from
+  the usage endpoint's `resets_at`, null if unknown). The UI shows them as native
+  tooltips on the S/W meters ("Session usage: 12% · resets 14:30"; today = time of day,
+  tomorrow = "tomorrow", otherwise weekday+date).
+- **Further additions from 2026-06-03** (details in dedicated sections below):
+  `slash.commands` (host→web), `clipboard.paste` (web→host),
+  `remote.start`/`remote.stop` (web→host) + `remote.state` (host→web),
+  `contextTokens` in `session.init`/`turn.result`/`usage.update`.
+
+## `+` menu & @-mentions (2026-06-03)
+- *Add file…* → file picker (`attach.files` → `attach.added` chips).
+- *Add context…* → inserts `@` at the caret; `@` autocomplete opens (files + folders,
+  filter while typing, folder selection drills further). Typing `@` directly triggers it too.
+- *Browse the web* → inserts `@browser:` at the caret (no autocomplete for it).
+
+## Settings (WritableSettingsStore + own settings window, 2026-06-04 — CURRENT)
+- **Why the switch:** The Unified-Settings **in-proc API does not work in VS 2026** —
+  `GetServiceAsync<VisualStudioExtensibility>()` permanently throws `ServiceUnavailableException`
+  ("service unavailable"), even after 30 s of retries. The in-proc Extensibility service host
+  is never started despite a correct VSIX (`.vsextension/extension.json`, `ExtensionType=VSSDK+…`);
+  the 17.14 SDK is the latest version (no 18.x). Hence the entire
+  Extensibility hybrid layer was **removed** (Extension class + `SettingDefinitions` deleted,
+  `VssdkCompatibleExtension` + Extensibility packages from the csproj, `ExtensionType` from the
+  manifest → back to **pure VSSDK**; the MSB4011/CEE0027 warnings are gone with it).
+- **Storage:** `Services/AstrogatorSettingsStore` wraps the classic **`WritableSettingsStore`**
+  (`ShellSettingsManager` → `SettingsScope.UserSettings`, collection `CodeAstrogator`).
+  Always available in-proc, synchronous, no preview API. The package reads at load into the
+  `AstrogatorOptions` snapshot (`GetOptions()`), writes via `SaveOptions()`/`UpdateOptions()`
+  and still fires `OptionsChanged` (Theme/Verbosity take effect live).
+- **Settings UI:** `ToolWindows/AstrogatorSettingsWindow` (hosted VS `DialogWindow`, WPF in
+  code, VS-theme-aware). Opened via the gear popover → "Advanced options…" (`options.open`
+  → `Package.OpenOptions()` → `ShowModal()`). Options editable (TextBox/Combo/Checkbox;
+  Model/Effort have been popover-controlled since 2026-06-05 and are no longer here,
+  Browse button for the CLI path), **"Reset to defaults"** (= `new AstrogatorOptions()`, only loads into
+  the form, persists only on Save). The `IncludeSelectedLines` checkbox is greyed out when
+  `AutoAddActiveFile` is off.
+- **Buttons & persistence semantics (changed 2026-06-04):** Bottom left **"Reset to defaults"**,
+  bottom right **"Cancel"** + **"Save"**. **Save** (`IsDefault`, Enter) → `ApplyAndPersist`
+  (`UpdateOptions` → store write + OptionsChanged) + Close; **Cancel** (`IsCancel`, Esc) and the
+  window X → **discard** (no writing). Previously every close persisted
+  (`OnClosed` removed) — a deliberate behavior change on request (explicit Save/Cancel).
+- **Theming (2026-06-04, 2nd iteration):** Every input control gets the **VS-themed
+  style** via `SetResourceReference(StyleProperty, VsResourceKeys.…StyleKey)`
+  (`TextBoxStyleKey`/`ComboBoxStyleKey`/`CheckBoxStyleKey`/`ButtonStyleKey`). The window `Background`/
+  `Foreground` (VsBrushes.Window/WindowText) remains for the surface + labels.
+  - **Why not just brushes:** The first attempt set only `Background`/`Foreground`/
+    `BorderBrush` via `CommonControlsColors` brush keys. That works for `TextBox` (the template uses
+    `TemplateBinding Background`), but **not** for `ComboBox`: its default WPF template has
+    its own toggle-button chrome → dropdowns were light grey with unreadable text in Dark mode.
+    The `VsResourceKeys` styles replace the complete template (incl. dropdown popup, hover,
+    glyphs) theme-correctly for Dark & Light. Local values (MinWidth/Padding) are preserved.
+- **Gear write paths** (`theme.setMode`/`verbosity.set`) set the snapshot and call
+  `SaveOptions()` (instead of the former `PersistSetting`).
+- On store errors: `RecordSettingsError` → `%LocalAppData%\CodeAstrogator\settings-error.log`
+  + the bridge shows a ⚠ system note on `ready`; defaults still apply.
+
+## Startup behavior & defaults
+- **Restore last session** (Settings → Code Astrogator, default on): When the
+  tool window opens, the workspace's most recently updated session is loaded
+  (`session.init` first, then `transcript.load` — the other way round session.init wipes the
+  just-rendered transcript again; this ordering bug previously lived in session.load).
+- **Model·Mode defaults are persistent (2026-06-05):** Model/Effort/Ultracode/Permission are
+  set in the popover and stored in `AstrogatorOptions` (default effort = high, Permission = ask,
+  Model = CLI default, Ultracode = off). New chats and VS restarts start with the last
+  chosen values. No longer in the settings window.
+
+## Session resume robustness
+- `--resume` adopts the `session_id` **only when `num_turns > 0`** — local turns like
+  `/help` report an ID without a persisted conversation ("No conversation found" bug).
+- If a `--resume` still fails with "No conversation found", the session ID is
+  discarded and the turn is **automatically restarted fresh once**.
+
+## Transcript display (decisions from 2026-06-03)
+| Event | Display |
+|---|---|
+| Slash/result-only turns (`result.result` without stream) | full assistant block (fallback) |
+| Session start, turn footer (time·cost·tokens), Stop, Compact, Auto-Approve, Deny | system line |
+| Thinking | transient "✻ Thinking…" line (without token counter; the Print CLI redacts the text — empty `thinking_delta`s); disappears on thinking.end. Once text arrives per item (future CLI), upgrade to a collapsible card (Detailed: open) |
+| Task/Agent tool | tool card with accent edge + description |
+| TodoWrite | checklist card (☐/◐/☑, open, collapsible) |
+| ExitPlanMode | plan card (Markdown, accent border) |
+| Long tool outputs (>1200 chars) | "Show more" collapse in the card (parser limit 10,000 chars) |
+| Tool input streaming, stderr warnings | deliberately not shown |
+
+## CLI integration (Part A §A3)
+- The prompt is passed to `claude -p` via **stdin** (not argv) — robust against
+  multiline prompts and the npm `claude.cmd` shim.
+- **Effort:** 5 levels instead of the 3 from §5.4 — the CLI (checked against 2.1.161) knows
+  `--effort low|medium|high|xhigh|max`; passed through per turn
+  (default **high**, configurable in Tools → Options).
+  "ultracode" is deliberately **not** a level (prompt keyword for multi-agent, not an effort level).
+- **Session/weekly limits:** stream-json delivers no limit data. The host therefore calls
+  the **`/usage` slash command headless** (`claude -p /usage --output-format json`,
+  `ClaudeUsageClient.FetchAsync(exe, cwd, ct)`): runs **locally, no API turn, no cost**
+  (`num_turns: 0`), works with any CLI auth and replaces the former scraping of the
+  OAuth token + `GET api.anthropic.com/api/oauth/usage`. stdin is closed immediately (the
+  command takes no prompt → no 3-s "no stdin" wait). The report text is parsed:
+  `Current session: N%` → S meter, `Current week (all models): N%` → W meter (the per-model
+  lines like "(Sonnet only)" are ignored); `resets <Mon> <Day>, <h>pm` → reset tooltip
+  (as local wall-clock time, year from "now" incl. year-boundary rollover). Fetched on `ready`
+  and after each turn end; errors (API-key mode without limits, offline, 30 s timeout) → meters
+  stay put. Plan badge still from `~/.claude.json` → `oauthAccount.organizationType`
+  (claude_team → "Team Plan" …). Note: the report wording is undocumented — on a
+  CLI update re-test the parser (regex in `ClaudeUsageClient.ParseUsageText`).
+
+## Persistent CLI mode (Roadmap #2, 2026-06-04 — opt-in, default off)
+- **What:** Instead of one process per turn, a **long-lived** `claude -p --input-format stream-json
+  --output-format stream-json --verbose --include-partial-messages [--resume] [--model] [--effort]
+  [--permission-mode]`. Advantage: no spawn per turn (latency) + **in-place interrupt**.
+- **Activation:** Option `UsePersistentCli` (bool, default **off**) in the settings ("Advanced →
+  Use a persistent CLI session"). The proven per-turn host (`ClaudeCliProcessHost`) stays
+  the default. The toggle takes effect live when idle (bridge `ApplyProcessHostOption`), otherwise on the next
+  tool-window open. Both implement `IClaudeProcessHost` → UI/session service unchanged.
+- **Implementation:** `Core/ClaudePersistentProcessHost` (`IClaudeProcessHost, IDisposable`):
+  - **Turn:** writes `{"type":"user","message":{"role":"user","content":[{"type":"text",
+    "text":…}]}}` (newline-terminated) to stdin, reads up to the `result` line → `ClaudeTurnExit`,
+    the process keeps living. stdin = UTF-8 `StreamWriter` on `BaseStream` (net472 has **no**
+    `ProcessStartInfo.StandardInputEncoding`).
+  - **Transparent restart:** `IsCompatible` compares a `FlagSig` (Model/Effort/Permission/
+    cwd/exe/extraArgs/env) **and** the session: the host tracks the live `session_id` from the stream
+    (`HandleLine`); reuse only if `request.SessionId == _liveSessionId` (resp. `== _startResumeId`).
+    `session.new` (SessionId→null) and `session.load`/model switch ⇒ restart (fresh resp.
+    `--resume <id>`). This keeps the session service's "No conversation found" retry intact
+    (the process dies with stderr → ExitCode≠0 → service retries with SessionId=null → fresh).
+  - **Stop = interrupt:** ct-cancel → `{"type":"control_request","request_id":…,"request":
+    {"subtype":"interrupt"}}`. The CLI answers `control_response success` and ends the turn
+    with `result subtype=error_during_execution` (process survives). **Kill fallback** after 4 s if
+    no turn end. `WasCancelled=true` ⇒ the bridge shows no error (only "Turn stopped").
+- **Empirically verified (CLI 2.1.162, probe):** Startup without an initial prompt arg; user-message
+  format exactly as above; `system/init` arrives **per turn** (identical to the per-turn pattern — the bridge
+  sends no transcript-wiping `session.init` on `SessionInitEvent`, so no regression);
+  interrupt + "process keeps living afterwards" confirmed. Plain-string `content` is rejected
+  (array required). Slash/TUI commands stay headless (like per-turn).
+- **Tests:** `PersistentProcessHostTests` cover `BuildArguments` (resume explicit, not from
+  SessionId; Model/Effort/Permission; default-Permission omit). Process lifecycle/interrupt =
+  to be verified manually in VS.
+
+## Model·Mode popover (Part B §5.4)
+- **Persistence (2026-06-05):** All popover selections (Model/Effort/Ultracode/Permission) are
+  persisted host-side. The bridge handlers (`model.set`/`effort.set`/`ultracode.set`/
+  `permission.set`) write the value into `AstrogatorOptions` (`DefaultModel`/`DefaultEffortString`/
+  `UltracodeEnabled`/`PermissionModeString`) and call `SaveOptions()` (no `OptionsChanged` →
+  no loop). The `WebViewBridge` ctor seeds `_session.Settings` from these options. `session.new`
+  does **not** reset the settings (`ResetSession` only nulls the `SessionId`), so they apply
+  across new chats; after a VS restart they come from the store. The settings window no longer shows Model/Effort
+  (but carries the values through unchanged on Save, so they aren't overwritten).
+- The separate **plan-mode toggle was removed**: "Plan" in the permission radio is the same thing
+  (`--permission-mode plan`) — two controls for one state was confusing.
+  `mode.set` stays in the contract (the host still processes it), the UI no longer sends it.
+- **`mode.update` (host→web, contract addition, v0.3.6):** `{ permissionMode, planMode }`. The host
+  uses it to push a host-side mode change into the UI selector, **without** wiping the transcript
+  (unlike `session.init`). Used on plan approve: `ApplyPlanApprovedMode` switches to
+  `acceptEdits` and sends `mode.update`; the UI (`applyModeUpdate`) sets `state.permissionMode`/
+  `state.planMode` and calls `updateModelModeLabel()`.
+- **Ultracode toggle** (contract addition): web→host `ultracode.set { enabled }`;
+  `session.init` additionally carries `ultracode: bool`. With the toggle active, the host appends
+  the keyword `ultracode` to every prompt (opt-in for multi-agent workflows in the
+  CLI; no CLI flag, hence prompt injection). No duplication if the user types the
+  keyword themselves. The button label then shows e.g. `Opus 4.8 · Ask · Ultra`.
+
+## Active-file reference (2026-06-04)
+- **Feature:** The file in the active editor tab is automatically appended as an `@<path>` reference
+  to every prompt. Shown as a chip to the right of the slash button ("GameManager.cs").
+- **Two-level control (the option takes precedence):**
+  - **Option** `autoAddActiveFile` (boolean, default on) in the Unified Settings
+    (`SettingDefinitions` + `AstrogatorOptions.AutoAddActiveFile`) = **master switch**.
+    Off ⇒ feature fully off, **chip completely hidden**, no reference.
+  - **Session toggle** = click on the chip → web→host `activeFile.setEnabled { enabled }`.
+    Changes **only** `_activeFileSessionEnabled` in the bridge, **does NOT persist** to the
+    option; applies until the session changes (reset to on in
+    `HandleSessionNew`/`HandleSessionLoad`/remote import). Off = chip with
+    **strikethrough** (CSS `.active-file-chip.off`).
+  - Effective reference only when `ActiveFileEffective = Option && Session`.
+- **Tracking host-side:** `Services/ActiveDocumentTracker` via `IVsMonitorSelection`
+  on `SEID_DocumentFrame` (focusing a tool window — including our chat — does not change
+  this frame, so the last code file stays put). Path from
+  `VSFPROPID_pszMkDocument`. Bridge: `OnActiveDocumentChanged`/`OnOptionsChanged`/
+  `ready`/session change → host→web **`activeFile { path, name, optionEnabled, enabled }`**
+  (`optionEnabled` controls visibility, `enabled` = session toggle; name=null ⇒ chip off).
+- **Selected lines (2026-06-04):** If text is selected in the active editor, the
+  reference appends the line range: `@<path>#L<top>` resp. `#L<top>-<bottom>` — verified
+  empirically against CLI 2.1.161 (the CLI reads exactly those lines). Own option
+  `includeSelectedLines` (boolean, default on; only effective when `autoAddActiveFile`
+  is on). The selection is read via **DTE** (`ActiveDocument.Selection` as
+  `EnvDTE.TextSelection`, `GetActiveSelection()` in the bridge) — only when the active
+  document == the tracked path; the bottom line at column 1 is reduced by 1
+  (the selection doesn't actually cover that line). `activeFile` additionally carries `lines`
+  (e.g. "42-58", null = none/off); the chip then shows `GameManager.cs:42-58`
+  (name + lines in separate spans: the name truncates with an ellipsis, the line span
+  never shrinks → lines stay visible even with long file names).
+  Live update: the UI sends `activeFile.refresh` (web→host) on **composer focus AND window focus**
+  (back into the chat tool window), the host re-reads option + current
+  selection (DTE has no usable selection-changed event; the editor selection
+  is preserved when focus moves into the WebView tool window). The window-focus
+  trigger covers the case "option changed in Tools→Options, then back into the chat".
+- **Unified Settings limitation:** A conditional grey-out/disable dependency
+  ("grey out IncludeSelectedLines when AutoAddActiveFile is off") is **not** possible
+  via the Extensibility settings API — the `Setting.*` types expose
+  no `VisibleWhen`/`enableWhen`, and patching the generated `settingsRegistration.json`
+  would be fragile (risk: breaks the whole settings registration).
+  Functionally it is correct anyway: with `AutoAddActiveFile=false` the chip is off,
+  no reference, lines irrelevant — the lines option then simply has no effect.
+  When the main option is turned off, the chip disappears (the subscription fires per the docs
+  also on external settings-UI changes; the window-focus refresh is the
+  additional safeguard against commit timing).
+- **Prompt attachment:** In `HandlePromptSend` the active file (if
+  `ActiveFileEffective` + not already present as an attachment, case-insensitive) incl.
+  `#L` line suffix is included in the same "Attached files:" block as manual attachments.
+  With remote active the chip is locked too (`setRemoteLocked`).
+- Mock: sends `GameManager.cs:42-58` (optionEnabled always on) and reflects the session toggle.
+
+## Message backgrounds & attachment display (2026-06-05)
+- **Color distinction:** `.msg-user .msg-body` (blue) vs. `.msg-assistant .msg-body` (orange),
+  each a subtle background + left 2px border. Vars `--msg-user-bg`/`--msg-user-border`/`-fg` +
+  `--msg-assistant-bg`/`--msg-assistant-border`/`-fg` in **both** palettes
+  (`:root[data-theme=dark|light]`). Deliberately NOT the brand accent (purple) — blue/orange separate the
+  roles clearly; orange is the former Claude clay color. `ThemeService` does not overwrite these vars
+  (Auto mode falls back to the palette defaults).
+- **Glyph in the card (2026-06-05):** `makeMsgRow` now places the role glyph (`›`/`✳`) **inside**
+  the bubble (`.msg-body` = flex container with `.gutter` + `.msg-content`), no longer as an
+  outer sibling. Glyph color role-specific: user = `--msg-user-fg` (blue), Claude `✳` =
+  `--msg-assistant-fg` (orange). `makeMsgRow` still returns `body` = the content element
+  (all append paths unchanged). System notes (empty glyph) keep their indentation.
+- **Attachment chips in the transcript:** `appendMsgAttachments(body, attachments)` renders one
+  `.att-chip` per file (file icon + name, `path` as tooltip). Used by `renderUserMessage` (live) and
+  `renderHistoricMessage` (role user). **Bug fixed:** the chips were previously built but never appended to
+  the body element.
+- **Live vs. host record:** Live takes `sendPrompt` `state.attachments` **plus** the active file
+  (from `state.activeFile`, if `optionEnabled && enabled`; name incl. `:lines`). Host-side
+  (`HandlePromptSend`) the user message is persisted with `attachments`=[{name,path}] (explicit + active
+  file with `#L` suffix in the path) and `text`=the **typed** text (without the "Attached files:" block);
+  to the CLI still goes the text **with** the `@<path>` block. `SessionHistoryStore`
+  serializes the whole message → `attachments` survives reload. The mock history shows two chips.
+
+## Remote Control (2026-06-03)
+- **Contract:** web→host `remote.start {}` / `remote.stop {}`; host→web
+  `remote.state { state: "starting"|"ready"|"stopped"|"error", url?, activeSessions, message? }`.
+- **Host:** `Core/RemoteControlHost` starts `claude remote-control` (the CLI's standalone
+  server mode, runs without a TTY). `RemoteControlOutputParser` scrapes the
+  stdout line by line (ANSI stripped): URL (`https://claude.ai/code?environment=…`)
+  and `Capacity: n/32` (= active remote sessions); TUI redraw repetitions are
+  deduplicated. Stop = `taskkill /T /F` (the npm shim spawns a node child). The bridge kills
+  the process also in `Dispose()`. `prompt.send` is ignored with remote active.
+- **Session takeover on stop:** `Core/CliSessionReader` maps the cwd to the
+  CLI project folder (`~\.claude\projects\<munged>`, non-alphanumeric → `-`,
+  drive-letter case varies → case-insensitive match), finds `*.jsonl` touched since
+  RC start and imports them into our message schema (user text,
+  assistant text blocks of the same message.id merged, tool_use cards with status from
+  tool_result; meta/sidechain/command lines skipped; sessions without a
+  user message = unused pre-created session → skipped). All imports land
+  via `SessionHistoryStore.Import` in the history, the last one is loaded
+  (`remote.state stopped` first — the UI unlocks before `session.init`/`transcript.load`).
+  **Pitfall (fixed):** `GetSolutionDirectory()` is UI-thread-only — the cwd is captured
+  before the background discovery, and `stopped` is always sent thanks to try/catch
+  (otherwise the UI hung in "Stopping…").
+- **UI:** Broadcast button to the left of the history button; active = panel above the
+  transcript (status, link, QR, Copy, "End remote session"). Locked then are the
+  composer (`canSend` + `input.disabled`), all composer controls (+, /,
+  Model·Mode, attachment chips via `.remote-locked`) and the header actions
+  Rename/History/New chat (`setRemoteLocked`); only the gear (Appearance)
+  stays usable. Statusbar state `remote` (accent pulse). The host re-announces
+  `remote.state` after `ready` (WebView reload during an active remote session).
+  QR code dependency-free via `WebUI/qr.js` (own encoder: byte mode, ECC M,
+  v1–10, mask 0; verified via a jsQR round-trip in Node). The mock simulates
+  start/connect/stop incl. an imported fake session.
+- **Limitation (deliberate):** Remote sessions run in the RC server, not in the
+  tool window — no live mirror. The takeover only happens on end.
+
+## Slash commands (2026-06-03)
+- **`slash.commands` (host → web)** `{ commands: ["clear", "compact", …] }` — the CLI's
+  `system/init` event carries a `slash_commands` array with the commands actually available
+  in headless mode (bare names, incl. skills). The parser
+  (`SessionInitEvent.SlashCommands`) → the bridge caches the list and sends it on the
+  init event as well as after `ready` (WebView reload). The UI replaces its static
+  fallback list with it (in-place mutation, menu + autocomplete share the array);
+  descriptions come from a UI map (`SLASH_DESCRIPTIONS`), unknown
+  commands appear without subtext.
+- **`/help` host-side:** The headless CLI rejects `/help` ("isn't available in this
+  environment") — the host instead answers with a synthetic help block
+  (like `/login`), incl. a hint about the terminal + `claude --resume <id>` for
+  interactive-only commands. `/help` is always appended to the dynamic menu list
+  on the UI side.
+- **Empirically clarified (CLI 2.1.161):** The persistent bidirectional mode too
+  (`--input-format stream-json`) is headless — TUI commands (`/help`,
+  `/remote-control`, `/config`) stay unavailable there. `claude remote-control`
+  exists as a standalone server mode (own sessions, no live mirror into the
+  tool window); integration deliberately deferred.
+
+## Drag-and-drop of files (2026-06-05)
+- **Goal:** Drag files/folders from Windows Explorer onto the chat panel → they get added as
+  attachment chips (the CLI reads them via `@<path>`).
+- **Why host-side:** HTML5 drag-drop delivers `File` objects **without** a file path
+  (Chromium/security). But the CLI contract needs the path. So, as with `clipboard.paste`,
+  via the host: `ClaudeChatWindowControl` sets **`_webView.AllowExternalDrop = false`** (otherwise
+  Chromium consumes the drop) + `AllowDrop=true`, and handles **`DragOver`** (copy effect
+  on `DataFormats.FileDrop`) + **`Drop`** → `e.Data.GetData(DataFormats.FileDrop)` = real
+  `string[]` paths → **`WebViewBridge.AddFileAttachments(paths)`**.
+  - **Bugfix 2026-06-16:** Previously attached to `PreviewDragOver`/`PreviewDrop` → drag-and-drop did
+    **nothing**. The WPF WebView2 control forwards OS drops (with `AllowExternalDrop=false`) as
+    **bubbling** routed events, **not** as tunneling `Preview*` → the handlers never fired.
+    Switched to `DragOver`/`Drop`.
+- **`AddFileAttachments` (public):** filters to existing files/dirs, builds `attach.added`
+  ({name,path}); shared with the `+` picker (`HandleAttachFiles`). With remote control active
+  it is locked (composer/attachments are locked anyway then). No UI contract needed — the existing
+  chip flow. (Drop anywhere on the panel; no separate overlay — the copy cursor + the appearing
+  chips are the feedback.)
+
+## Editor context menu → prompt (2026-06-16)
+- **Two commands in the code-editor right-click menu** (`.vsct`: own group `EditorCtxGroup` in
+  `IDM_VS_CTXT_CODEWIN`; buttons `cmdidAddFileToPrompt` 0x0101, `cmdidAddSelectionToPrompt` 0x0102 —
+  both `DynamicVisibility`+`DefaultInvisible`):
+  - **"Add file to Claude prompt"** → active file as an @-reference chip (`bridge.AddFileAttachments`).
+    `BeforeQueryStatus` shows it when `ActiveDocument != null`.
+  - **"Add selection to Claude prompt"** → the selected range as a code block (label `name:Lfrom-Lto`)
+    into the composer (`bridge.AddSelectionToPrompt` → host→web **`composer.append {text}`** →
+    `appendToComposer` appends, focuses, caret to the end). `BeforeQueryStatus` only on a non-empty
+    selection (`TextSelection.IsEmpty`).
+- **Handler** (`CodeAstrogatorPackage`): `OleMenuCommand` with `BeforeQueryStatus`; opens the
+  tool window via `ShowAndGetBridgeAsync` and fetches the bridge via
+  `ClaudeChatWindow.GetBridgeAsync()` → `ClaudeChatWindowControl.BridgeReady` (TCS, set as soon as the
+  bridge exists). **Race protection:** If acted upon on the first open, before the WebUI reports `ready`,
+  the bridge buffers the messages (`PostOrQueue`/`_queuedUiMessages`) and flushes them in
+  `FlushQueuedUiMessages()` on the `ready` handshake (also applies to `attach.added`).
+- With remote control active both are no-ops (composer/attachments locked).
+
+## Clipboard / context menu (2026-06-03)
+- **`clipboard.paste` (web → host)** `{}` — Ctrl+V in the composer: the `paste` handling
+  in app.js only intercepts file/image content (the paste event has `kind === "file"` items
+  resp. `files.length > 0`), `preventDefault` + `clipboard.paste`; plain text paste
+  stays native. The host (`WebViewBridge.HandleClipboardPaste`) reads the Windows
+  clipboard (WPF `System.Windows.Clipboard`): a file drop list → paths directly;
+  otherwise an image → PNG under `%LocalAppData%\CodeAstrogator\pasted\` and answers with
+  `attach.added` (the existing chip flow, the CLI reads the paths itself). The mock simulates
+  `pasted-image.png`.
+- **Copy context menu (UI-only, no contract):** Since `AreDefaultContextMenusEnabled=false`
+  (ClaudeChatWindowControl), app.js shows on right-click on an existing
+  text selection its own "Copy" popover at the mouse position (uses overlayLayer +
+  closeAllOverlays/Esc; copy via `navigator.clipboard.writeText`, fallback execCommand).
+
+## Theme application (Part B §8)
+- `applyTheme` (app.js) now **replaces** the inline `vars` on `:root`, instead of only
+  augmenting them: previously set keys are removed via `removeProperty` before the new ones
+  take effect (`state.appliedThemeVars` remembers the keys). Bugfix: switching from "Auto"
+  (the host sends VS-theme `vars` incl. `--bg`) to explicit Light/Dark (empty `vars`,
+  palette via `data-theme`) otherwise left the old background vars standing — only the
+  palette-only colors (`--comment`, `--accent` …) switched, the background did not.
+
+## Permission bridge (Part A §A5)
+- **Status: Phase 1 implemented** (real in-process MCP server `Core/McpPermissionBridge`,
+  standard chat card allow/deny). `IPermissionBridge` is no longer just a stub. The extended
+  editor inline diff mode (Phase 2/3) is still open. Details + spike findings + review fixes
+  see section "Permission hook & inline diff review". Still to be verified in real VS.
+
+## Auto-approve patterns (2026-06-05, v1.2.0)
+- **Settings:** `AstrogatorOptions.AutoApprovePatterns` — **a `List<string>` since v1.3.0** (one
+  glob pattern per entry, `*` = wildcard), persisted in the WritableSettingsStore as a **JSON array**
+  (`JsonConvert.SerializeObject`). **Backward compatible:** `AstrogatorSettingsStore.ParsePatterns` reads
+  at load both JSON (leading `[`) and the **old newline format** (split) — existing
+  settings survive the upgrade; malformed JSON falls back to the legacy parse. `Normalize`
+  (trim / drop blank lines / `Distinct` case-insensitive) runs on read **and** write.
+  Store + `Copy` (deep list copy) extended. **UI (v1.2.5):** In the settings window as an editable
+  **`DataGrid` list** (one column, theme-tinted via `VsBrushes` — Background/Foreground/Border/
+  RowBackground as well as own `ColumnHeaderStyle`/`CellStyle` for Dark&Light) with **"Add"/"Remove"**
+  buttons (section "Permissions"). `Load` splits the string at newlines into `PatternItem` rows,
+  `ApplyAndPersist` commits the open edit (`CommitEdit`), trims, drops blank lines and dedupes
+  (`Distinct`, case-insensitive) → again a `\n` string. "Remove" is disabled as long as the
+  selection is empty. (Until v1.2.4 the field was a multiline TextBox.)
+- **Match key / matching (reworked):** MCP tools (`mcp__…`) match on the **tool name**.
+  Shell commands are split via **`ShellCommandSplitter.ExtractCommands`** into their **real sub-commands**
+  (see below); the call is auto-approved only if **EVERY** sub-command is covered by a pattern
+  (`commands.All(sub => patterns.Any(p => MatchesGlob(sub,p)))`) — prevents an `&` chain from
+  slipping through just because one part matches. `MatchesGlob` = anchored, `*`→`.*`, case-insensitive.
+  Edit/Write → no pattern approval (diff card). `AutoApproveKey` remains only for the
+  `canApproveAlways` check (≠ null).
+- **`ShellCommandSplitter.ExtractCommands`** (quote- **and** here-string-aware `@'…'@`/`@"…"@`): splits
+  on newlines, `;`, `&&`, `||`, whitespace `&` **and pipeline stages `|`**; **discards
+  variable assignments** (`$x = …`, `VAR=…`, `AssignmentRx`) and bare variables (`$lorem`,
+  `BareVariableRx`). So `$lorem = @'…'@ ; $lorem | Out-File -FilePath "x"` correctly yields
+  `Out-File -FilePath "x"` instead of the assignment. **`Wildcardize`** replaces quote contents with `*`
+  (`Out-File -FilePath "*"`) → reusable patterns. (The old `Split` stays for tests, but is no longer
+  used in production.)
+- **Hook:** `HandlePermissionRequestedAsync` checks `IsAutoApprovedByPattern` at the very top → on a hit
+  **silently `allow`** (no card; null `updatedInput` → the MCP bridge echoes the input the CLI
+  demands). Runs on the bridge background thread; the `GetOptions()` read is uncritical there.
+- **"Always" button + popover (v1.2.2, UI reworked):** The card carries `canApproveAlways` +
+  `approveAlwaysSuggestions` (`AutoApproveSuggestions` = `ExtractCommands` + `Wildcardize`, dedupe).
+  A click on `.btn-always` opens a **popover** (`openApprovePopover`), which is now **as wide as the
+  card** (`openPopover` `matchWidthEl`/`hAnchorEl` = `.perm-card`) and shows the patterns as an **editable
+  list** (one row = one input + ✕, "+ Add pattern" — analogous to the settings window) instead of a
+  textarea. "Cancel" (the card stays open) / "Add & approve". Save → web→host
+  **`permission.approveAlways {requestId, patterns:[…]}`** → `HandleApproveAlways`: each pattern via
+  `AddAutoApprovePattern` (dedupe, `SaveOptions`) + `ResolvePending(allow)` + card "Approved" +
+  system note.
+- **Boundary:** Read-only commands don't prompt anyway (CLI classifier) — patterns only apply
+  to calls that would otherwise trigger the card.
+
+## "Auto-accept commands" toggle (2026-06-10)
+- **What:** A toggle in the Model·Mode popover **below** the permission selection. If it is on, in
+  the **`acceptEdits`** mode additionally **all** non-question tools prompted by the hook (Bash/PowerShell/
+  MCP/…) are **silently** auto-approved — edits the CLI accepts itself in `acceptEdits` anyway, the toggle
+  extends the same trust to commands. **AskUserQuestion stays interactive.** Effectively "bypass
+  without the question auto-decline trap" (true `bypass` would disable the hook → questions auto-declined).
+- **Gate:** `HandlePermissionRequestedAsync` (directly after the pattern check): `!isQuestion &&
+  GetOptions().AutoAcceptCommands && _session.LaunchedPermissionMode == "acceptEdits"` → silently `allow`.
+  Deliberately **`LaunchedPermissionMode`** (fixed at turn start), not the live setting — only `acceptEdits`
+  routes *commands* (not edits) through the hook, so a mid-turn switch can never accidentally silently approve an
+  edit prompt. No card (like pattern approve); the normal tool card of the
+  `ToolUseEvent` stays visible.
+- **Persistence/sync:** `AstrogatorOptions.AutoAcceptCommands` (default **false**), in the store + `Copy` +
+  settings-window snapshot (popover-managed, "carry over untouched") extended. web→host
+  **`autoAcceptCommands.set {enabled}`**, host→web in `session.init` (`autoAcceptCommands`). UI:
+  `state.autoAcceptCommands`, toggle row + hint; **dimmed** (`.toggle-row.disabled`) when the
+  chosen mode ≠ `acceptEdits` (it stays clickable — it is a sticky preference).
+
+## Permission hook & inline diff review (Roadmap #1+#3)
+> **Phase 0-A + Phase 1 IMPLEMENTED** (2026-06-04), still to be verified in real VS.
+> **Phase 2/3 (extended editor inline diff) still PLANNED.** Plan file:
+> `~/.claude/plans/keen-marinating-harbor.md`.
+
+**Spike 0-A — empirically confirmed against CLI 2.1.162 (important, some research assumptions were wrong):**
+- HTTP transport works; `GET /mcp` (SSE attempt) may be **405** (the CLI continues POST-only).
+- `initialize.protocolVersion = "2025-11-25"` (not 2024-11-05) → reflect back; set
+  `Mcp-Session-Id`; the `X-Auth` header comes with every request.
+- `tools/call.arguments = { tool_name, input, tool_use_id, _meta }` — the field is called **`input`**
+  (the research assumption "tool_input" was **wrong**).
+- **Show-stopper:** allow MUST return `{"behavior":"allow","updatedInput":<input>}` — a
+  **`null` updatedInput is treated as deny by the CLI** (all tool calls fail). Echo of the
+  original input (or an edited variant). deny = `{"behavior":"deny","message":…}`; envelope
+  `{content:[{type:"text",text:<json>}],isError:false}`.
+- Slow decision (10 s) tolerated; `timeout:600000` in the mcp config.
+- `TcpListener` chosen (no URL ACL needed); `HttpListener` avoided.
+
+**Two UX levels:**
+1. **Standard (like Claude in the chat):** interactive permission card in the chat (the card exists, §5.2),
+   whole-call allow/deny. = "off" state of the add-on.
+2. **Extended (toggleable):** only for file edits — **file list in the chat** (status
+   open/accepted/rejected), a click opens the file in the editor, there an **inline diff** (red/green
+   like VS Copilot) with **Accept/Reject per hunk**; partial acceptance via `updatedInput`. Toggle in the
+   **Appearance popover** (gear, with Dark/Light/Auto).
+
+**Mechanic reality (drives the design):** The MCP hook fires **per tool call and blocks** —
+edits come one after another, not as a batch; at any moment exactly **one** edit is "open". The diff
+is a **preview before the allow** — the CLI writes only on "Accept" (possibly with `updatedInput`).
+
+**Phases:**
+- **0-A — MCP protocol spike: ✅ done** (see spike block above).
+- **1 — MCP bridge + standard chat card: ✅ implemented** (2026-06-04):
+  - `Core/McpPermissionBridge : IPermissionBridge, IDisposable` — minimal HTTP/1.1 over
+    **`TcpListener`** on `127.0.0.1:0`, `X-Auth`, dispatch (initialize/notifications/tools-list/
+    tools-call) via purely testable builders (`BuildInitializeResult`/`BuildToolsListResult`/
+    `BuildToolResult`/`BuildMcpConfig`/`IsAuthorized`); mcp config in
+    `%LocalAppData%\CodeAstrogator\mcp-permission-<port>.json`; `Start()`/`Dispose()`.
+  - `ClaudeSessionService.PermissionBridge` → in `RunTurnAsync` when `IsAvailable` **and the mode ≠
+    bypass** `--mcp-config` + `--permission-prompt-tool mcp__vsbridge__permission_prompt` in
+    `ExtraArgs` (works in both hosts; in the persistent host part of the `FlagSig` → stable).
+    `--permission-mode` controls the firing (Ask=default → Edits/Bash prompt; acceptEdits → only
+    Bash/others; plan → idle; bypass → no flags). Makes "Ask" usable in headless `-p` for the first time.
+  - `WebViewBridge`: starts/disposes the bridge; `OnPermissionRequested` → requestId, build diff
+    (Edit: old/new_string; Write: file→content), post `permission.request`, status
+    `waiting-permission`, `ConcurrentDictionary<requestId, PendingPermission>`, await;
+    `permission.decision` handler (replaces the stub). UI (`app.js` card §5.2) **unchanged**.
+  - Tests: `PermissionBridgeTests` (RPC shaping, mcp config, auth, allow-echo, deny, dispatch).
+  - **Review fixes (adversarial workflow review, 3 confirmed findings fixed):**
+    (1) **HIGH** open permission on abnormal turn end → `OnTurnCompleted` now calls
+    `DenyAllPendingPermissions` (no orphaned card/TCS leak). (2) **MED** `ct.Register`
+    registrations → are disposed in `ResolvePending` (no accumulation on the long-lived `_cts`).
+    (3) **MED** net472: `NetworkStream.ReadAsync` does **not** honor the CancellationToken mid-read
+    → accepted `TcpClient`s are tracked and closed via `Close()` in `Dispose()`, so that
+    parked keep-alive reads/sockets don't leak.
+- **Card UX + read-only (2026-06-04, after VS verification):** After Approve/Reject the
+  **card collapses** (diff + buttons gone) and shows in the header (chevron **at the far left**) a status badge
+  + border/header tint; clicking the header re-expands the (read-only) diff. Status:
+  **Approved/Rejected** (decision) → after execution **Applied (green) / Failed (red)**, as soon as
+  the edit's `tool.result` arrives (`UpgradePermissionResult` correlates via the
+  `tool_use_id` = `requestId`; new host→web message **`permission.result {requestId, status}`**).
+  - **No double card (the permission card REPLACES the tool card):** The CLI sends the `tool_use`
+    **before** the permission prompt, so the tool card is shown first. On `permission.request`
+    the UI removes the tool card of the same `tool_use_id` (`querySelector('.tool-card[data-tool-id]')`
+    .remove()); host-side `RecordPermissionMessage` deletes the previously recorded `role:"tool"`
+    message of the same ID and creates the `permission` message. (Pre-suppression failed on the
+    event order and left the "running…" card hanging — hence this replacement approach.)
+    Auto-allowed read-only tools (without a permission card) keep their tool card. Applies live **and**
+    persisted (only the permission card stays in the history).
+  - **Persistence (fix):** The decided card is now written into the history as a `role:"permission"`
+    message (id=requestId, toolName, input, diff, status, ts) via `RecordPermissionMessage`, and on
+    reload rendered by the historic renderer (`renderHistoricMessage`) in the same
+    collapsed style with a status badge. Auto-denies (turn end/Stop/Cancel) are
+    **not** persisted (only explicit user decisions).
+  - The diff shows **old + new line numbers** (gutter, width adjusted to the largest number) —
+    **file-relative**: the host determines the real start line of `old_string` via `FileStartLine`
+    (Write = 1) → `diff.startLine`; `buildDiff` numbers from there.
+  - `app.js`/`app.css` (`permLabel`/`permStatusClass`/`setPermCardState`/`applyPermissionResult`/
+    `buildDiff`), `WebViewBridge` (`RecordPermissionMessage`/`UpgradePermissionResult`).
+  - **Read-only commands don't
+  prompt:** the CLI has a built-in classifier; only **mutating** Bash/PowerShell calls
+  (write/delete/install) go through the hook, reading ones (directory listing, `cat`, `git
+  status` …) are auto-allowed — matches Claude Code standard behavior, not a bug.
+- **Auto-approved edits = pre-decided card (2026-06-05):** In `acceptEdits`/`bypass` the
+  MCP hook does **not** fire for edits (the CLI accepts itself), so no `permission.request` arrives.
+  Previously: a normal tool card + system note "Auto-approved: …". Now the bridge itself sends, in the
+  `ToolUseEvent` auto-approve branch, a `permission.request` with **`autoApproved:true`**
+  (requestId = tool_use_id, diff via `BuildPermissionDiff`) and calls `RecordPermissionMessage(…,
+  "approved")`. The UI (`permissionRequest`) renders the card on `autoApproved` directly as
+  **decided/approved** (green, collapsed, **without** Approve/Reject buttons, no
+  `waiting-permission`); the `tool.result` upgrades via the existing `UpgradePermissionResult`
+  → `permission.result` to **Applied/Failed**. Applies live + persisted (role `permission`).
+  Only `IsEditTool` (Edit/Write/MultiEdit/NotebookEdit); read-only keeps the normal tool card.
+  The mock shows an auto-approved `Write` card in the demo turn.
+- **Parallel prompts (fix 2026-06-10):** Claude can call several tools at the same time
+  (parallel tool use) → several open cards (Permission + Permission, or Permission +
+  AskUserQuestion) at the same time. Bug: When **one** was answered, the other jumped to
+  "expired". Cause: (1) host-side, every decision/answer handler posted `PostStatus("working")`
+  as soon as the session was busy — even when other prompts were still open; (2) the UI tracked only
+  **one** open card (`state.pendingPermission`) and let exactly that one "expire" on the status change away from
+  `waiting-permission`. Fix: (1) **`PostStatusAfterDecision()`** stays
+  `waiting-permission` as long as `_pendingPermissions` is **not empty**, and only goes to `working` on the last
+  prompt; (2) the UI now tracks a **`state.pendingPermissions` (set)**; the
+  status-change expiry expires **all still-open** cards (true abandonment, e.g. turn end),
+  answered ones are long gone from the set by then. The set is cleared on `session.init`/`transcript.load`.
+  Affects `WebViewBridge.HandlePermissionDecision`/`HandleQuestionAnswer` + `app.js`.
+
+## AskUserQuestion (interactive follow-up questions) — solved 2026-06-05 (real in-turn card via the permission hook)
+- **Key finding (CLI 2.1.165, throwaway probes):** `AskUserQuestion` **routes through the
+  `--permission-prompt-tool` hook** and **blocks** there like Edit/Write — `tools/call.arguments`
+  carries `tool_name="AskUserQuestion"` + the full `input` (`questions`/`options`). So there **is**
+  after all a mid-turn back channel (the earlier assumption "no channel" was wrong; it applied only **without**
+  a configured hook — then the CLI auto-declines immediately: `-p` "The user did not answer the
+  questions", bidirectional `is_error:true` "Answer questions?"). Verified: `behavior:"deny"` +
+  `message:"<answer>"` → the CLI passes the `message` to the model as a **tool result**
+  (`is_error:true`, but Claude correctly continues, e.g. "You chose **Apple**"). `allow` on the other hand
+  lets the tool run → auto-decline; **deny+message is the way**.
+- **Solution (implemented):** Reuse of the **`McpPermissionBridge`**. `WebViewBridge.HandlePermissionRequestedAsync`
+  recognizes `ToolName=="AskUserQuestion"` and posts, instead of the diff card, a
+  **`question.request {requestId, questions}`** (PendingPermission tracking identical). The UI
+  (`buildQuestionCard`/`questionRequest`) replaces the previously shown tool card of the same id and
+  renders per question `header`+`question`+clickable **`.q-option`** buttons (label+description) **plus
+  a free-text field "Other"**. Single-select = radio, multiSelect = multiple + "Submit". A
+  single single-select question **without** typed free text → 1 click submits immediately. Selection →
+  **`question.answer {requestId, answers:[{header,question,selected[],custom}]}`** → host
+  `HandleQuestionAnswer` → `FormatQuestionAnswers` (text "The user answered:\n- <header>: …") →
+  `ResolvePending(deny, message)`. Persisted as role **`question`** (`questions`+`answers`),
+  `RecordQuestionMessage` replaces the redundant `tool` message; `renderHistoricMessage` renders the
+  card read-only with the marked answers.
+- **Tool-card replacement:** The CLI sends the `tool_use` **before** the hook → briefly a generic
+  tool card, which the `question.request` (as in the permission flow) removes via `data-tool-id`.
+- **CSS:** `.q-card`/`.q-option`/`.q-other-input`/`.q-actions` (+ `.answered` read-only style) in
+  `app.css` (replaces the old `.ask-*`). The mock posts `tool.use`+`question.request` in the demo turn.
+- **Modes:** works in **"Ask", "Auto-accept" AND "Plan"** — the hook is wired for all modes except
+  `bypass` (`ClaudeSessionService`, `PermissionMode != "bypass"`); AskUserQuestion is
+  not an edit, so it prompts even with acceptEdits, and in Plan empirically confirmed (CLI 2.1.165: the hook
+  fires, deny+message comes back). Only in "Bypass" there is no hook → auto-decline (accepted).
+- **Removed old:** the former `askCard`/`sendText` "new message" fallback incl. `.ask-*` CSS.
+- **Prompt timeout too short (fix 2026-06-16):** Questions/permission prompts timed out **well before** the
+  assumed 10 min. **Cause:** The CLI's **default MCP tool-call timeout** is short (≈ 1 min); the
+  `timeout` field in the HTTP `--mcp-config` is **not** applied to it. **Fix:** `ClaudeSessionService`
+  sets, when wiring up the bridge, the env vars **`MCP_TOOL_TIMEOUT`** (+ `MCP_TIMEOUT`) to
+  `Settings.McpToolTimeoutMs` (default = `McpPermissionBridge.ToolTimeoutMs` = 1 h) on the CLI process;
+  the same default is in the config `timeout` field. **Configurable in the settings window** ("Prompt timeout",
+  minutes): `AstrogatorOptions.PromptTimeoutMinutes` (default 60, clamped to `Min/MaxPromptTimeoutMinutes`
+  = 1–240). Flow: SettingsWindow → `AstrogatorOptions` (persisted via `SetInt32`) → `WebViewBridge`
+  (`PromptTimeoutMs`, in the ctor + `OnOptionsChanged`) → `SessionSettings.McpToolTimeoutMs` → env var per
+  turn. **Per-turn host:** takes effect from the next turn. **Persistent host:** only after a process restart
+  (new chat/VS restart), since the env is fixed at process start. **Re-test on CLI update**
+  (env var names/default are version-dependent).
+- **Timeout/abort cleanup (fix 2026-06-16):** If the CLI ends an open prompt itself (MCP tool
+  timeout) **or** the turn ends while a card is still
+  open, the card was previously still clickable **and** the "Working" indicator (rocket) did not come back
+  (status hung on `waiting-permission`). Now: (1) `OnSessionEvent` `ToolResultEvent` checks whether the
+  `tool_use_id` is still in `_pendingPermissions` (= the CLI resolved the prompt itself) →
+  `ResolvePending(deny)` + host→web **`permission.expire {requestId}`** + status restored inline
+  (`working`, if no further prompts are open). (2) `DenyAllPendingPermissions` (turn end/Stop/Dispose)
+  also posts `permission.expire` per card. UI: new dispatcher case `permission.expire` →
+  `expirePermissionCard`, which now **also handles `.q-card`** (`expireQuestionCard`: marks
+  `answered expired`, collapses + read-only, "Expired — no answer"). `.q-card.expired` = warn-tinted.
+- **0-B — editor adornment feasibility: PLANNED** (smallest MEF prototype: additions as
+  "phantom" lines + deletions red + WPF buttons per hunk; `IWpfTextViewCreationListener` +
+  AdornmentLayer + possibly `ILineTransformSource`, alternatively "temporarily in buffer +
+  decorate + revert"). **The riskiest part**; it decides inline vs. fallback (VS diff viewer).
+- **2 — Extended: file list + open + inline display (PLANNED):** Setting `AstrogatorOptions.ReviewEditsInEditor`
+  (default off) + toggle in the Appearance popover; contract: web→host `editReview.setEnabled`,
+  host→web `editReview.state`; edit-review card host→web `permission.fileEdit {requestId,path,
+  status}` + `permission.fileEdit.update`; web→host `editReview.open {requestId}`. NEW
+  `Services/EditReviewController` opens the doc, computes hunks (line-based, like `WebUI buildDiff`
+  host-ported), shows inline adornments; initially Accept/Reject **per file**.
+- **3 — Per-hunk + updatedInput (PLANNED):** Per-hunk buttons in the editor; on completion
+  reconstruct `new_string`/`content`/MultiEdit from **only the accepted hunks** →
+  `allow + UpdatedInput` (all rejected → deny). Pure merge logic → unit-testable (redeems #3).
+
+**Out of scope (v1):** Diff for non-edit tools (JSON in the standard card), batch review across several
+blocking calls, additional side-by-side.
+
+**Contract additions:** **Phase 1 (implemented):** `permission.request`/`permission.decision`
+(§3, existing) + new host→web **`permission.result {requestId, status:"applied"|"failed"}`**
+(the edit execution result on the card); the persisted `role:"permission"` message carries
+`status` (approved/rejected/applied/failed) + `diff.startLine`. **Phase 2/3 (planned):**
+`editReview.setEnabled {enabled}` (web→host), `editReview.state {enabled}` (host→web),
+`editReview.open {requestId}` (web→host), `permission.fileEdit {requestId,path,status}` +
+`permission.fileEdit.update {requestId,status}` (host→web).
+
+**Critical Files:** NEW `Core/McpPermissionBridge.cs`, NEW `Services/EditReviewController.cs`
+(+ MEF adornments, possibly `Editor/`); `Core/ClaudeSessionService.cs`, `Bridge/WebViewBridge.cs`,
+`Options/AstrogatorOptions.cs`, `Services/AstrogatorSettingsStore.cs`, `CodeAstrogatorPackage.cs`,
+`WebUI/app.js`+`app.css`; NEW tests `PermissionBridgeTests.cs` + `EditReviewTests.cs`.
+
+**Risks:** Editor adornments (phantom lines + in-editor buttons) = the most involved/riskiest
+part, verifiable only via build + manual VS test (several iterations expected); MCP timeout
+on a long review; correct updatedInput merge semantics vs. CLI write.
+
+**Recommended order:** Phase 1 fully finished first (independently valuable, closes the #1 base),
+then spike 0-B, then phases 2/3 with intermediate verification.
+
+## Logo / icons (2026-06-04, logo+accent new 2026-06-05)
+- **2026-06-05:** New logo (purple **astronaut robot**) brought in + accent color switched from
+  orange (Claude clay) to **dark purple**. `Resources\codeastrogator.png` +
+  `WebUI\logo.png` replaced by the new 256-px master; all 6 sizes (16/20/24/32/90/200)
+  re-rendered via System.Drawing. CSS tokens `--accent`/`--accent-hover`/`--accent-faint`
+  in `WebUI\app.css` changed: **dark** `#8d5fc7`/`#a079d4`/`rgba(141,95,199,0.16)`, **light**
+  `#6a3fa0`/`#583488`/`rgba(106,63,160,0.12)`. The entire UI uses `var(--accent)` → one place
+  per theme is enough. `ThemeService` does not overwrite `--accent` (the brand color stays fixed, the comment
+  "clay" → "purple brand" updated).
+- **Master:** `Resources\codeastrogator.png` (astronaut robot, 256×256, transparent). All other
+  sizes are generated from it via System.Drawing (HighQualityBicubic) — for a new logo
+  just replace the master and re-render the 6 sizes (16/20/24/32/90/200).
+- **VSIX manifest** (`source.extension.vsixmanifest`): `<Icon>Resources\icon-90.png` +
+  `<PreviewImage>Resources\preview-200.png` (Extensions Manager / Marketplace) and
+  `<Asset Type="Microsoft.VisualStudio.ImageManifest" Path="Resources\CodeAstrogator.imagemanifest"/>`.
+- **Menu command + tool-window tab:** a shared **ImageMoniker** instead of two mechanisms.
+  `Resources\CodeAstrogator.imagemanifest` defines Guid `854bf90d-…07c7` / ID `1` (`AstrogatorLogo`)
+  with 16/20/24/32 sources via **pack URI** (`/CodeAstrogator;component/Resources/icon-NN.png`).
+  - `.vsct`: `guidCodeAstrogatorIcons` symbol + `<Icon guid="guidCodeAstrogatorIcons" id="AstrogatorLogo"/>` +
+    `<CommandFlag>IconIsMoniker</CommandFlag>` on the show-window button.
+  - `ClaudeChatWindow`: `BitmapImageMoniker = new ImageMoniker { Guid = …07c7, Id = 1 }`.
+- **csproj:** `icon-16/20/24/32.png` as **`Resource`** (embedded into the DLL → pack URI;
+  verified: they live as `resources/icon-NN.png` in `*.g.resources`). `icon-90`, `preview-200`
+  and the `.imagemanifest` as `Content` + `IncludeInVSIX`. `<None Remove="Resources\**">` before it,
+  otherwise a duplicate item (the SDK default-None glob). Changing the GUID ⇒ keep it in sync at three places:
+  imagemanifest, .vsct symbol, `ClaudeChatWindow.AstrogatorIconsGuid`.
+- **⏳ Still to be checked visually in VS 2026:** the icon in the Extensions Manager, on the menu entry
+  "View → Other Windows → Code Astrogator" and on the tool-window tab (16 px is small —
+  possibly draw a higher-contrast mini variant).
+- **Empty state (deviation from plan §5.2):** The former inline-SVG pixel robot
+  (`buildRobot`) was replaced by the logo (`buildLogo` → `<img class="robot logo-img"
+  src="logo.png">`, `WebUI\logo.png` = a copy of the 256-px master, loaded via virtual host/`file://`).
+  Wordmark "✳ Claude Code" → **"Code Astrogator"** (sparkle glyph removed);
+  tagline "// TODO:
+  Everything…" → **"// pre-flight check complete. where to, captain?"**. The class `robot` stays
+  (still hooks into `.h-short .robot { display:none }` at low height). The
+  sign-in hint "Not signed in to Claude Code" stays deliberately (nominative = the CLI product).
+  Note Light theme: the logo body is light — on white the dark outlines carry the
+  contrast; if too pale, a light variant later.
+
+## Miscellaneous
+- **Session history: persisted** as JSON per workspace under
+  `%LocalAppData%\CodeAstrogator\history\<sha1(solution-dir)>.json` — loaded when opening
+  the tool window, saved after each turn / session change / on close.
+  Caps: 50 sessions, 400 messages per session. CLI sessions remain resumable via `--resume` also
+  across VS restarts (the CLI keeps the conversations itself).
+  Note: two parallel VS instances on the same solution → last writer wins.
+- Browser test of the UI: open `WebUI/index.html` directly (mock adapter active, simulates a
+  complete turn incl. tool card and permission/diff card).
+- Build: VS-2026-MSBuild (`…\18\Community\MSBuild\Current\Bin\MSBuild.exe`),
+  Tests: `vstest.console.exe` from VS 2026.

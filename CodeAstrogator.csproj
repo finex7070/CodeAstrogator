@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>14</LangVersion>
+    <UseWPF>true</UseWPF>
+
+    <!-- VSIX settings -->
+    <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectCapability Include="CreateVsixContainer" />
+    <InternalsVisibleTo Include="CodeAstrogator.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The test project lives in a subfolder; keep it out of this project's globs. -->
+    <Compile Remove="CodeAstrogator.Tests\**" />
+    <Content Remove="CodeAstrogator.Tests\**" />
+    <None Remove="CodeAstrogator.Tests\**" />
+    <EmbeddedResource Remove="CodeAstrogator.Tests\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="System.Design" />
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.14.40265" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="18.5.40034" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+  <ItemGroup>
+    <VSCTCompile Include="CodeAstrogatorPackage.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Web UI (Teil B), embedded into the VSIX and served via a virtual host mapping -->
+    <Content Include="WebUI\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Extension logo (Resources\codeastrogator.png is the 256px master; the rest are generated). -->
+    <None Remove="Resources\**" />
+    <!-- Shown in the Extensions manager / Marketplace (referenced by source.extension.vsixmanifest). -->
+    <Content Include="Resources\icon-90.png"><IncludeInVSIX>true</IncludeInVSIX></Content>
+    <Content Include="Resources\preview-200.png"><IncludeInVSIX>true</IncludeInVSIX></Content>
+    <Content Include="Resources\CodeAstrogator.imagemanifest"><IncludeInVSIX>true</IncludeInVSIX></Content>
+    <!-- Icon moniker sources: embedded as WPF resources, referenced via pack URI from the image manifest. -->
+    <Resource Include="Resources\icon-16.png" />
+    <Resource Include="Resources\icon-20.png" />
+    <Resource Include="Resources\icon-24.png" />
+    <Resource Include="Resources\icon-32.png" />
+  </ItemGroup>
+</Project>

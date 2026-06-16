@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"C:\\repo","session_id":"local-789","tools":[],"model":"claude-opus-4-8","permissionMode":"default"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":500,"num_turns":0,"result":"/help isn't available in this environment.","session_id":"local-789","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}

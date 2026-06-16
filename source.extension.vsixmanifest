@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+    <Metadata>
+        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="0.4.0" Language="en-US" Publisher="StickyStoneStudio GmbH" />
+        <DisplayName>Code Astrogator</DisplayName>
+        <Description xml:space="preserve">Claude Code chat tool window for Visual Studio. Integrates the Claude Code CLI (OAuth or API key) with streaming chat, tool activity and inline diff approvals.</Description>
+        <Icon>Resources\icon-90.png</Icon>
+        <PreviewImage>Resources\preview-200.png</PreviewImage>
+    </Metadata>
+    <Installation>
+        <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[18.0, )">
+            <ProductArchitecture>amd64</ProductArchitecture>
+        </InstallationTarget>
+    </Installation>
+    <Dependencies>
+        <Dependency Id="Microsoft.Framework.NDP" DisplayName="Microsoft .NET Framework" d:Source="Manual" Version="[4.5,)" />
+    </Dependencies>
+    <Prerequisites>
+        <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[18.0, )" DisplayName="Visual Studio core editor" />
+    </Prerequisites>
+    <Assets>
+        <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+        <Asset Type="Microsoft.VisualStudio.ImageManifest" d:Source="File" Path="Resources\CodeAstrogator.imagemanifest" />
+    </Assets>
+</PackageManifest>

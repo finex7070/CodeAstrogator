@@ -1,0 +1,1989 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using CodeAstrogator.Core;
+using CodeAstrogator.Options;
+using CodeAstrogator.Services;
+using EnvDTE;
+using EnvDTE80;
+using Microsoft.VisualStudio;
+using Microsoft.VisualStudio.PlatformUI;
+using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.VisualStudio.Threading;
+using Microsoft.Web.WebView2.Core;
+using Newtonsoft.Json.Linq;
+using Task = System.Threading.Tasks.Task;
+
+#pragma warning disable VSEXTPREVIEW_SETTINGS // settings API is in preview
+
+namespace CodeAstrogator.Bridge
+{
+    /// <summary>
+    /// Host side of the WebView2 message contract (Teil B §3). Receives web→host
+    /// messages on the UI thread, drives <see cref="ClaudeSessionService"/> and
+    /// marshals its background events back onto the UI thread before posting.
+    /// </summary>
+    internal sealed class WebViewBridge : IDisposable
+    {
+        private readonly CoreWebView2 _webView;
+        private readonly CodeAstrogatorPackage _package;
+        private readonly ClaudeSessionService _session;
+        private IClaudeProcessHost _processHost; // per-turn or persistent (UsePersistentCli option)
+        private readonly SessionHistoryStore _history;
+        private JObject? _streamingAssistant; // transcript accumulator for the active assistant block
+        private bool _turnHadAssistantOutput; // gates the result-text fallback (decision #8)
+        private bool _sessionStartAnnounced;  // "Session started" note, once per session (decision #9)
+        private UsageSnapshot? _lastUsage;    // session/weekly plan utilization (from `claude -p /usage`)
+        private string? _planLabel;           // "Team Plan" etc. from ~/.claude.json
+        private JArray? _slashCommands;       // CLI-reported slash commands (system/init)
+        private RemoteControlHost? _remote;   // `claude remote-control` server (at most one)
+        private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
+        private bool _activeFileSessionEnabled = true; // per-session override (option has priority)
+        private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission> _pendingPermissions
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission>();
+        // recorded (approved) permission messages by tool_use_id, so a later tool.result can
+        // upgrade their persisted status to applied/failed. Cleared at turn end.
+        private readonly System.Collections.Generic.Dictionary<string, JObject> _recordedPermissions
+            = new System.Collections.Generic.Dictionary<string, JObject>();
+        private bool _disposed;
+        private bool _uiReady; // the WebUI sent "ready" → safe to Post (else messages are dropped)
+        private readonly System.Collections.Generic.List<JObject> _queuedUiMessages
+            = new System.Collections.Generic.List<JObject>(); // actions raised before "ready"
+
+        /// <summary>An in-flight permission request awaiting a UI decision.</summary>
+        private sealed class PendingPermission
+        {
+            public TaskCompletionSource<PermissionDecision> Tcs = null!;
+            public CancellationTokenRegistration Registration; // disposed when the request settles
+            public string RequestId = "";
+            public string ToolName = "";
+            public JObject Input = new JObject();
+            public JObject? Diff;
+        }
+
+        public WebViewBridge(CoreWebView2 webView, CodeAstrogatorPackage package)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _webView = webView;
+            _package = package;
+            _processHost = CreateProcessHost(package.GetOptions().UsePersistentCli);
+            _session = new ClaudeSessionService(_processHost);
+            // seed the session from the persisted Model·Mode popover state (sticky across new
+            // chats + VS restarts); the popover writes these back via SaveOptions on each change
+            var opt = package.GetOptions();
+            _session.Settings.Model = string.IsNullOrEmpty(opt.DefaultModel) ? null : opt.DefaultModel;
+            _session.Settings.Effort = opt.DefaultEffortString;
+            _session.Settings.Ultracode = opt.UltracodeEnabled;
+            _session.Settings.PermissionMode = opt.PermissionModeString;
+            _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
+
+            // In-process MCP permission server (Teil A §A5). Best-effort: if it fails to start,
+            // IsAvailable stays false and edits fall back to the CLI default (no prompt flags).
+            _permission = new McpPermissionBridge { OnPermissionRequested = HandlePermissionRequestedAsync };
+            try { _permission.Start(); } catch { /* leave unavailable */ }
+            _session.PermissionBridge = _permission;
+            _history = SessionHistoryStore.LoadFrom(
+                SessionHistoryStore.GetHistoryPath(package.GetSolutionDirectory()));
+
+            _activeDocs = new ActiveDocumentTracker(package);
+            _activeDocs.ActiveDocumentChanged += OnActiveDocumentChanged;
+
+            _webView.WebMessageReceived += OnWebMessageReceived;
+            _session.EventReceived += OnSessionEvent;
+            _session.TurnCompleted += OnTurnCompleted;
+            VSColorTheme.ThemeChanged += OnVsThemeChanged;
+            _package.OptionsChanged += OnOptionsChanged;
+        }
+
+        public void Dispose()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread(); // disposed with the tool window (UI thread)
+            if (_disposed)
+                return;
+            _disposed = true;
+            VSColorTheme.ThemeChanged -= OnVsThemeChanged;
+            _package.OptionsChanged -= OnOptionsChanged;
+            _activeDocs.ActiveDocumentChanged -= OnActiveDocumentChanged;
+            _activeDocs.Dispose();
+            _session.EventReceived -= OnSessionEvent;
+            _session.TurnCompleted -= OnTurnCompleted;
+            _webView.WebMessageReceived -= OnWebMessageReceived;
+            _session.StopTurn();
+            DenyAllPendingPermissions("Tool window closed");
+            _permission.Dispose(); // stops the MCP listener + deletes the config file
+            (_processHost as IDisposable)?.Dispose(); // persistent host owns a live process
+            _remote?.Dispose(); // kills the remote-control process tree
+            lock (_history)
+                _history.Save(); // synchronous — tool window / VS is closing
+        }
+
+        private static IClaudeProcessHost CreateProcessHost(bool persistent) =>
+            persistent ? new ClaudePersistentProcessHost() : (IClaudeProcessHost)new ClaudeCliProcessHost();
+
+        /// <summary>
+        /// Applies the UsePersistentCli option by swapping the process host when it changed.
+        /// Only swaps while idle; otherwise the change takes effect on the next tool-window open.
+        /// </summary>
+        private void ApplyProcessHostOption()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var wantPersistent = _package.GetOptions().UsePersistentCli;
+            var isPersistent = _processHost is ClaudePersistentProcessHost;
+            if (wantPersistent == isPersistent || _session.IsBusy)
+                return;
+
+            var old = _processHost;
+            _processHost = CreateProcessHost(wantPersistent);
+            _session.SetProcessHost(_processHost);
+            (old as IDisposable)?.Dispose();
+        }
+
+        // ── web → host ────────────────────────────────────────────────────────
+
+        private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            JObject msg;
+            try
+            {
+                msg = JObject.Parse(e.WebMessageAsJson);
+            }
+            catch
+            {
+                return;
+            }
+
+            switch (msg.Value<string>("type"))
+            {
+                case "ready":
+                    SendTheme();
+                    SendAuthState();
+                    SendInitialSession();
+                    SendSlashCommands(); // re-send the CLI-reported list after a WebView reload
+                    SendActiveFile();
+                    if (_package.SettingsLoadError != null)
+                        PostSystemNote("⚠ Settings could not be read — using defaults. " + _package.SettingsLoadError);
+                    if (_remote?.IsRunning == true) // WebView reloaded while remote control runs
+                        PostRemoteState(_remote.Url != null ? "ready" : "starting", _remote.Url);
+                    RefreshUsage();
+                    FlushQueuedUiMessages(); // deliver actions queued before the UI was ready
+                    break;
+                case "prompt.send":
+                    HandlePromptSend(msg);
+                    break;
+                case "turn.stop":
+                    DenyAllPendingPermissions("Turn stopped"); // let blocked MCP calls return
+                    _session.StopTurn();
+                    PostSystemNote("Turn stopped"); // decision #11
+                    break;
+                case "session.new":
+                    HandleSessionNew();
+                    break;
+                case "session.listRequest":
+                    JArray sessions;
+                    lock (_history)
+                        sessions = _history.ToSessionList();
+                    Post(new JObject { ["type"] = "session.list", ["sessions"] = sessions });
+                    break;
+                case "session.load":
+                    HandleSessionLoad(msg.Value<string>("sessionId") ?? "");
+                    break;
+                case "session.rename":
+                    HandleSessionRename(msg.Value<string>("sessionId"), msg.Value<string>("title") ?? "");
+                    break;
+                case "model.set":
+                    _session.Settings.Model = msg.Value<string>("model");
+                    _package.GetOptions().DefaultModel = _session.Settings.Model ?? "";
+                    _package.SaveOptions(); // sticky across new chats + VS restarts
+                    break;
+                case "effort.set":
+                    var effort = msg.Value<string>("effort") ?? "medium";
+                    // CLI 2.1.x accepts exactly these; ignore anything else.
+                    if (effort is "low" or "medium" or "high" or "xhigh" or "max")
+                    {
+                        _session.Settings.Effort = effort;
+                        _package.GetOptions().DefaultEffortString = effort;
+                        _package.SaveOptions();
+                    }
+                    break;
+                case "mode.set":
+                    _session.Settings.PlanMode = msg.Value<bool?>("planMode") ?? false;
+                    break;
+                case "ultracode.set":
+                    _session.Settings.Ultracode = msg.Value<bool?>("enabled") ?? false;
+                    _package.GetOptions().UltracodeEnabled = _session.Settings.Ultracode;
+                    _package.SaveOptions();
+                    break;
+                case "permission.set":
+                    _session.Settings.PermissionMode = msg.Value<string>("mode") ?? "ask";
+                    _package.GetOptions().PermissionModeString = _session.Settings.PermissionMode;
+                    _package.SaveOptions();
+                    break;
+                case "autoAcceptCommands.set":
+                    _package.GetOptions().AutoAcceptCommands = msg.Value<bool?>("enabled") ?? false;
+                    _package.SaveOptions();
+                    break;
+                case "consent.set":
+                    // first-run consent popup answered (announcements + updates) → persist both
+                    // choices and that they were made (so the popup never re-appears).
+                    _package.GetOptions().NoticeFetchEnabled = msg.Value<bool?>("noticeEnabled") ?? false;
+                    _package.GetOptions().NoticeFetchDecided = true;
+                    _package.GetOptions().UpdateCheckEnabled = msg.Value<bool?>("updateEnabled") ?? false;
+                    _package.GetOptions().UpdateCheckDecided = true;
+                    _package.SaveOptions();
+                    break;
+                case "theme.setMode":
+                    HandleThemeSetMode(msg.Value<string>("mode") ?? "auto");
+                    break;
+                case "accent.set":
+                    HandleAccentSet(msg.Value<string>("color") ?? "");
+                    break;
+                case "permission.decision":
+                    HandlePermissionDecision(msg);
+                    break;
+                case "permission.approveAlways":
+                    HandleApproveAlways(msg.Value<string>("requestId") ?? "", msg["patterns"] as JArray);
+                    break;
+                case "question.answer":
+                    HandleQuestionAnswer(msg);
+                    break;
+                case "verbosity.set":
+                    HandleVerbositySet(msg.Value<string>("level") ?? "normal");
+                    break;
+                case "options.open":
+                    _package.OpenOptions();
+                    break;
+                case "slash.run":
+                    HandleSlashRun(msg.Value<string>("command") ?? "", msg.Value<string>("args"));
+                    break;
+                case "attach.files":
+                case "attach.browse":
+                    HandleAttachFiles();
+                    break;
+                case "attach.context":
+                    HandleAttachContext();
+                    break;
+                case "clipboard.paste":
+                    HandleClipboardPaste();
+                    break;
+                case "remote.start":
+                    HandleRemoteStart();
+                    break;
+                case "remote.stop":
+                    HandleRemoteStop();
+                    break;
+                case "activeFile.setEnabled":
+                    HandleActiveFileSetEnabled(msg.Value<bool?>("enabled") ?? true);
+                    break;
+                case "activeFile.refresh":
+                    // composer gained focus — re-read the current editor selection
+                    SendActiveFile();
+                    break;
+                case "files.listRequest":
+                    HandleFilesListRequest();
+                    break;
+                case "editor.insert":
+                    HandleEditorInsert(msg.Value<string>("text") ?? "");
+                    break;
+            }
+        }
+
+        private void HandlePromptSend(JObject msg)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var text = msg.Value<string>("text") ?? "";
+            if (string.IsNullOrWhiteSpace(text) || _session.IsBusy)
+                return;
+            if (_remote?.IsRunning == true)
+                return; // remote control owns the workspace — the UI locks the composer too
+
+            var typedText = text; // what the user actually typed — shown in the bubble + title
+
+            // Collect file references: explicit attachments + (if enabled) the active
+            // editor file. The CLI reads the files itself from the @<path> references.
+            // `display` keeps {name, path} so the persisted user message can show chips
+            // (matching the live bubble) instead of burying @paths in the text.
+            var references = new System.Collections.Generic.List<(string path, string suffix)>();
+            var display = new JArray();
+            if (msg["attachments"] is JArray attachments)
+            {
+                foreach (var a in attachments)
+                {
+                    var path = a is JObject o ? o.Value<string>("path") ?? o.Value<string>("name") : a.Value<string>();
+                    if (string.IsNullOrEmpty(path))
+                        continue;
+                    references.Add((path!, ""));
+                    var name = (a as JObject)?.Value<string>("name");
+                    display.Add(new JObject
+                    {
+                        ["name"] = string.IsNullOrEmpty(name) ? System.IO.Path.GetFileName(path) : name,
+                        ["path"] = path,
+                    });
+                }
+            }
+            if (ActiveFileEffective
+                && !string.IsNullOrEmpty(_activeDocs.CurrentPath)
+                && !references.Any(r => string.Equals(r.path, _activeDocs.CurrentPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                var sel = GetActiveSelection();
+                var lineSuffix = "";
+                if (sel != null)
+                    lineSuffix = sel.Value.top == sel.Value.bottom
+                        ? "#L" + sel.Value.top
+                        : "#L" + sel.Value.top + "-" + sel.Value.bottom;
+                references.Add((_activeDocs.CurrentPath!, lineSuffix));
+                var afName = System.IO.Path.GetFileName(_activeDocs.CurrentPath!);
+                if (sel != null)
+                    afName += sel.Value.top == sel.Value.bottom
+                        ? ":" + sel.Value.top
+                        : ":" + sel.Value.top + "-" + sel.Value.bottom;
+                display.Add(new JObject { ["name"] = afName, ["path"] = _activeDocs.CurrentPath! + lineSuffix });
+            }
+            if (references.Count > 0)
+            {
+                var sb = new System.Text.StringBuilder(text);
+                sb.Append("\n\nAttached files:");
+                foreach (var r in references)
+                    sb.Append('\n').Append(Core.CliReferenceFormatter.FormatFileReference(r.path, r.suffix));
+                text = sb.ToString();
+            }
+
+            var userMsg = new JObject
+            {
+                ["role"] = "user",
+                ["id"] = Guid.NewGuid().ToString("n"),
+                ["text"] = typedText, // clean text; attachments rendered as chips
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            };
+            if (display.Count > 0)
+                userMsg["attachments"] = display;
+            RecordMessage(userMsg);
+            if (_history.Current.Title == "Untitled")
+                _history.Current.Title = typedText.Length > 48 ? typedText.Substring(0, 48) + "…" : typedText;
+
+            PostStatus("working");
+            RunPrompt(text);
+        }
+
+        private void RunPrompt(string text)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var options = _package.GetOptions();
+            var cwd = _package.GetSolutionDirectory();
+            if (string.IsNullOrEmpty(_session.Settings.Model) && !string.IsNullOrEmpty(options.DefaultModel))
+                _session.Settings.Model = options.DefaultModel;
+
+            _turnHadAssistantOutput = false;
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                try
+                {
+                    await _session.RunTurnAsync(text, options.ClaudeExecutablePath, cwd);
+                }
+                catch (Exception ex)
+                {
+                    PostError(ex.Message);
+                    PostStatus("error");
+                }
+            }).Task.Forget();
+        }
+
+        // ── permission flow (MCP bridge §A5) ─────────────────────────────────────
+
+        /// <summary>
+        /// Called by the MCP bridge (background thread) when the CLI asks for permission.
+        /// Posts a permission.request to the UI and returns a task the UI completes via
+        /// permission.decision. The CLI blocks on its tools/call meanwhile.
+        /// </summary>
+        private Task<PermissionDecision> HandlePermissionRequestedAsync(PermissionRequest req, CancellationToken ct)
+        {
+            // AskUserQuestion routes through the same blocking permission hook — but instead of a
+            // diff/approve card it gets an interactive question card; the user's choice is returned
+            // as a deny-message (the CLI feeds that back to the model as the tool result).
+            var isQuestion = req.ToolName == "AskUserQuestion";
+
+            // Pattern-based auto-approve (Settings → "Auto-approve patterns"): commands/MCP tools
+            // matching a saved pattern are allowed silently, no card. (null updatedInput → the MCP
+            // bridge echoes the original input, which the CLI requires.)
+            if (!isQuestion && IsAutoApprovedByPattern(req.ToolName, req.Input))
+                return Task.FromResult(new PermissionDecision { Behavior = "allow" });
+
+            // "Auto-accept commands" toggle: in Auto-accept-edits mode, also auto-approve every
+            // non-question tool the hook prompts for (Bash/PowerShell/MCP/…) — edits are already
+            // auto-accepted by the CLI there. Gated on the mode the running process was LAUNCHED
+            // with (not the live setting): only acceptEdits routes commands — not edits — through
+            // the hook, so a mid-turn switch can't make us silently approve an edit prompt.
+            // AskUserQuestion always stays interactive.
+            if (!isQuestion
+                && _package.GetOptions().AutoAcceptCommands
+                && _session.LaunchedPermissionMode == "acceptEdits")
+                return Task.FromResult(new PermissionDecision { Behavior = "allow" });
+
+            // a command/MCP key exists → offer the "Always" button (add a pattern + approve)
+            var canApproveAlways = !isQuestion && AutoApproveKey(req.ToolName, req.Input) != null;
+            var approveAlwaysSuggestions = canApproveAlways
+                ? AutoApproveSuggestions(req.ToolName, req.Input)
+                : null;
+
+            var diff0 = isQuestion ? null : BuildPermissionDiff(req.ToolName, req.Input); // file read off the UI thread
+            var pending = new PendingPermission
+            {
+                Tcs = new TaskCompletionSource<PermissionDecision>(TaskCreationOptions.RunContinuationsAsynchronously),
+                RequestId = req.RequestId,
+                ToolName = req.ToolName,
+                Input = req.Input,
+                Diff = diff0,
+            };
+            _pendingPermissions[req.RequestId] = pending;
+            // Bridge-lifetime token: only fires on Dispose, but keep it tidy by disposing the
+            // registration when the request settles (ResolvePending) to avoid accumulation.
+            pending.Registration = ct.Register(() => ResolvePending(req.RequestId, "deny", "Cancelled."));
+
+            var diff = diff0;
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed)
+                {
+                    ResolvePending(req.RequestId, "deny", "Closing.");
+                    return;
+                }
+                JObject card;
+                if (isQuestion)
+                {
+                    card = new JObject
+                    {
+                        ["type"] = "question.request",
+                        ["requestId"] = req.RequestId,
+                        ["questions"] = (req.Input["questions"] as JArray)?.DeepClone() ?? new JArray(),
+                    };
+                }
+                else
+                {
+                    card = new JObject
+                    {
+                        ["type"] = "permission.request",
+                        ["requestId"] = req.RequestId,
+                        ["toolName"] = req.ToolName,
+                        ["input"] = req.Input,
+                        ["canApproveAlways"] = canApproveAlways, // show the "Always" button
+                    };
+                    if (approveAlwaysSuggestions != null)
+                        card["approveAlwaysSuggestions"] = new JArray(approveAlwaysSuggestions.ToArray());
+                    if (diff != null)
+                        card["diff"] = diff;
+                }
+                Post(card);
+                PostStatus("waiting-permission");
+            }).Task.Forget();
+
+            // VSTHRD003: this TCS is ours (settled by ResolvePending), not foreign work.
+#pragma warning disable VSTHRD003
+            return pending.Tcs.Task;
+#pragma warning restore VSTHRD003
+        }
+
+        private void HandlePermissionDecision(JObject msg)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var requestId = msg.Value<string>("requestId") ?? "";
+            var allow = msg.Value<string>("behavior") == "allow";
+            var p = ResolvePending(requestId, allow ? "allow" : "deny",
+                allow ? null : msg.Value<string>("message"), allow ? msg["updatedInput"] as JObject : null);
+            if (p == null)
+                return; // unknown/stale (e.g. mock)
+            // Persist the decided card so it survives a reload (transcript.load role "permission").
+            RecordPermissionMessage(p, allow ? "approved" : "rejected");
+            if (!allow)
+                PostSystemNote("Permission denied by user"); // decision #20
+            // Approving an ExitPlanMode plan exits plan mode: the next turn must NOT run with
+            // --permission-mode plan (Claude couldn't execute the approved plan), so switch to
+            // acceptEdits and push the new mode to the UI selector (mode.update, NOT SendSessionInit
+            // which would clear the transcript). Deny keeps plan mode — the user keeps planning.
+            if (allow && (p.ToolName == "ExitPlanMode" || p.ToolName == "exit_plan_mode"))
+                ApplyPlanApprovedMode();
+            PostStatusAfterDecision();
+        }
+
+        /// <summary>
+        /// Restores the status after a permission/question settles mid-turn. Claude can have
+        /// several tool calls (and thus several prompts) open at once (parallel tool use); we
+        /// must stay "waiting-permission" until the *last* one is answered. Going to "working"
+        /// while others are still open makes the UI expire those still-open cards.
+        /// </summary>
+        private void PostStatusAfterDecision()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!_session.IsBusy)
+                return;
+            PostStatus(_pendingPermissions.IsEmpty ? "working" : "waiting-permission");
+        }
+
+        /// <summary>After an approved ExitPlanMode plan: leave plan mode → acceptEdits, persist it,
+        /// and update the UI mode selector without resetting the transcript view.</summary>
+        private void ApplyPlanApprovedMode()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _session.Settings.PlanMode = false;       // legacy flag, kept consistent
+            _session.Settings.PermissionMode = "acceptEdits";
+            _package.GetOptions().PermissionModeString = "acceptEdits";
+            _package.SaveOptions();
+            Post(new JObject
+            {
+                ["type"] = "mode.update",
+                ["permissionMode"] = "acceptEdits",
+                ["planMode"] = false,
+            });
+        }
+
+        /// <summary>AskUserQuestion answer: the chosen option(s)/free-text are returned to the CLI
+        /// as a deny-message (which the model receives as the tool result), then persisted.</summary>
+        private void HandleQuestionAnswer(JObject msg)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var requestId = msg.Value<string>("requestId") ?? "";
+            var answers = msg["answers"] as JArray ?? new JArray();
+            var p = ResolvePending(requestId, "deny", FormatQuestionAnswers(answers));
+            if (p == null)
+                return; // unknown/stale (e.g. mock)
+            RecordQuestionMessage(p, answers);
+            PostStatusAfterDecision();
+        }
+
+        /// <summary>Renders the user's answers as the tool-result text the model will read.</summary>
+        private static string FormatQuestionAnswers(JArray answers)
+        {
+            var sb = new System.Text.StringBuilder("The user answered:");
+            foreach (var a in answers.OfType<JObject>())
+            {
+                var header = a.Value<string>("header");
+                var question = a.Value<string>("question");
+                var label = !string.IsNullOrEmpty(header) ? header! : (question ?? "Answer");
+                var parts = new System.Collections.Generic.List<string>();
+                if (a["selected"] is JArray sel)
+                    foreach (var s in sel)
+                    {
+                        var v = s.Value<string>();
+                        if (!string.IsNullOrEmpty(v)) parts.Add("\"" + v + "\"");
+                    }
+                var custom = a.Value<string>("custom");
+                if (!string.IsNullOrWhiteSpace(custom)) parts.Add("\"" + custom!.Trim() + "\"");
+                sb.Append("\n- ").Append(label).Append(": ")
+                  .Append(parts.Count > 0 ? string.Join(", ", parts) : "(no selection)");
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Persists an answered question card (role "question") so it survives a reload,
+        /// replacing the redundant tool message of the same tool_use_id.</summary>
+        private void RecordQuestionMessage(PendingPermission p, JArray answers)
+        {
+            var rec = new JObject
+            {
+                ["role"] = "question",
+                ["id"] = p.RequestId,
+                ["questions"] = (p.Input["questions"] as JArray)?.DeepClone() ?? new JArray(),
+                ["answers"] = answers.DeepClone(),
+                ["status"] = "answered",
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            };
+            lock (_history)
+            {
+                var msgs = _history.Current.Messages;
+                for (int i = msgs.Count - 1; i >= 0; i--)
+                    if (msgs[i].Value<string>("role") == "tool" && msgs[i].Value<string>("id") == p.RequestId)
+                        msgs.RemoveAt(i);
+                msgs.Add(rec);
+                _history.Current.UpdatedAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        /// <summary>Settles a pending permission once: removes it, disposes its ct registration,
+        /// completes the TCS. Returns the removed entry (null if unknown/already settled).</summary>
+        private PendingPermission? ResolvePending(string requestId, string behavior, string? message, JObject? updatedInput = null)
+        {
+            if (!_pendingPermissions.TryRemove(requestId, out var p))
+                return null;
+            p.Registration.Dispose();
+            p.Tcs.TrySetResult(new PermissionDecision { Behavior = behavior, Message = message, UpdatedInput = updatedInput });
+            return p;
+        }
+
+        /// <summary>Records a decided permission card (role "permission") into the history, replacing
+        /// the redundant tool message of the same tool_use_id (the permission card represents it).</summary>
+        private void RecordPermissionMessage(PendingPermission p, string status)
+        {
+            var rec = new JObject
+            {
+                ["role"] = "permission",
+                ["id"] = p.RequestId,
+                ["toolName"] = p.ToolName,
+                ["input"] = p.Input,
+                ["status"] = status,
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            };
+            if (p.Diff != null)
+                rec["diff"] = p.Diff;
+            lock (_history)
+            {
+                var msgs = _history.Current.Messages;
+                for (int i = msgs.Count - 1; i >= 0; i--)
+                    if (msgs[i].Value<string>("role") == "tool" && msgs[i].Value<string>("id") == p.RequestId)
+                        msgs.RemoveAt(i);
+                msgs.Add(rec);
+                _history.Current.UpdatedAtUtc = DateTime.UtcNow;
+                if (status == "approved")
+                    _recordedPermissions[p.RequestId] = rec; // upgradeable by tool.result
+            }
+        }
+
+        private void DenyAllPendingPermissions(string reason)
+        {
+            foreach (var key in _pendingPermissions.Keys)
+            {
+                // Settle the host-side task AND tell the UI to close the (now orphaned) card, so a
+                // timed-out/abandoned permission or question card doesn't stay open and interactive.
+                if (ResolvePending(key, "deny", reason) != null)
+                    Post(new JObject { ["type"] = "permission.expire", ["requestId"] = key });
+            }
+        }
+
+        // ── pattern-based auto-approve (Settings + "Always" button) ──────────────
+
+        /// <summary>The string a permission request is matched against: the command for
+        /// Bash/PowerShell/shell tools, or the tool name for MCP tools. null = not eligible
+        /// (e.g. Edit/Write use the diff card, not pattern approval).</summary>
+        private static string? AutoApproveKey(string toolName, JObject input)
+        {
+            var cmd = input?.Value<string>("command")
+                      ?? input?.Value<string>("cmd")
+                      ?? input?.Value<string>("script");
+            if (!string.IsNullOrWhiteSpace(cmd))
+                return cmd!.Trim();
+            if (!string.IsNullOrEmpty(toolName) && toolName.StartsWith("mcp__", StringComparison.Ordinal))
+                return toolName;
+            return null;
+        }
+
+        /// <summary>Suggested patterns to pre-fill the "Always" popover: the MCP tool name, or
+        /// the command split into its top-level sub-commands (each becomes its own pattern).</summary>
+        private static List<string> AutoApproveSuggestions(string toolName, JObject input)
+        {
+            if (!string.IsNullOrEmpty(toolName) && toolName.StartsWith("mcp__", StringComparison.Ordinal))
+                return new List<string> { toolName };
+            var cmd = input?.Value<string>("command") ?? input?.Value<string>("cmd") ?? input?.Value<string>("script");
+            if (string.IsNullOrWhiteSpace(cmd))
+                return new List<string>();
+            // Real sub-commands only (variable assignments dropped); each becomes a reusable
+            // glob pattern with quoted argument values wildcarded.
+            var commands = ShellCommandSplitter.ExtractCommands(cmd!);
+            if (commands.Count == 0)
+                commands = new List<string> { cmd!.Trim() };
+            return commands.Select(ShellCommandSplitter.Wildcardize)
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private IEnumerable<string> AutoApprovePatterns() =>
+            (_package.GetOptions().AutoApprovePatterns ?? new List<string>())
+                .Select(p => (p ?? "").Trim())
+                .Where(p => p.Length > 0);
+
+        private bool IsAutoApprovedByPattern(string toolName, JObject input)
+        {
+            var patterns = AutoApprovePatterns().ToList();
+            if (patterns.Count == 0)
+                return false;
+
+            // MCP tools match on the tool name.
+            if (!string.IsNullOrEmpty(toolName) && toolName.StartsWith("mcp__", StringComparison.Ordinal))
+                return patterns.Any(p => MatchesGlob(toolName, p));
+
+            var cmd = input?.Value<string>("command") ?? input?.Value<string>("cmd") ?? input?.Value<string>("script");
+            if (string.IsNullOrWhiteSpace(cmd))
+                return false;
+
+            // Auto-approve only when EVERY meaningful sub-command (variable assignments ignored)
+            // is covered by an approved pattern — so a command is never silently approved because
+            // just one of several &-joined parts happens to match.
+            var commands = ShellCommandSplitter.ExtractCommands(cmd!);
+            if (commands.Count == 0)
+                commands = new List<string> { cmd!.Trim() };
+            return commands.All(sub => patterns.Any(p => MatchesGlob(sub, p)));
+        }
+
+        /// <summary>Glob match (full string, <c>*</c> = any run), case-insensitive.</summary>
+        private static bool MatchesGlob(string value, string pattern)
+        {
+            try
+            {
+                var rx = "^" + Regex.Escape(pattern).Replace("\\*", ".*") + "$";
+                return Regex.IsMatch(value, rx, RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Appends a pattern to the saved list (skips duplicates) and persists. UI thread.</summary>
+        private void AddAutoApprovePattern(string pattern)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            pattern = pattern?.Trim() ?? "";
+            if (pattern.Length == 0)
+                return;
+            var existing = AutoApprovePatterns().ToList();
+            if (existing.Any(p => string.Equals(p, pattern, StringComparison.OrdinalIgnoreCase)))
+                return; // already covered
+            existing.Add(pattern);
+            _package.GetOptions().AutoApprovePatterns = existing;
+            _package.SaveOptions();
+        }
+
+        /// <summary>"Always" button on a permission card: approve this call AND remember the
+        /// (user-edited) patterns from the popover. Falls back to the auto-derived suggestions
+        /// when no explicit list is supplied.</summary>
+        private void HandleApproveAlways(string requestId, JArray? patterns)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _pendingPermissions.TryGetValue(requestId, out var pending);
+
+            var toAdd = new List<string>();
+            if (patterns != null)
+                toAdd.AddRange(patterns.Select(p => p.Value<string>() ?? "").Where(p => p.Trim().Length > 0));
+            else if (pending != null)
+                toAdd.AddRange(AutoApproveSuggestions(pending.ToolName, pending.Input));
+
+            foreach (var pat in toAdd)
+                AddAutoApprovePattern(pat);
+            if (toAdd.Count > 0)
+                PostSystemNote("Auto-approving from now on: " + string.Join(", ", toAdd.Select(p => p.Trim())));
+
+            var p = ResolvePending(requestId, "allow", null); // null updatedInput → bridge echoes input
+            if (p == null)
+                return; // unknown/stale
+            RecordPermissionMessage(p, "approved");
+            if (_session.IsBusy)
+                PostStatus("working");
+        }
+
+        /// <summary>Inline-diff payload for Edit/Write (v1); other tools show their JSON input.</summary>
+        private static JObject? BuildPermissionDiff(string toolName, JObject input)
+        {
+            try
+            {
+                var path = input.Value<string>("file_path");
+                if (string.IsNullOrEmpty(path))
+                    return null;
+                if (toolName == "Edit")
+                {
+                    var oldText = input.Value<string>("old_string") ?? "";
+                    return new JObject
+                    {
+                        ["path"] = path,
+                        ["oldText"] = oldText,
+                        ["newText"] = input.Value<string>("new_string") ?? "",
+                        ["startLine"] = FileStartLine(path!, oldText), // real file line of the edit
+                    };
+                }
+                if (toolName == "Write")
+                {
+                    var oldText = "";
+                    try { if (System.IO.File.Exists(path)) oldText = System.IO.File.ReadAllText(path); } catch { }
+                    return new JObject { ["path"] = path, ["oldText"] = oldText, ["newText"] = input.Value<string>("content") ?? "", ["startLine"] = 1 };
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>1-based file line where <paramref name="oldString"/> begins (1 if not found/unreadable).</summary>
+        private static int FileStartLine(string path, string oldString)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(oldString) || !System.IO.File.Exists(path))
+                    return 1;
+                var content = System.IO.File.ReadAllText(path).Replace("\r\n", "\n").Replace("\r", "\n");
+                var needle = oldString.Replace("\r\n", "\n").Replace("\r", "\n");
+                var idx = content.IndexOf(needle, StringComparison.Ordinal);
+                if (idx < 0)
+                    return 1;
+                int line = 1;
+                for (int i = 0; i < idx; i++)
+                    if (content[i] == '\n') line++;
+                return line;
+            }
+            catch { return 1; }
+        }
+
+        private void HandleSessionNew()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            lock (_history)
+                _history.StartNew();
+            _session.ResetSession();
+            _sessionStartAnnounced = false;
+            _activeFileSessionEnabled = true; // per-session override resets with the session
+            SendSessionInit();
+            SendActiveFile();
+            SaveHistory();
+        }
+
+        /// <summary>
+        /// First render after `ready`: re-attach the in-progress session (WebView reload),
+        /// restore the workspace's most recent session (if enabled), or start empty.
+        /// </summary>
+        private void SendInitialSession()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            SessionRecord? restore = null;
+            lock (_history)
+            {
+                if (_history.Current.Messages.Count > 0)
+                {
+                    restore = _history.Current; // WebView reloaded mid-session
+                }
+                else if (_package.GetOptions().RestoreLastSession)
+                {
+                    var latest = _history.ToSessionList().FirstOrDefault() as JObject;
+                    var id = latest?.Value<string>("id");
+                    if (!string.IsNullOrEmpty(id))
+                        restore = _history.Load(id!);
+                }
+            }
+
+            if (restore == null)
+            {
+                SendSessionInit();
+                return;
+            }
+
+            AttachToRecord(restore);
+            SendSessionInit();      // session.init first — it resets the transcript view…
+            SendTranscript(restore); // …then the messages land on the clean slate
+        }
+
+        private void HandleSessionLoad(string sessionId)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            SessionRecord? record;
+            lock (_history)
+                record = _history.Load(sessionId);
+            if (record == null)
+                return;
+
+            AttachToRecord(record);
+            _activeFileSessionEnabled = true; // per-session override resets with the session
+            SendSessionInit();
+            SendActiveFile();
+            SendTranscript(record);
+        }
+
+        /// <summary>Rename modal in the UI (§5.1) — UI updates its title optimistically.</summary>
+        private void HandleSessionRename(string? sessionId, string title)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            title = title.Trim();
+            if (title.Length == 0)
+                return;
+            if (title.Length > 120)
+                title = title.Substring(0, 120);
+
+            bool renamed;
+            lock (_history)
+                renamed = _history.Rename(
+                    string.IsNullOrEmpty(sessionId) ? _history.Current.Id : sessionId!, title);
+            if (renamed)
+                SaveHistory();
+        }
+
+        private void AttachToRecord(SessionRecord record)
+        {
+            if (record.HasCliSession)
+                _session.AttachSession(record.Id);
+            else
+                _session.ResetSession();
+            _sessionStartAnnounced = true; // resumed sessions don't re-announce
+        }
+
+        private void SendTranscript(SessionRecord record)
+        {
+            JArray messages;
+            lock (_history)
+            {
+                messages = new JArray();
+                foreach (var m in record.Messages)
+                    messages.Add(m.DeepClone());
+            }
+
+            Post(new JObject
+            {
+                ["type"] = "transcript.load",
+                ["sessionId"] = record.Id,
+                ["title"] = record.Title,
+                ["messages"] = messages,
+            });
+        }
+
+        private void HandleThemeSetMode(string mode)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var normalized = mode is "dark" or "light" ? mode : "auto";
+            _package.GetOptions().ThemeModeString = normalized;
+            _package.SaveOptions();
+            SendTheme();
+        }
+
+        /// <summary>Persists the custom brand/accent color (CSS hex, or empty to reset to the
+        /// per-theme default). The UI applies it optimistically; here we just store it so it
+        /// survives new chats + VS restarts. Invalid values are coerced to empty (= default).</summary>
+        private void HandleAccentSet(string color)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _package.GetOptions().AccentColor = NormalizeHexColor(color);
+            _package.SaveOptions();
+        }
+
+        /// <summary>Returns a normalized <c>#rrggbb</c> string, or "" if not a valid hex color.</summary>
+        private static string NormalizeHexColor(string color)
+        {
+            color = (color ?? "").Trim();
+            if (color.Length == 0)
+                return "";
+            return Regex.IsMatch(color, "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+                ? color.ToLowerInvariant()
+                : "";
+        }
+
+        private void HandleVerbositySet(string level)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var normalized = level is "compact" or "detailed" ? level : "normal";
+            _package.GetOptions().VerbosityString = normalized;
+            _package.SaveOptions();
+        }
+
+        private void HandleSlashRun(string command, string? args)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            switch (command)
+            {
+                case "/clear":
+                    HandleSessionNew();
+                    break;
+                case "/login":
+                    PostSyntheticAssistant(
+                        "Sign-in happens through the Claude Code CLI (it needs a browser):\n\n" +
+                        "1. Open a terminal\n2. Run `claude /login`\n3. Come back and start a new chat.");
+                    break;
+                case "/help":
+                    // The CLI rejects /help in headless mode — answer it host-side instead.
+                    PostSyntheticAssistant(BuildHelpText());
+                    break;
+                default:
+                    if (_session.IsBusy)
+                        return;
+                    var prompt = string.IsNullOrEmpty(args) ? command : command + " " + args;
+                    RecordMessage(new JObject
+                    {
+                        ["role"] = "user",
+                        ["id"] = Guid.NewGuid().ToString("n"),
+                        ["text"] = prompt,
+                        ["ts"] = DateTime.UtcNow.ToString("o"),
+                    });
+                    PostStatus("working");
+                    RunPrompt(prompt);
+                    break;
+            }
+        }
+
+        // ── remote control (`claude remote-control` server) ──────────────────
+
+        private void HandleRemoteStart()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            if (_session.IsBusy)
+            {
+                PostRemoteState("error", message: "A turn is still running — stop it before starting remote control.");
+                return;
+            }
+            if (_remote?.IsRunning == true)
+            {
+                // already running (e.g. UI reloaded) — re-announce the current state
+                PostRemoteState(_remote.Url != null ? "ready" : "starting", _remote.Url);
+                return;
+            }
+
+            var exe = ClaudeExecutableLocator.Locate(_package.GetOptions().ClaudeExecutablePath);
+            if (exe == null)
+            {
+                PostRemoteState("error", message: "Claude CLI not found — set the executable path via the gear menu → Advanced options.");
+                return;
+            }
+
+            if (_remote == null)
+            {
+                _remote = new RemoteControlHost();
+                _remote.StateChanged += state => PostRemoteState(
+                    state.State, state.Url, state.ActiveSessions, state.Message);
+            }
+            _remote.Start(exe, _package.GetSolutionDirectory());
+        }
+
+        /// <summary>
+        /// Stops the server, then imports the CLI sessions it touched and loads the
+        /// most recent one into the chat (UI unlocks on remote.state "stopped" first).
+        /// </summary>
+        private void HandleRemoteStop()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var remote = _remote;
+            if (remote == null)
+            {
+                PostRemoteState("stopped");
+                return;
+            }
+
+            // small slack: the pre-created session file may predate StartedUtc slightly
+            var since = remote.StartedUtc.AddSeconds(-10);
+            var cwd = _package.GetSolutionDirectory() ?? ""; // UI-thread-only — capture here
+            remote.Stop();
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                await Task.Delay(500).ConfigureAwait(false); // let the CLI flush its session files
+
+                var imported = new System.Collections.Generic.List<ImportedCliSession>();
+                string? discoveryError = null;
+                try
+                {
+                    var projectDir = CliSessionReader.GetProjectDirectory(cwd);
+                    if (projectDir != null)
+                    {
+                        foreach (var file in CliSessionReader.FindSessionsSince(projectDir, since))
+                        {
+                            var session = CliSessionReader.ImportTranscript(file);
+                            if (session != null)
+                                imported.Add(session);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    discoveryError = ex.Message;
+                }
+
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                PostRemoteState("stopped"); // always unlock the UI first
+
+                if (discoveryError != null)
+                {
+                    PostError("Importing the remote session failed: " + discoveryError);
+                    return;
+                }
+
+                if (imported.Count == 0)
+                {
+                    PostSystemNote("Remote control stopped — no remote session was started");
+                    return;
+                }
+
+                SessionRecord? latest = null;
+                lock (_history)
+                {
+                    foreach (var s in imported)
+                    {
+                        var record = _history.Import(s.SessionId, s.Title, s.Messages, s.UpdatedAtUtc, s.ContextTokens);
+                        if (latest == null || record.UpdatedAtUtc > latest.UpdatedAtUtc)
+                            latest = record;
+                    }
+                    _history.Load(latest!.Id);
+                }
+
+                AttachToRecord(latest!);
+                _activeFileSessionEnabled = true;
+                SendSessionInit();
+                SendActiveFile();
+                SendTranscript(latest!);
+                PostSystemNote(imported.Count == 1
+                    ? "Remote session imported"
+                    : $"Remote control stopped — {imported.Count} sessions imported (latest loaded)");
+                SaveHistory();
+            }).Task.Forget();
+        }
+
+        private void PostRemoteState(string state, string? url = null, int activeSessions = 0, string? message = null)
+        {
+            var msg = new JObject
+            {
+                ["type"] = "remote.state",
+                ["state"] = state,
+                ["activeSessions"] = activeSessions,
+            };
+            if (url != null)
+                msg["url"] = url;
+            if (message != null)
+                msg["message"] = message;
+            Post(msg);
+        }
+
+        /// <summary>Host-side /help (the headless CLI rejects it, decision in NOTES).</summary>
+        private string BuildHelpText()
+        {
+            string resumeHint;
+            lock (_history)
+                resumeHint = _history.Current.HasCliSession
+                    ? "`claude --resume " + _history.Current.Id + "`"
+                    : "`claude --resume <session-id>`";
+
+            return
+                "**Code Astrogator — Help**\n\n" +
+                "- **Enter** sends, **Shift+Enter** inserts a newline, **Ctrl+Esc** focuses/unfocuses the composer.\n" +
+                "- **@** mentions workspace files and folders; the **+** menu attaches files; **Ctrl+V** pastes copied files/images as attachments.\n" +
+                "- The **Model · Mode** button picks model, effort, permission mode and Ultracode; the gear sets appearance and verbosity.\n" +
+                "- The **/** menu lists the slash commands the CLI supports in this panel (reported by the CLI itself).\n" +
+                "- Interactive-only commands (`/remote-control`, `/config`, `/login`, …) need a terminal: run " + resumeHint + " and use them there.";
+        }
+
+        /// <summary>Pushes the CLI-reported slash-command list to the UI (if known yet).</summary>
+        private void SendSlashCommands()
+        {
+            if (_slashCommands == null)
+                return;
+            Post(new JObject { ["type"] = "slash.commands", ["commands"] = _slashCommands.DeepClone() });
+        }
+
+        private void HandleAttachFiles()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Multiselect = true,
+                Title = "Add files to the conversation",
+            };
+            if (dialog.ShowDialog() != true)
+                return;
+            AddFileAttachments(dialog.FileNames);
+        }
+
+        /// <summary>Adds files/folders (Explorer drag-drop or the picker) as @-reference
+        /// attachment chips. Posts attach.added; existing chip flow takes it from there.</summary>
+        public void AddFileAttachments(System.Collections.Generic.IEnumerable<string> paths)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_remote?.IsRunning == true)
+                return; // composer (and attachments) are locked during remote control
+
+            var attachments = new JArray();
+            foreach (var p in paths)
+            {
+                if (string.IsNullOrEmpty(p)
+                    || (!System.IO.File.Exists(p) && !System.IO.Directory.Exists(p)))
+                    continue;
+                attachments.Add(new JObject
+                {
+                    ["name"] = System.IO.Path.GetFileName(p.TrimEnd('\\', '/')),
+                    ["path"] = p,
+                });
+            }
+            if (attachments.Count > 0)
+                PostOrQueue(new JObject { ["type"] = "attach.added", ["attachments"] = attachments });
+        }
+
+        /// <summary>
+        /// Appends an editor selection to the composer as a fenced code block labelled with the
+        /// file name + line range (from the editor right-click "Add selection to Claude prompt").
+        /// Queued until the WebUI is ready so it survives the tool window just having opened.
+        /// </summary>
+        public void AddSelectionToPrompt(string? path, int startLine, int endLine, string text)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_remote?.IsRunning == true || string.IsNullOrEmpty(text))
+                return; // composer locked during remote control / nothing selected
+
+            var name = string.IsNullOrEmpty(path) ? "selection" : System.IO.Path.GetFileName(path);
+            var label = endLine > startLine ? $"{name}:{startLine}-{endLine}" : $"{name}:{startLine}";
+            var body = text.Replace("\r\n", "\n").TrimEnd('\n');
+            var block = "`" + label + "`\n```\n" + body + "\n```";
+            PostOrQueue(new JObject { ["type"] = "composer.append", ["text"] = block });
+        }
+
+        /// <summary>
+        /// Ctrl+V in the composer: read the Windows clipboard and turn pasted files /
+        /// images into attachments (the CLI reads files by path). File drops are
+        /// referenced in place; a bitmap is written to a temp PNG first.
+        /// </summary>
+        private void HandleClipboardPaste()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var attachments = new JArray();
+            try
+            {
+                if (System.Windows.Clipboard.ContainsFileDropList())
+                {
+                    foreach (var file in System.Windows.Clipboard.GetFileDropList())
+                    {
+                        if (string.IsNullOrEmpty(file))
+                            continue;
+                        attachments.Add(new JObject
+                        {
+                            ["name"] = System.IO.Path.GetFileName(file),
+                            ["path"] = file,
+                        });
+                    }
+                }
+                else if (System.Windows.Clipboard.ContainsImage())
+                {
+                    var path = SavePastedImage(System.Windows.Clipboard.GetImage());
+                    if (path != null)
+                        attachments.Add(new JObject
+                        {
+                            ["name"] = System.IO.Path.GetFileName(path),
+                            ["path"] = path,
+                        });
+                }
+            }
+            catch (Exception ex)
+            {
+                PostError("Paste from clipboard failed: " + ex.Message);
+                return;
+            }
+
+            if (attachments.Count > 0)
+                Post(new JObject { ["type"] = "attach.added", ["attachments"] = attachments });
+        }
+
+        /// <summary>Encodes a clipboard bitmap to a PNG under %LocalAppData%\CodeAstrogator\pasted.</summary>
+        private static string? SavePastedImage(System.Windows.Media.Imaging.BitmapSource? image)
+        {
+            if (image == null)
+                return null;
+
+            var dir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "CodeAstrogator", "pasted");
+            System.IO.Directory.CreateDirectory(dir);
+
+            var path = System.IO.Path.Combine(dir, "paste-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + ".png");
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(image));
+            using (var fs = System.IO.File.Create(path))
+                encoder.Save(fs);
+            return path;
+        }
+
+        private void HandleAttachContext()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            // v1: attach the active document as context (folder picker comes later).
+            var dte = _package.GetDte();
+            var path = dte?.ActiveDocument?.FullName;
+            if (string.IsNullOrEmpty(path))
+                return;
+
+            Post(new JObject
+            {
+                ["type"] = "attach.added",
+                ["attachments"] = new JArray
+                {
+                    new JObject
+                    {
+                        ["name"] = System.IO.Path.GetFileName(path),
+                        ["path"] = path,
+                    },
+                },
+            });
+        }
+
+        private DateTime _filesListFetchedUtc;
+        private JArray? _filesListCache;
+
+        /// <summary>Workspace file list for the @-mention autocomplete (30 s cache).</summary>
+        private void HandleFilesListRequest()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            if (_filesListCache != null && (DateTime.UtcNow - _filesListFetchedUtc).TotalSeconds < 30)
+            {
+                Post(new JObject { ["type"] = "files.list", ["files"] = _filesListCache.DeepClone() });
+                return;
+            }
+
+            var root = _package.GetSolutionDirectory();
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var arr = new JArray();
+                foreach (var entry in WorkspaceFileLister.List(root))
+                {
+                    arr.Add(new JObject { ["path"] = entry.Path, ["isDir"] = entry.IsDir });
+                }
+                _filesListCache = arr;
+                _filesListFetchedUtc = DateTime.UtcNow;
+                Post(new JObject { ["type"] = "files.list", ["files"] = arr.DeepClone() });
+            }).Task.Forget();
+        }
+
+        private void HandleEditorInsert(string text)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                var dte = _package.GetDte();
+                if (dte?.ActiveDocument?.Selection is TextSelection selection)
+                    selection.Insert(text);
+            }
+            catch (Exception ex)
+            {
+                PostError("Insert into editor failed: " + ex.Message);
+            }
+        }
+
+        // ── session events (background threads) → host → web ─────────────────
+
+        private void OnSessionEvent(ClaudeEvent ev)
+        {
+            switch (ev)
+            {
+                case SessionInitEvent init when !string.IsNullOrEmpty(init.SessionId):
+                    // history id/resumability is adopted at turn end (num_turns > 0) —
+                    // local-only turns like /help report ids --resume cannot use
+                    if (init.SlashCommands.Count > 0)
+                    {
+                        _slashCommands = new JArray(init.SlashCommands);
+                        SendSlashCommands();
+                    }
+                    if (!_sessionStartAnnounced) // decision #9
+                    {
+                        _sessionStartAnnounced = true;
+                        var parts = new System.Collections.Generic.List<string> { "Session started" };
+                        if (!string.IsNullOrEmpty(init.Model))
+                            parts.Add(init.Model!);
+                        if (!string.IsNullOrEmpty(init.Cwd))
+                            parts.Add(init.Cwd!);
+                        PostSystemNote(string.Join(" · ", parts));
+                    }
+                    break;
+
+                case ThinkingStartEvent ts: // decision #13
+                    Post(new JObject { ["type"] = "thinking.start", ["id"] = ts.BlockId });
+                    break;
+
+                case ThinkingDeltaEvent td:
+                    Post(new JObject
+                    {
+                        ["type"] = "thinking.delta",
+                        ["id"] = td.BlockId,
+                        ["text"] = td.Text,
+                        ["estimatedTokens"] = td.EstimatedTokens,
+                    });
+                    break;
+
+                case ThinkingEndEvent te:
+                    Post(new JObject { ["type"] = "thinking.end", ["id"] = te.BlockId });
+                    break;
+
+                case CompactBoundaryEvent compact: // decision #12
+                    if (compact.PostTokens > 0)
+                    {
+                        // the /compact turn's result reports usage 0 — the boundary
+                        // metadata is the only source for the new context size
+                        _history.Current.ContextTokens = compact.PostTokens;
+                        Post(new JObject
+                        {
+                            ["type"] = "usage.update",
+                            ["contextTokens"] = compact.PostTokens,
+                        });
+                    }
+                    PostSystemNote(compact.PreTokens > 0 && compact.PostTokens > 0
+                        ? $"Context compacted · {compact.PreTokens:N0} → {compact.PostTokens:N0} tokens"
+                        : "Context compacted");
+                    break;
+
+                case StatusEvent status when status.Status == "compacting":
+                    PostStatus("working", "Compacting context…");
+                    break;
+
+                case AssistantStartEvent start:
+                    _streamingAssistant = new JObject
+                    {
+                        ["role"] = "assistant",
+                        ["id"] = start.MessageId,
+                        ["text"] = "",
+                        ["ts"] = DateTime.UtcNow.ToString("o"),
+                    };
+                    RecordMessage(_streamingAssistant);
+                    _turnHadAssistantOutput = true;
+                    Post(new JObject { ["type"] = "assistant.start", ["id"] = start.MessageId });
+                    break;
+
+                case AssistantDeltaEvent delta:
+                    if (_streamingAssistant != null)
+                        _streamingAssistant["text"] = (_streamingAssistant.Value<string>("text") ?? "") + delta.Text;
+                    Post(new JObject { ["type"] = "assistant.delta", ["id"] = delta.MessageId, ["text"] = delta.Text });
+                    break;
+
+                case AssistantEndEvent end:
+                    _streamingAssistant = null;
+                    Post(new JObject { ["type"] = "assistant.end", ["id"] = end.MessageId });
+                    break;
+
+                case ToolUseEvent tool:
+                    RecordMessage(new JObject
+                    {
+                        ["role"] = "tool",
+                        ["id"] = tool.ToolUseId,
+                        ["toolName"] = tool.Name,
+                        ["input"] = tool.Input.DeepClone(),
+                        ["status"] = "running",
+                        ["ts"] = DateTime.UtcNow.ToString("o"),
+                    });
+                    Post(new JObject
+                    {
+                        ["type"] = "tool.use",
+                        ["id"] = tool.ToolUseId,
+                        ["name"] = tool.Name,
+                        ["input"] = tool.Input.DeepClone(),
+                        ["status"] = "running",
+                    });
+                    // decision #19 — edits the CLI approves without asking (acceptEdits/bypass) get
+                    // the SAME green permission card as the manual flow (pre-decided "approved"),
+                    // not a plain tool card + "Auto-approved" note. tool.result upgrades it to
+                    // Applied/Failed via UpgradePermissionResult, exactly like an approved edit.
+                    // Match the mode the RUNNING process was launched with — not the live setting.
+                    // After a mid-turn switch (e.g. plan approval flips Settings to acceptEdits) the
+                    // process is still in its old mode and fires the real permission hook; pre-rendering
+                    // an auto-approved card here would then collide with it (duplicate cards).
+                    if (IsEditTool(tool.Name)
+                        && _session.LaunchedPermissionMode is "acceptEdits" or "bypass")
+                    {
+                        var diff = BuildPermissionDiff(tool.Name, tool.Input);
+                        var card = new JObject
+                        {
+                            ["type"] = "permission.request",
+                            ["requestId"] = tool.ToolUseId,
+                            ["toolName"] = tool.Name,
+                            ["input"] = tool.Input.DeepClone(),
+                            ["autoApproved"] = true, // render pre-decided, no Approve/Reject buttons
+                        };
+                        if (diff != null)
+                            card["diff"] = diff;
+                        Post(card);
+                        RecordPermissionMessage(
+                            new PendingPermission { RequestId = tool.ToolUseId, ToolName = tool.Name, Input = tool.Input, Diff = diff },
+                            "approved");
+                    }
+                    break;
+
+                case ToolResultEvent result:
+                    // A result for a tool whose permission/question prompt is STILL open means the
+                    // CLI abandoned the prompt itself (e.g. the AskUserQuestion/permission tool timed
+                    // out and the turn moved on). Settle it, close the orphaned card, and restore the
+                    // status — otherwise the card stays interactive and the "working" rocket never
+                    // comes back (status stuck on "waiting-permission" for the rest of the turn).
+                    if (!string.IsNullOrEmpty(result.ToolUseId)
+                        && _pendingPermissions.ContainsKey(result.ToolUseId))
+                    {
+                        ResolvePending(result.ToolUseId, "deny", "Timed out — no answer");
+                        Post(new JObject { ["type"] = "permission.expire", ["requestId"] = result.ToolUseId });
+                        // background thread → can't call PostStatusAfterDecision (UI-thread only); Post
+                        // marshals, so compute the same state inline (working unless others are open).
+                        if (_session.IsBusy)
+                            PostStatus(_pendingPermissions.IsEmpty ? "working" : "waiting-permission");
+                    }
+                    Post(new JObject
+                    {
+                        ["type"] = "tool.result",
+                        ["id"] = result.ToolUseId,
+                        ["status"] = result.IsError ? "error" : "ok",
+                        ["summary"] = result.Summary,
+                    });
+                    UpgradePermissionResult(result.ToolUseId, result.IsError); // approved card → applied/failed
+                    break;
+
+                case TurnResultEvent turn:
+                    _history.Current.UpdatedAtUtc = DateTime.UtcNow;
+                    if (turn.NumTurns > 0 && !string.IsNullOrEmpty(turn.SessionId))
+                    {
+                        _history.Current.Id = turn.SessionId;
+                        _history.Current.HasCliSession = true;
+                    }
+                    // context size = the LAST assistant message's usage (one API call). The
+                    // result-event aggregate (InputTokens) re-counts the cached context for every
+                    // round-trip in the turn, so it massively over-counts (showed Ctx 100% / huge
+                    // footer). ContextInputTokens/OutputTokens hold the real occupancy.
+                    long contextTokens = turn.ContextInputTokens + turn.ContextOutputTokens;
+                    if (contextTokens > 0)
+                        _history.Current.ContextTokens = contextTokens;
+                    // result-only turns (e.g. /help) carry no assistant-message usage — fall back
+                    // to the aggregate (a single round-trip, so it equals the real size there)
+                    long footerInput = contextTokens > 0 ? turn.ContextInputTokens : turn.InputTokens;
+                    long footerOutput = contextTokens > 0 ? turn.ContextOutputTokens : turn.OutputTokens;
+                    // decision #8 — slash commands & friends often answer only via the
+                    // result line; render it as a full block when nothing was streamed.
+                    if (!_turnHadAssistantOutput && !turn.IsError
+                        && !string.IsNullOrWhiteSpace(turn.ResultText))
+                    {
+                        PostSyntheticAssistant(turn.ResultText!);
+                        _turnHadAssistantOutput = true;
+                    }
+                    Post(new JObject
+                    {
+                        ["type"] = "turn.result",
+                        ["sessionId"] = turn.SessionId,
+                        ["costUsd"] = turn.CostUsd,
+                        // footer mirrors the real context size (not the aggregated round-trip
+                        // total) so the chat footer and the Ctx meter agree
+                        ["tokens"] = new JObject
+                        {
+                            ["input"] = footerInput,
+                            ["output"] = footerOutput,
+                            ["total"] = footerInput + footerOutput,
+                        },
+                        ["durationMs"] = turn.DurationMs,
+                        ["contextTokens"] = _history.Current.ContextTokens,
+                        // last known utilization; RefreshUsage() right after turn end updates it
+                        ["limits"] = BuildLimits(),
+                    });
+                    break;
+
+                case ApiRetryEvent retry:
+                    Post(new JObject
+                    {
+                        ["type"] = "status",
+                        ["state"] = "working",
+                        ["text"] = string.IsNullOrEmpty(retry.Message) ? "Retrying…" : retry.Message,
+                    });
+                    break;
+
+                case StreamErrorEvent error:
+                    PostError(error.Message);
+                    break;
+            }
+        }
+
+        private void OnTurnCompleted(ClaudeTurnExit exit, string? error)
+        {
+            // A turn can end while a tools/call is still blocked (CLI crash/error/normal end);
+            // settle any open permission so the card doesn't orphan and the handler task frees.
+            DenyAllPendingPermissions("Turn ended");
+            lock (_history) _recordedPermissions.Clear(); // tool.result correlation is per-turn
+            if (error != null)
+            {
+                PostError(error);
+                PostStatus("error");
+            }
+            else
+            {
+                PostStatus("ready");
+            }
+            RefreshUsage(); // the turn just consumed quota — update the meters
+            SaveHistory();
+        }
+
+        /// <summary>When an approved edit's tool.result arrives, upgrade the persisted card +
+        /// live UI status to applied/failed so the outcome is visible (and survives reload).</summary>
+        private void UpgradePermissionResult(string toolUseId, bool isError)
+        {
+            if (string.IsNullOrEmpty(toolUseId))
+                return;
+            var status = isError ? "failed" : "applied";
+            lock (_history)
+            {
+                if (!_recordedPermissions.TryGetValue(toolUseId, out var rec))
+                    return;
+                rec["status"] = status;
+                _recordedPermissions.Remove(toolUseId);
+            }
+            Post(new JObject { ["type"] = "permission.result", ["requestId"] = toolUseId, ["status"] = status });
+        }
+
+        /// <summary>Persists the history file in the background (best-effort).</summary>
+        private void SaveHistory()
+        {
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                lock (_history)
+                    _history.Save();
+            }).Task.Forget();
+        }
+
+        /// <summary>
+        /// Fetches session/weekly utilization by running the CLI's own <c>/usage</c>
+        /// command (best-effort, background) and pushes a usage.update to the statusbar.
+        /// </summary>
+        private void RefreshUsage()
+        {
+            // Thread-agnostic: the async body switches to the UI thread to read options,
+            // then off it to run the CLI. Callers may be on the UI or a background thread.
+            _package.JoinableTaskFactory.RunAsync(RefreshUsageAsync).Task.Forget();
+        }
+
+        private async System.Threading.Tasks.Task RefreshUsageAsync()
+        {
+            // GetSolutionDirectory()/options are UI-thread reads; capture before going async.
+            await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var exeOverride = _package.GetOptions().ClaudeExecutablePath;
+            var cwd = _package.GetSolutionDirectory();
+
+            await TaskScheduler.Default;
+
+            _planLabel ??= ClaudeUsageClient.ReadPlanLabel();
+
+            var snapshot = await ClaudeUsageClient.FetchAsync(exeOverride, cwd).ConfigureAwait(false);
+            if (snapshot == null && _planLabel == null)
+                return; // API-key mode or offline — leave the meters alone
+
+            if (snapshot != null)
+                _lastUsage = snapshot;
+
+            long contextTokens;
+            lock (_history)
+                contextTokens = _history.Current.ContextTokens;
+            var msg = new JObject
+            {
+                ["type"] = "usage.update",
+                ["tokens"] = _session.TotalTokens,
+                ["contextTokens"] = contextTokens,
+                ["sessionPct"] = _lastUsage?.SessionPct ?? 0,
+                ["weeklyPct"] = _lastUsage?.WeeklyPct ?? 0,
+                ["sessionResetsAt"] = _lastUsage?.SessionResetsAt?.ToString("o"),
+                ["weeklyResetsAt"] = _lastUsage?.WeeklyResetsAt?.ToString("o"),
+            };
+            if (_planLabel != null)
+                msg["plan"] = _planLabel;
+            Post(msg);
+        }
+
+        private void OnVsThemeChanged(ThemeChangedEventArgs e)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_package.GetOptions().ThemeModeString == "auto")
+                SendTheme();
+        }
+
+        /// <summary>A Unified Settings value changed (settings UI or our own write-back).</summary>
+        private void OnOptionsChanged()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            SendTheme();
+            SendActiveFile(); // the auto-add-active-file toggle may have changed
+            SendBannerSettings(); // announcement/update opt-in may have changed in the settings window
+            _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(_package.GetOptions()); // applies next turn
+            ApplyProcessHostOption(); // persistent-CLI toggle may have changed
+        }
+
+        /// <summary>Configured prompt timeout (settings, minutes) as milliseconds for the CLI env var.</summary>
+        private static int PromptTimeoutMs(AstrogatorOptions o) =>
+            AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes) * 60_000;
+
+        private void OnActiveDocumentChanged(string? path)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            SendActiveFile();
+        }
+
+        /// <summary>
+        /// Chip toggle in the composer — a per-session override only; it does NOT change
+        /// the option. The option (settings) is the master switch and takes priority.
+        /// </summary>
+        private void HandleActiveFileSetEnabled(bool enabled)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _activeFileSessionEnabled = enabled;
+            SendActiveFile();
+        }
+
+        /// <summary>True only when both the option and the per-session toggle are on.</summary>
+        private bool ActiveFileEffective =>
+            _package.GetOptions().AutoAddActiveFile && _activeFileSessionEnabled;
+
+        /// <summary>
+        /// Tells the UI about the active editor file: <c>optionEnabled</c> governs whether
+        /// the chip shows at all, <c>enabled</c> is the per-session toggle (strike-through),
+        /// <c>lines</c> is the selected line range (e.g. "10-20", null when none/disabled).
+        /// </summary>
+        private void SendActiveFile()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var path = _activeDocs.CurrentPath;
+            var sel = GetActiveSelection();
+            Post(new JObject
+            {
+                ["type"] = "activeFile",
+                ["path"] = path,
+                ["name"] = string.IsNullOrEmpty(path) ? null : System.IO.Path.GetFileName(path),
+                ["optionEnabled"] = _package.GetOptions().AutoAddActiveFile,
+                ["enabled"] = _activeFileSessionEnabled,
+                ["lines"] = sel == null ? null
+                    : (sel.Value.top == sel.Value.bottom ? sel.Value.top.ToString()
+                                                          : sel.Value.top + "-" + sel.Value.bottom),
+            });
+        }
+
+        /// <summary>
+        /// Selected line range (1-based) in the active editor, or null when there is no
+        /// selection, the option is off, or the active document isn't the tracked file.
+        /// </summary>
+        private (int top, int bottom)? GetActiveSelection()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!_package.GetOptions().IncludeSelectedLines || string.IsNullOrEmpty(_activeDocs.CurrentPath))
+                return null;
+            try
+            {
+                var doc = _package.GetDte()?.ActiveDocument;
+                if (doc == null
+                    || !string.Equals(doc.FullName, _activeDocs.CurrentPath, StringComparison.OrdinalIgnoreCase)
+                    || doc.Selection is not EnvDTE.TextSelection sel || sel.IsEmpty)
+                {
+                    return null;
+                }
+                int top = sel.TopPoint.Line;
+                int bottom = sel.BottomPoint.Line;
+                // a selection ending at column 1 doesn't actually cover that last line
+                if (bottom > top && sel.BottomPoint.LineCharOffset == 1)
+                    bottom--;
+                return (top, bottom < top ? top : bottom);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // ── host → web senders ────────────────────────────────────────────────
+
+        private void SendTheme()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            Post(ThemeService.BuildThemeMessage(_package.GetOptions().ThemeModeString));
+        }
+
+        private void SendAuthState()
+        {
+            var exe = ClaudeExecutableLocator.Locate(_package.GetOptions().ClaudeExecutablePath);
+            var (loggedIn, mode) = ClaudeExecutableLocator.ProbeAuthState();
+            Post(new JObject
+            {
+                ["type"] = "auth.state",
+                ["loggedIn"] = exe != null && loggedIn,
+                ["mode"] = exe == null ? "none" : mode,
+            });
+        }
+
+        private void SendSessionInit()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = _package.GetOptions();
+            Post(new JObject
+            {
+                ["type"] = "session.init",
+                ["sessionId"] = _history.Current.Id,
+                ["title"] = _history.Current.Title,
+                ["model"] = _session.Settings.Model ?? options.DefaultModel ?? "",
+                ["effort"] = _session.Settings.Effort,
+                ["planMode"] = _session.Settings.PlanMode,
+                ["ultracode"] = _session.Settings.Ultracode,
+                ["permissionMode"] = _session.Settings.PermissionMode,
+                ["autoAcceptCommands"] = options.AutoAcceptCommands,
+                ["cwd"] = _package.GetSolutionDirectory() ?? "",
+                ["tokens"] = _session.TotalTokens,
+                ["contextTokens"] = _history.Current.ContextTokens,
+                ["limits"] = BuildLimits(),
+                ["plan"] = _planLabel ?? "",
+                ["verbosity"] = options.VerbosityString,
+                ["accent"] = options.AccentColor ?? "",
+                ["noticeFetchEnabled"] = options.NoticeFetchEnabled,
+                ["noticeFetchDecided"] = options.NoticeFetchDecided,
+                ["updateCheckEnabled"] = options.UpdateCheckEnabled,
+                ["updateCheckDecided"] = options.UpdateCheckDecided,
+                ["appVersion"] = GetInstalledVersion(),
+            });
+        }
+
+        /// <summary>Pushes the current announcement + update opt-in (and installed version) to the UI
+        /// (live update after a settings change). The initial values also ride along in session.init.</summary>
+        private void SendBannerSettings()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = _package.GetOptions();
+            Post(new JObject
+            {
+                ["type"] = "banner.settings",
+                ["noticeEnabled"] = options.NoticeFetchEnabled,
+                ["noticeDecided"] = options.NoticeFetchDecided,
+                ["updateEnabled"] = options.UpdateCheckEnabled,
+                ["updateDecided"] = options.UpdateCheckDecided,
+                ["appVersion"] = GetInstalledVersion(),
+            });
+        }
+
+        private static string? _installedVersion;
+        /// <summary>Installed extension version, read from the deployed extension.vsixmanifest
+        /// (Identity/@Version) next to the assembly. Cached; falls back to the assembly version.</summary>
+        private static string GetInstalledVersion()
+        {
+            if (_installedVersion != null)
+                return _installedVersion;
+            try
+            {
+                var dir = System.IO.Path.GetDirectoryName(typeof(WebViewBridge).Assembly.Location) ?? "";
+                var manifest = System.IO.Path.Combine(dir, "extension.vsixmanifest");
+                if (System.IO.File.Exists(manifest))
+                {
+                    var doc = System.Xml.Linq.XDocument.Load(manifest);
+                    var identity = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "Identity");
+                    var v = identity?.Attribute("Version")?.Value;
+                    if (!string.IsNullOrEmpty(v))
+                        return _installedVersion = v!;
+                }
+            }
+            catch { /* fall back below */ }
+            try
+            {
+                var v = typeof(WebViewBridge).Assembly.GetName().Version?.ToString();
+                if (!string.IsNullOrEmpty(v))
+                    return _installedVersion = v!;
+            }
+            catch { }
+            return _installedVersion = "";
+        }
+
+        /// <summary>Limits payload incl. reset times (shown as meter tooltips in the UI).</summary>
+        private JObject BuildLimits() => new JObject
+        {
+            ["sessionPct"] = _lastUsage?.SessionPct ?? 0,
+            ["weeklyPct"] = _lastUsage?.WeeklyPct ?? 0,
+            ["sessionResetsAt"] = _lastUsage?.SessionResetsAt?.ToString("o"),
+            ["weeklyResetsAt"] = _lastUsage?.WeeklyResetsAt?.ToString("o"),
+        };
+
+        private static bool IsEditTool(string name) =>
+            name is "Edit" or "Write" or "MultiEdit" or "NotebookEdit";
+
+        /// <summary>Dim one-line system note in the transcript (display option "C").</summary>
+        private void PostSystemNote(string text)
+        {
+            var id = "note-" + Guid.NewGuid().ToString("n");
+            RecordMessage(new JObject
+            {
+                ["role"] = "system",
+                ["id"] = id,
+                ["text"] = text,
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            });
+            Post(new JObject { ["type"] = "system.note", ["id"] = id, ["text"] = text });
+        }
+
+        private void PostStatus(string state, string? text = null)
+        {
+            var msg = new JObject { ["type"] = "status", ["state"] = state };
+            if (text != null)
+                msg["text"] = text;
+            Post(msg);
+        }
+
+        private void PostError(string message)
+        {
+            RecordMessage(new JObject
+            {
+                ["role"] = "error",
+                ["id"] = Guid.NewGuid().ToString("n"),
+                ["text"] = message,
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            });
+            Post(new JObject { ["type"] = "error", ["message"] = message });
+        }
+
+        /// <summary>Host-generated informational message rendered as an assistant block.</summary>
+        private void PostSyntheticAssistant(string text)
+        {
+            var id = "host-" + Guid.NewGuid().ToString("n");
+            RecordMessage(new JObject
+            {
+                ["role"] = "assistant",
+                ["id"] = id,
+                ["text"] = text,
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            });
+            Post(new JObject { ["type"] = "assistant.start", ["id"] = id });
+            Post(new JObject { ["type"] = "assistant.delta", ["id"] = id, ["text"] = text });
+            Post(new JObject { ["type"] = "assistant.end", ["id"] = id });
+        }
+
+        private void RecordMessage(JObject message)
+        {
+            lock (_history)
+            {
+                _history.Current.Messages.Add(message);
+                _history.Current.UpdatedAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        /// <summary>Posts a message if the WebUI is ready, else queues it until the "ready" handshake
+        /// (so an action triggered before the window has loaded — e.g. an editor right-click command
+        /// that just opened the tool window — is not silently dropped). UI thread.</summary>
+        private void PostOrQueue(JObject msg)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_uiReady)
+                Post(msg);
+            else
+                _queuedUiMessages.Add(msg);
+        }
+
+        /// <summary>Marks the UI ready and delivers anything queued before the "ready" handshake.</summary>
+        private void FlushQueuedUiMessages()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _uiReady = true;
+            if (_queuedUiMessages.Count == 0)
+                return;
+            var pending = _queuedUiMessages.ToArray();
+            _queuedUiMessages.Clear();
+            foreach (var m in pending)
+                Post(m);
+        }
+
+        /// <summary>Posts a host→web message, marshalling to the UI thread as required by WebView2.</summary>
+        private void Post(JObject msg)
+        {
+            if (_disposed)
+                return;
+            var json = msg.ToString(Newtonsoft.Json.Formatting.None);
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed)
+                    return;
+                try
+                {
+                    _webView.PostWebMessageAsJson(json);
+                }
+                catch
+                {
+                    // WebView already torn down
+                }
+            }).Task.Forget();
+        }
+    }
+}

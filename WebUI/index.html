@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Code Astrogator</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div id="root" class="root">
+    <!-- Header -->
+    <header class="header" id="header">
+      <div class="title-wrap">
+        <div class="title" id="title" title="Untitled">Untitled</div>
+        <button class="icon-btn small rename-btn" id="btn-rename" title="Rename session" aria-label="Rename session" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18 10l-4-4L4 16z"/><path d="M13 7l4 4"/></svg>
+        </button>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="btn-remote" title="Remote control" aria-label="Remote control">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-history" title="History" aria-label="History" aria-haspopup="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-new" title="New chat" aria-label="New chat">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+        </button>
+        <button class="icon-btn" id="btn-settings" title="Appearance" aria-label="Appearance" aria-haspopup="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Notice / announcement banner (below the header). Content + on/off come from a remote
+         notice.json fetched from the project's GitHub (gated behind a user opt-in); rendered by
+         app.js. Hidden by default — shown only when the notice is enabled and within its date
+         window. X dismisses for this session. See app.js (NOTICE_SOURCE_URL) and docs/NOTES.md. -->
+    <div class="notice-banner" id="notice-banner" role="status" hidden>
+      <svg class="notice-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+      <div class="notice-text" id="notice-text"></div>
+      <button class="notice-close" id="notice-close" title="Dismiss" aria-label="Dismiss">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <!-- Update banner (separate from the announcement banner; both can show at once). Shown when
+         update notifications are enabled and version.json on GitHub reports a newer version than the
+         installed one. Links to the GitHub release. See app.js (UPDATE_SOURCE_URL). -->
+    <div class="notice-banner update-banner" id="update-banner" role="status" hidden>
+      <svg class="notice-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+      <div class="notice-text" id="update-text"></div>
+      <button class="notice-close" id="update-close" title="Dismiss" aria-label="Dismiss">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <!-- Transcript -->
+    <div class="transcript-wrap">
+      <main class="transcript" id="transcript" tabindex="-1">
+        <div class="transcript-inner" id="transcript-inner"></div>
+      </main>
+      <button class="jump-pill" id="jump-pill" hidden>
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        Jump to latest
+      </button>
+
+      <!-- Remote control mode (covers the transcript while active) -->
+      <div class="remote-panel" id="remote-panel" hidden>
+        <div class="remote-card">
+          <div class="remote-title">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+            Remote Control
+          </div>
+          <div class="remote-status" id="remote-status">Starting remote control…</div>
+          <canvas class="remote-qr" id="remote-qr" hidden></canvas>
+          <div class="remote-url" id="remote-url" hidden></div>
+          <button class="remote-btn" id="btn-remote-copy" hidden>Copy link</button>
+          <button class="remote-btn primary" id="btn-remote-end">End remote session</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Composer -->
+    <section class="composer-wrap" id="composer-wrap">
+      <div class="composer" id="composer">
+        <div class="attachments" id="attachments" hidden></div>
+        <textarea id="input" class="input" rows="1" placeholder="ctrl esc to focus or unfocus Claude" spellcheck="false"></textarea>
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <button class="icon-btn small" id="btn-plus" title="Add" aria-label="Add" aria-haspopup="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+            <button class="icon-btn small" id="btn-slash" title="Slash commands" aria-label="Slash commands" aria-haspopup="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M14 8l-4 8"/></svg>
+            </button>
+            <button class="active-file-chip" id="active-file" hidden aria-pressed="true">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+              <span class="active-file-name" id="active-file-name"></span>
+              <span class="active-file-lines" id="active-file-lines" hidden></span>
+            </button>
+          </div>
+          <div class="toolbar-right">
+            <button class="modelmode-btn" id="btn-modelmode" aria-haspopup="true">
+              <span id="modelmode-label">Opus 4.8 · Ask</span>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <button class="send-btn" id="btn-send" title="Send" aria-label="Send" disabled>
+              <svg class="ic-send" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+              <svg class="ic-stop" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Statusbar -->
+    <footer class="statusbar" id="statusbar">
+      <div class="status-indicator" id="status-indicator">
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-text" id="status-text">Ready</span>
+      </div>
+      <div class="status-sep"></div>
+      <div class="status-meter" id="status-session" title="Session usage">
+        <span class="meter-label" id="label-session">Session 0%</span>
+        <span class="meter"><span class="meter-fill" id="meter-session"></span></span>
+      </div>
+      <div class="status-meter" id="status-weekly" title="Weekly usage">
+        <span class="meter-label" id="label-weekly">Weekly 0%</span>
+        <span class="meter"><span class="meter-fill" id="meter-weekly"></span></span>
+      </div>
+      <div class="status-grow"></div>
+      <div class="plan-badge" id="plan-badge" hidden>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20V10M12 20V4M19 20v-6"/></svg>
+        <span id="plan-label">Plan</span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Overlay layer for popovers/panels -->
+  <div id="overlay-layer"></div>
+
+  <script src="config.js"></script>
+  <script src="qr.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
