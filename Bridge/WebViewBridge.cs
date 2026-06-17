@@ -39,6 +39,8 @@ namespace CodeAstrogator.Bridge
         private bool _sessionStartAnnounced;  // "Session started" note, once per session (decision #9)
         private UsageSnapshot? _lastUsage;    // session/weekly plan utilization (from `claude -p /usage`)
         private string? _planLabel;           // "Team Plan" etc. from ~/.claude.json
+        private System.Threading.Timer? _usageTimer; // periodic idle refresh of the usage meters
+        private const int UsageRefreshIntervalMs = 5 * 60 * 1000; // every 5 min while idle
         private JArray? _slashCommands;       // CLI-reported slash commands (system/init)
         private RemoteControlHost? _remote;   // `claude remote-control` server (at most one)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
@@ -84,7 +86,11 @@ namespace CodeAstrogator.Bridge
 
             // In-process MCP permission server (Teil A §A5). Best-effort: if it fails to start,
             // IsAvailable stays false and edits fall back to the CLI default (no prompt flags).
-            _permission = new McpPermissionBridge { OnPermissionRequested = HandlePermissionRequestedAsync };
+            _permission = new McpPermissionBridge
+            {
+                OnPermissionRequested = HandlePermissionRequestedAsync,
+                ToolTimeoutMs = PromptTimeoutMs(opt), // config `timeout` wins over the env var (CLI 2.1.178)
+            };
             try { _permission.Start(); } catch { /* leave unavailable */ }
             _session.PermissionBridge = _permission;
             _history = SessionHistoryStore.LoadFrom(
@@ -98,6 +104,19 @@ namespace CodeAstrogator.Bridge
             _session.TurnCompleted += OnTurnCompleted;
             VSColorTheme.ThemeChanged += OnVsThemeChanged;
             _package.OptionsChanged += OnOptionsChanged;
+
+            // Keep the usage meters fresh while the window sits idle: the meters are otherwise
+            // only updated on window open (ready) and after each turn. First tick after one
+            // interval (the ready handler does the on-open fetch). The timer fires on a thread-pool
+            // thread; RefreshUsage is thread-agnostic and Post() is guarded against teardown.
+            _usageTimer = new System.Threading.Timer(OnUsageTimerTick, null, UsageRefreshIntervalMs, UsageRefreshIntervalMs);
+        }
+
+        private void OnUsageTimerTick(object state)
+        {
+            if (_disposed || _session.IsBusy)
+                return; // a turn is running → RefreshUsage runs on turn end anyway; don't pile on
+            RefreshUsage();
         }
 
         public void Dispose()
@@ -106,6 +125,7 @@ namespace CodeAstrogator.Bridge
             if (_disposed)
                 return;
             _disposed = true;
+            _usageTimer?.Dispose();
             VSColorTheme.ThemeChanged -= OnVsThemeChanged;
             _package.OptionsChanged -= OnOptionsChanged;
             _activeDocs.ActiveDocumentChanged -= OnActiveDocumentChanged;
@@ -196,6 +216,9 @@ namespace CodeAstrogator.Bridge
                     break;
                 case "session.rename":
                     HandleSessionRename(msg.Value<string>("sessionId"), msg.Value<string>("title") ?? "");
+                    break;
+                case "session.delete":
+                    HandleSessionDelete(msg.Value<string>("sessionId"));
                     break;
                 case "model.set":
                     _session.Settings.Model = msg.Value<string>("model");
@@ -906,6 +929,40 @@ namespace CodeAstrogator.Bridge
                     string.IsNullOrEmpty(sessionId) ? _history.Current.Id : sessionId!, title);
             if (renamed)
                 SaveHistory();
+        }
+
+        /// <summary>
+        /// Deletes a session from the history (web → host <c>session.delete</c>, confirmed in the UI).
+        /// If the active session was deleted, behaves like "new chat" (fresh empty session + re-init).
+        /// Always re-sends <c>session.list</c> so an open history popover refreshes in place.
+        /// </summary>
+        private void HandleSessionDelete(string? sessionId)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (string.IsNullOrEmpty(sessionId))
+                return;
+
+            bool deleted, wasCurrent;
+            lock (_history)
+                (deleted, wasCurrent) = _history.Delete(sessionId!);
+            if (!deleted)
+                return;
+
+            SaveHistory();
+
+            if (wasCurrent)
+            {
+                _session.ResetSession();
+                _sessionStartAnnounced = false;
+                _activeFileSessionEnabled = true; // per-session override resets with the session
+                SendSessionInit();                // resets the transcript view to the fresh session
+                SendActiveFile();
+            }
+
+            JArray sessions;
+            lock (_history)
+                sessions = _history.ToSessionList();
+            Post(new JObject { ["type"] = "session.list", ["sessions"] = sessions });
         }
 
         private void AttachToRecord(SessionRecord record)
@@ -1687,7 +1744,9 @@ namespace CodeAstrogator.Bridge
             SendTheme();
             SendActiveFile(); // the auto-add-active-file toggle may have changed
             SendBannerSettings(); // announcement/update opt-in may have changed in the settings window
-            _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(_package.GetOptions()); // applies next turn
+            var promptTimeoutMs = PromptTimeoutMs(_package.GetOptions());
+            _session.Settings.McpToolTimeoutMs = promptTimeoutMs;       // env-var fallback, applies next turn
+            _permission.UpdateToolTimeout(promptTimeoutMs);            // config `timeout` (the value the CLI prefers)
             ApplyProcessHostOption(); // persistent-CLI toggle may have changed
         }
 
