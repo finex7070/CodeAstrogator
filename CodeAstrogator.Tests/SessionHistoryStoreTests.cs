@@ -129,6 +129,45 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void Delete_ArchivedSession_RemovesItAndKeepsCurrent()
+        {
+            var store = SessionHistoryStore.LoadFrom(_path);
+            store.Current.Id = "old";
+            store.Current.Messages.Add(Msg("user", "first session"));
+            store.StartNew();
+            store.Current.Messages.Add(Msg("user", "second session"));
+
+            var (deleted, wasCurrent) = store.Delete("old");
+            Assert.True(deleted);
+            Assert.False(wasCurrent);
+            Assert.Contains("second", store.ToSessionList().Single().Value<string>("preview"));
+        }
+
+        [Fact]
+        public void Delete_CurrentSession_ReportsWasCurrentAndStartsFresh()
+        {
+            var store = SessionHistoryStore.LoadFrom(_path);
+            var currentId = store.Current.Id;
+            store.Current.Messages.Add(Msg("user", "hello"));
+
+            var (deleted, wasCurrent) = store.Delete(currentId);
+            Assert.True(deleted);
+            Assert.True(wasCurrent);
+            Assert.NotEqual(currentId, store.Current.Id); // replaced with a fresh empty record
+            Assert.Empty(store.ToSessionList());           // nothing left to show
+        }
+
+        [Fact]
+        public void Delete_UnknownId_ReturnsFalse()
+        {
+            var store = SessionHistoryStore.LoadFrom(_path);
+            store.Current.Messages.Add(Msg("user", "hello"));
+            var (deleted, wasCurrent) = store.Delete("does-not-exist");
+            Assert.False(deleted);
+            Assert.False(wasCurrent);
+        }
+
+        [Fact]
         public void GetHistoryPath_IsStablePerWorkspaceAndIgnoresCaseAndTrailingSlash()
         {
             var a = SessionHistoryStore.GetHistoryPath(@"C:\Users\Jan\source\repos\Foo");

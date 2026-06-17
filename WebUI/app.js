@@ -598,6 +598,9 @@
     if (prev === "waiting-permission" && s !== "waiting-permission" && state.pendingPermissions.size) {
       Array.from(state.pendingPermissions).forEach(expirePermissionCard);
     }
+    // orphaned thinking: the turn reached a terminal state (Stop/error/normal end) — drop any
+    // "✻ Thinking…" line that never got a thinking.end (interrupted turns emit none).
+    if (s !== "working" && s !== "waiting-permission") finalizeActiveThinking();
   }
 
   // "Working" indicator — a flying rocket + a random Space-Astrogator one-liner, pinned to the
@@ -946,6 +949,23 @@
       t.status.appendChild(iconCheck());
     } else if (t.line) {
       t.line.remove(); // nothing to keep — purely transient feedback
+    }
+    state.activeThinking = null;
+  }
+
+  /**
+   * Drop an orphaned "✻ Thinking…" item when the turn ends without a thinking.end —
+   * e.g. the user hit Stop (the interrupted CLI emits no thinking.end). The transient
+   * line is removed (nothing to keep); a card (real streamed text) just loses its spinner.
+   * No-op on normal turns, where thinking.end already cleared state.activeThinking.
+   */
+  function finalizeActiveThinking() {
+    const t = state.activeThinking;
+    if (!t) return;
+    if (t.card) {
+      if (t.status) t.status.innerHTML = ""; // stop the spinner; the partial text stays
+    } else if (t.line) {
+      t.line.remove();
     }
     state.activeThinking = null;
   }
@@ -1938,6 +1958,7 @@
   }
   function iconCheck() { return svg('<path d="M5 13l4 4L19 7"/>', { class: "status-ok", width: 14, height: 14, "stroke-width": 2.2 }); }
   function iconCross() { return svg('<path d="M6 6l12 12M18 6L6 18"/>', { class: "status-err", width: 14, height: 14, "stroke-width": 2.2 }); }
+  function iconTrash() { return svg('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/>', { width: 14, height: 14, "stroke-width": 1.8 }); }
   function toolIcon(name) {
     // MCP tools (mcp__server__Tool) get one consistent "plug" icon — the substring heuristic
     // below would otherwise misclassify them by their long names (e.g. "...ManageEditor" → edit).
@@ -2321,6 +2342,43 @@
 
   $("btn-rename").addEventListener("click", openRenameModal);
 
+  /** Generic confirmation modal (reused for destructive actions like deleting a session). */
+  function openConfirmModal(opts) {
+    closeAllOverlays();
+    const backdrop = el("div", "modal-backdrop");
+    const modal = el("div", "modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-label", opts.title);
+    modal.appendChild(el("div", "modal-title", opts.title));
+    modal.appendChild(el("div", "modal-body", opts.message));
+    const actions = el("div", "modal-actions");
+    const cancel = el("button", "modal-btn", "Cancel");
+    const confirm = el("button", "modal-btn " + (opts.danger ? "danger" : "primary"), opts.confirmLabel || "OK");
+    cancel.addEventListener("click", closeModal);
+    confirm.addEventListener("click", () => { closeModal(); if (opts.onConfirm) opts.onConfirm(); });
+    actions.appendChild(cancel);
+    actions.appendChild(confirm);
+    modal.appendChild(actions);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeModal(); });
+    modal.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closeModal(); } });
+    overlayLayer.appendChild(backdrop);
+    openModalEl = backdrop;
+    confirm.focus(); // Enter activates the focused confirm button
+  }
+
+  /** Trash button in the history list → confirm, then ask the host to delete the session. */
+  function confirmDeleteSession(s) {
+    const name = (s.title || "Untitled");
+    openConfirmModal({
+      title: "Delete session",
+      message: "Delete “" + name + "”? This permanently removes it from the chat history.",
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm: () => post("session.delete", { sessionId: s.id }),
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Remote control (claude remote-control server) — locks composer + transcript,
   // shows link + QR, "End remote session" loads the remote session afterwards.
@@ -2446,10 +2504,17 @@
       return;
     }
     sessions.forEach((s) => {
-      const item = el("button", "history-item" + (s.id === state.sessionId ? " active" : ""));
+      // A div (not a button) so the delete button can nest inside without invalid markup.
+      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : ""));
       const top = el("div", "hi-top");
       top.appendChild(el("span", "hi-title", s.title || "Untitled"));
       top.appendChild(el("span", "hi-time", relativeTime(s.updatedAt)));
+      const del = el("button", "hi-delete");
+      del.title = "Delete session";
+      del.setAttribute("aria-label", "Delete session");
+      del.appendChild(iconTrash());
+      del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
+      top.appendChild(del);
       item.appendChild(top);
       if (s.preview) item.appendChild(el("div", "hi-preview", s.preview));
       item.addEventListener("click", () => {
@@ -3026,6 +3091,11 @@
         case "session.listRequest": return sendIn("session.list", { sessions: fakeSessions }, 120);
         case "session.load": return onLoad(msg.sessionId);
         case "session.rename": return onRename(msg);
+        case "session.delete": {
+          const i = fakeSessions.findIndex((x) => x.id === msg.sessionId);
+          if (i >= 0) fakeSessions.splice(i, 1);
+          return sendIn("session.list", { sessions: fakeSessions }, 60);
+        }
         case "theme.setMode": return onThemeMode(msg.mode);
         case "accent.set": return; // applied optimistically in the UI; mock just persists nothing
         case "model.set": return; // echoed into state already

@@ -4,6 +4,27 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.4.2] – 2026-06-17
+
+### Added
+- **Delete sessions from the history list.** Each entry in the history popover now has a trash button (revealed on hover) that, after an explicit confirmation dialog, removes the session from the chat history. Deleting the active session starts a fresh chat. (The chat history is already capped at 50 sessions / 400 messages each, persisted on a background thread, so it cannot grow without bound — this just lets you prune it manually.)
+
+---
+
+## [0.4.1] – 2026-06-17
+
+### Changed
+- **Settings window polish.** Long checkbox labels (under "Announcements & updates") now wrap instead of being clipped at the right edge, and the window's height is capped to the screen — when the content is taller than the display it scrolls instead of growing off-screen (fixes usability on smaller screens).
+- **Usage meters now refresh periodically while idle.** Previously they only updated on window open and after each turn. They are now also refreshed every 5 minutes whenever no turn is running, so the session/weekly utilization stays current without sending a prompt (the `/usage` fetch runs locally, `num_turns: 0`, no cost). Skipped while a turn is in progress (the post-turn refresh covers that).
+
+### Fixed
+- **Better readability of the hint texts in the Model·Mode popover.** The two helper lines (under "Ultracode" and "Auto-accept commands") used the faintest text color and were hard to read; they now use the standard dimmed color (higher contrast in both dark and light themes).
+- **"Prompt timeout" setting works again with the new CLI (2.1.178).** A full re-verification against CLI 2.1.178 found that the CLI now reads the MCP tool-call timeout from the config's `timeout` field and lets it **take precedence over** the `MCP_TOOL_TIMEOUT` environment variable (the reverse of older CLI versions). Because the config field was hardwired to 1 hour, the user-configured prompt timeout (sent only via the env var) had no effect. The configured value is now written into the config field (and rewritten when changed), so the setting takes effect again; the env var stays as a fallback. (Everything else re-verified unchanged: `--effort`/`--permission-mode` values, the MCP permission protocol, AskUserQuestion routing, and the `/usage` parser.)
+- **Slash-command menu / autocomplete no longer overflows off-screen.** The CLI now reports 28+ commands (built-ins plus skills), and the popover had no height cap — so the list grew past the window and only the first entry was visible. The popover is now height-capped and scrolls internally (verified against CLI 2.1.178).
+- **The "✻ Thinking…" indicator no longer hangs when a turn is stopped while it is showing.** When the prompt was stopped (or the turn ended abnormally) during the thinking phase, the interrupted CLI emits no `thinking.end`, so the transient "✻ Thinking…" line stayed on screen for the rest of the session. The line is now dropped whenever the turn reaches a terminal state (Stop / error / normal end); a streamed thinking card just loses its spinner. No effect on normal turns, where `thinking.end` already cleared it.
+
+---
+
 ## [0.4.0] – 2026-06-16
 
 ### Added

@@ -46,6 +46,9 @@ namespace CodeAstrogator.ToolWindows
             Title = "Code Astrogator — Settings";
             Width = 540;
             SizeToContent = SizeToContent.Height;
+            // Cap the height to the screen so the window never grows taller than the display on
+            // small screens; past the cap the content ScrollViewer (below) scrolls instead.
+            MaxHeight = Math.Max(400, SystemParameters.WorkArea.Height - 40);
             ResizeMode = ResizeMode.NoResize;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             HasMaximizeButton = false;
@@ -294,7 +297,13 @@ namespace CodeAstrogator.ToolWindows
 
         private static CheckBox MakeCheck(string content, Thickness margin)
         {
-            var cb = new CheckBox { Content = content, Margin = margin };
+            // Wrap the label so long descriptions don't get clipped at the window's right edge.
+            var cb = new CheckBox
+            {
+                Content = new TextBlock { Text = content, TextWrapping = TextWrapping.Wrap },
+                Margin = margin,
+                VerticalContentAlignment = VerticalAlignment.Top,
+            };
             cb.SetResourceReference(StyleProperty, VsResourceKeys.CheckBoxStyleKey);
             return cb;
         }

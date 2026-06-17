@@ -19,9 +19,10 @@ namespace CodeAstrogator.Core
         public string PermissionMode { get; set; } = "ask";
 
         /// <summary>How long (ms) the CLI may wait on a permission/AskUserQuestion prompt before it
-        /// times out — applied via the MCP_TOOL_TIMEOUT env var. Driven by the settings window;
-        /// defaults to <see cref="McpPermissionBridge.ToolTimeoutMs"/>.</summary>
-        public int McpToolTimeoutMs { get; set; } = McpPermissionBridge.ToolTimeoutMs;
+        /// times out — carried in the MCP config's <c>timeout</c> field (the CLI prefers it over the
+        /// MCP_TOOL_TIMEOUT env var). Driven by the settings window; defaults to
+        /// <see cref="McpPermissionBridge.DefaultToolTimeoutMs"/>.</summary>
+        public int McpToolTimeoutMs { get; set; } = McpPermissionBridge.DefaultToolTimeoutMs;
     }
 
     /// <summary>
@@ -147,12 +148,13 @@ namespace CodeAstrogator.Core
                         request.ExtraArgs.Add("--permission-prompt-tool");
                         request.ExtraArgs.Add(McpPermissionBridge.PermissionPromptToolRef);
                         // The CLI's default MCP tool-call timeout is short (≈ a minute) — a permission
-                        // prompt / AskUserQuestion would "time out" long before a human answers. Raise
-                        // it via env vars (the config's `timeout` field alone isn't honoured for tool
-                        // calls on HTTP MCP servers). MCP_TOOL_TIMEOUT = per-tool-call wait.
+                        // prompt / AskUserQuestion would "time out" long before a human answers. The
+                        // effective wait is the config's `timeout` field (set on the bridge from the
+                        // same setting; the CLI prefers it over the env var — verified 2.1.178). We
+                        // still set MCP_TOOL_TIMEOUT as a fallback in case a future CLI flips that.
                         var timeoutMs = (Settings.McpToolTimeoutMs > 0
                             ? Settings.McpToolTimeoutMs
-                            : McpPermissionBridge.ToolTimeoutMs).ToString();
+                            : McpPermissionBridge.DefaultToolTimeoutMs).ToString();
                         request.Environment["MCP_TOOL_TIMEOUT"] = timeoutMs;
                         request.Environment["MCP_TIMEOUT"] = timeoutMs; // server-startup grace too
                     }
