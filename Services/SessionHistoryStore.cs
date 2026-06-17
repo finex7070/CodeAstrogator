@@ -209,6 +209,28 @@ namespace CodeAstrogator.Services
             return record;
         }
 
+        /// <summary>
+        /// Deletes a session (archived or the active one). Returns whether anything was removed and
+        /// whether it was the <see cref="Current"/> session — in which case Current is replaced with a
+        /// fresh empty record and the caller should re-init the UI (like "new chat"). The CLI keeps
+        /// its own conversation store, so a deleted session may still be resumable via --resume.
+        /// </summary>
+        public (bool deleted, bool wasCurrent) Delete(string id)
+        {
+            if (string.IsNullOrEmpty(id))
+                return (false, false);
+            if (Current.Id == id)
+            {
+                Current = new SessionRecord();
+                return (true, true);
+            }
+            var found = _sessions.FirstOrDefault(s => s.Id == id);
+            if (found == null)
+                return (false, false);
+            _sessions.Remove(found);
+            return (true, false);
+        }
+
         /// <summary>Renames a session (current or archived) without touching its recency.</summary>
         public bool Rename(string id, string title)
         {

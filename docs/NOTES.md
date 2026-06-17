@@ -59,7 +59,16 @@ flagged.
 # Test the UI in isolation: open WebUI\index.html in the browser (mock adapter).
 # JS syntax check after each change: node --check WebUI\app.js (and WebUI\qr.js)
 ```
-Checked against **Claude Code CLI 2.1.161** (re-test flags/endpoints on CLI update).
+Checked against **Claude Code CLI 2.1.178** (full re-verification 2026-06-17; earlier baseline
+2.1.161/2.1.162 — re-test flags/endpoints on CLI update). **2.1.178 re-test summary:** `--effort`
+values (low/medium/high/xhigh/max) ✓ unchanged; `--permission-mode` still accepts
+default/acceptEdits/plan/bypassPermissions (new, unused: `auto`, `dontAsk`) ✓; `/usage` report text +
+`ParseUsageText` regexes ✓ unchanged (`num_turns:0`, no cost); MCP permission protocol ✓ unchanged
+(`protocolVersion 2025-11-25`, tools/call arg **`input`**, allow needs `updatedInput`); AskUserQuestion
+✓ routes through the hook (deny+message feeds the answer back); `slash_commands` ✓ still a JSON string
+array (now **28** entries, skills listed first → see "Slash commands" popover-scroll fix). **One change
+found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout` field now takes
+**precedence** over `MCP_TOOL_TIMEOUT` (see "Prompt timeout too short").
 
 ## Structure / code map
 - By request, **everything in one project** (`CodeAstrogator.csproj`) instead of the four
@@ -180,6 +189,11 @@ compact_boundary evaluation) — details in the respective sections below.
 - **`thinking.start/delta/end` (host → web)** `{ id, text?, estimatedTokens? }` —
   Extended Thinking. The UI renders a transient "✻ Thinking…" line (details see table
   "Transcript display"); cards only if real thinking texts arrive.
+  **Stop cleanup (v0.4.1):** an interrupted turn emits no `thinking.end`, so `applyStatus`
+  finalizes any orphaned `state.activeThinking` (`finalizeActiveThinking`) whenever the status
+  leaves `working`/`waiting-permission` for a terminal state — the transient line is removed,
+  a streamed card just loses its spinner. (Mirrors the permission-card expiry in the same hook;
+  no-op on normal turns where `thinking.end` already cleared it.)
 - **`accent.set` (web → host)** `{ color }` — custom brand color (CSS hex `#rgb`/`#rrggbb`, or ""
   = default). The host validates (`NormalizeHexColor`), stores it in `AstrogatorOptions.AccentColor` +
   `SaveOptions`. `session.init` additionally carries **`accent`**; the UI applies it via `applyAccent`
@@ -193,6 +207,13 @@ compact_boundary evaluation) — details in the respective sections below.
 - **`options.open` (web → host)** `{}` — "Advanced options…" entry at the bottom of the
   gear popover; the host opens Tools → Options → Code Astrogator → General
   (`Package.ShowOptionPage`). The mock shows a system note instead.
+- **`session.delete` (web → host) (v0.4.2)** `{ sessionId }` — trash button per history row (revealed on
+  hover, `.hi-delete`), gated by a **confirmation modal** (`openConfirmModal`, reusable; the
+  Delete button is styled `.modal-btn.danger`). Host: `HandleSessionDelete` → `SessionHistoryStore.Delete`
+  (returns `(deleted, wasCurrent)`); if the **active** session was deleted it behaves like "new chat"
+  (`ResetSession` + `SendSessionInit`); always re-sends `session.list` so an open popover refreshes.
+  `.history-item` is now a `<div>` (was a `<button>`) so the delete button can nest without invalid markup.
+  The CLI keeps its own conversation store, so a deleted session may still be `--resume`-able.
 - **`session.rename` (web → host)** `{ sessionId, title }` — the edit icon to the right of the
   header title (visible on header hover/focus) opens a rename modal (Enter = Save,
   Esc = Cancel). The UI sets the title optimistically; the host trims, caps at 120
@@ -230,7 +251,11 @@ compact_boundary evaluation) — details in the respective sections below.
   and still fires `OptionsChanged` (Theme/Verbosity take effect live).
 - **Settings UI:** `ToolWindows/AstrogatorSettingsWindow` (hosted VS `DialogWindow`, WPF in
   code, VS-theme-aware). Opened via the gear popover → "Advanced options…" (`options.open`
-  → `Package.OpenOptions()` → `ShowModal()`). Options editable (TextBox/Combo/Checkbox;
+  → `Package.OpenOptions()` → `ShowModal()`). **Layout (v0.4.1):** content sits in a `ScrollViewer`;
+  the window uses `SizeToContent.Height` **capped by `MaxHeight = WorkArea.Height − 40`** so it never
+  exceeds the screen — past the cap the ScrollViewer scrolls (small-screen safe). Checkbox labels are
+  wrapping `TextBlock`s (`MakeCheck`, `VerticalContentAlignment=Top`) so long descriptions don't clip
+  at the right edge. Options editable (TextBox/Combo/Checkbox;
   Model/Effort have been popover-controlled since 2026-06-05 and are no longer here,
   Browse button for the CLI path), **"Reset to defaults"** (= `new AstrogatorOptions()`, only loads into
   the form, persists only on Save). The `IncludeSelectedLines` checkbox is greyed out when
@@ -299,8 +324,12 @@ compact_boundary evaluation) — details in the respective sections below.
   `Current session: N%` → S meter, `Current week (all models): N%` → W meter (the per-model
   lines like "(Sonnet only)" are ignored); `resets <Mon> <Day>, <h>pm` → reset tooltip
   (as local wall-clock time, year from "now" incl. year-boundary rollover). Fetched on `ready`
-  and after each turn end; errors (API-key mode without limits, offline, 30 s timeout) → meters
-  stay put. Plan badge still from `~/.claude.json` → `oauthAccount.organizationType`
+  (window open), after each turn end, **and periodically every 5 min while idle** (v0.4.1:
+  `WebViewBridge._usageTimer`, `System.Threading.Timer`, `UsageRefreshIntervalMs`; the tick skips
+  when `_session.IsBusy` — a running turn refreshes on its own end — and is disposed with the
+  bridge; `RefreshUsage` is thread-agnostic, `Post` is teardown-guarded). Errors (API-key mode
+  without limits, offline, 30 s timeout) → meters stay put. Plan badge still from
+  `~/.claude.json` → `oauthAccount.organizationType`
   (claude_team → "Team Plan" …). Note: the report wording is undocumented — on a
   CLI update re-test the parser (regex in `ClaudeUsageClient.ParseUsageText`).
 
@@ -476,6 +505,13 @@ compact_boundary evaluation) — details in the respective sections below.
   fallback list with it (in-place mutation, menu + autocomplete share the array);
   descriptions come from a UI map (`SLASH_DESCRIPTIONS`), unknown
   commands appear without subtext.
+- **Popover scroll (v0.4.1, CLI 2.1.178):** the `slash_commands` list grew to **28+** entries
+  (built-ins **+ skills**, skills now listed first → `deep-research` is index 0). The slash menu
+  (`.popover`) and autocomplete (`.popover.autocomplete`) previously had **no height cap**, so the
+  oversized list overflowed off-screen (`positionPopover` flipped it below the button → only the
+  first item visible). Fix: `.popover` now has `max-height: min(70vh,460px)` + `overflow-y:auto`
+  (one rule covers menu **and** autocomplete; short popovers never reach the cap). The
+  `slash_commands` format itself is unchanged (still a JSON string array; parser ok).
 - **`/help` host-side:** The headless CLI rejects `/help` ("isn't available in this
   environment") — the host instead answers with a synthetic help block
   (like `/login`), incl. a hint about the terminal + `claude --resume <id>` for
@@ -751,18 +787,27 @@ is a **preview before the allow** — the CLI writes only on "Accept" (possibly 
   not an edit, so it prompts even with acceptEdits, and in Plan empirically confirmed (CLI 2.1.165: the hook
   fires, deny+message comes back). Only in "Bypass" there is no hook → auto-decline (accepted).
 - **Removed old:** the former `askCard`/`sendText` "new message" fallback incl. `.ask-*` CSS.
-- **Prompt timeout too short (fix 2026-06-16):** Questions/permission prompts timed out **well before** the
-  assumed 10 min. **Cause:** The CLI's **default MCP tool-call timeout** is short (≈ 1 min); the
-  `timeout` field in the HTTP `--mcp-config` is **not** applied to it. **Fix:** `ClaudeSessionService`
-  sets, when wiring up the bridge, the env vars **`MCP_TOOL_TIMEOUT`** (+ `MCP_TIMEOUT`) to
-  `Settings.McpToolTimeoutMs` (default = `McpPermissionBridge.ToolTimeoutMs` = 1 h) on the CLI process;
-  the same default is in the config `timeout` field. **Configurable in the settings window** ("Prompt timeout",
-  minutes): `AstrogatorOptions.PromptTimeoutMinutes` (default 60, clamped to `Min/MaxPromptTimeoutMinutes`
-  = 1–240). Flow: SettingsWindow → `AstrogatorOptions` (persisted via `SetInt32`) → `WebViewBridge`
-  (`PromptTimeoutMs`, in the ctor + `OnOptionsChanged`) → `SessionSettings.McpToolTimeoutMs` → env var per
-  turn. **Per-turn host:** takes effect from the next turn. **Persistent host:** only after a process restart
-  (new chat/VS restart), since the env is fixed at process start. **Re-test on CLI update**
-  (env var names/default are version-dependent).
+- **Prompt timeout too short (fix 2026-06-16; precedence corrected 2026-06-17):** Questions/permission
+  prompts timed out **well before** the assumed 10 min. **Cause:** the CLI's **default MCP tool-call
+  timeout** is short (≈ 1 min). **The deliverer changed between CLI versions — verified empirically:**
+  - **2.1.16x:** the config `timeout` field was **not** applied to tool calls; the **`MCP_TOOL_TIMEOUT`
+    env var** was the only lever.
+  - **2.1.178 (re-tested):** the config **`timeout` field IS applied to tool calls and TAKES PRECEDENCE
+    over the env var** (probe: env=6 s + config=20 s → the CLI gives up after **20 s**; env=6 s + no config
+    → 6 s; both in **ms**). So the env var alone no longer honoured the user's setting when a (fixed 1 h)
+    config timeout was also present → the "Prompt timeout" setting was effectively pinned to 1 h.
+  - **Fix:** the user's timeout now lives in the **config `timeout` field** (`McpPermissionBridge.ToolTimeoutMs`
+    instance prop, seeded in the `WebViewBridge` ctor from `PromptTimeoutMs(opt)`, rewritten on
+    `OnOptionsChanged` via `UpdateToolTimeout` → the `--mcp-config` file is re-written). `ClaudeSessionService`
+    still sets `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` as a **fallback** (in case a future CLI flips precedence back).
+    `BuildMcpConfig(port, auth, timeoutMs)` now takes the value explicitly; the const is
+    `McpPermissionBridge.DefaultToolTimeoutMs` (1 h).
+  - **Configurable in the settings window** ("Prompt timeout", minutes): `AstrogatorOptions.PromptTimeoutMinutes`
+    (default 60, clamped `Min/MaxPromptTimeoutMinutes` = 1–240). Flow: SettingsWindow → `AstrogatorOptions`
+    (persisted via `SetInt32`) → `WebViewBridge` (ctor + `OnOptionsChanged`) → config file **and**
+    `SessionSettings.McpToolTimeoutMs` (env fallback). **Per-turn host:** takes effect next turn (the file is
+    re-read each turn). **Persistent host:** only after a process restart (config + env are fixed at process
+    start). **Re-test on CLI update** (the deliverer + env var names are version-dependent — see above).
 - **Timeout/abort cleanup (fix 2026-06-16):** If the CLI ends an open prompt itself (MCP tool
   timeout) **or** the turn ends while a card is still
   open, the card was previously still clickable **and** the "Working" indicator (rocket) did not come back
@@ -857,6 +902,13 @@ then spike 0-B, then phases 2/3 with intermediate verification.
   Caps: 50 sessions, 400 messages per session. CLI sessions remain resumable via `--resume` also
   across VS restarts (the CLI keeps the conversations itself).
   Note: two parallel VS instances on the same solution → last writer wins.
+  - **"Too many sessions" — bounded by design (reviewed 2026-06-17):** `Save()` writes only the
+    **50 most recent** sessions (orders by `UpdatedAtUtc` desc, breaks at the cap → oldest dropped)
+    and at most **400 messages** each; tool outputs are already truncated (~10k chars) by the parser.
+    `SaveHistory` runs on a **background thread** (`TaskScheduler.Default`) → no UI jank even on a large
+    file. In-memory `_sessions` can transiently exceed 50 within one long VS session (ArchiveCurrent/
+    Load/Import don't cap) but Save trims it and a restart reloads ≤50 → no unbounded growth. Manual
+    pruning via the new per-row delete (see `session.delete`).
 - Browser test of the UI: open `WebUI/index.html` directly (mock adapter active, simulates a
   complete turn incl. tool card and permission/diff card).
 - Build: VS-2026-MSBuild (`…\18\Community\MSBuild\Current\Bin\MSBuild.exe`),
