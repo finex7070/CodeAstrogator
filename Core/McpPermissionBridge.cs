@@ -41,13 +41,21 @@ namespace CodeAstrogator.Core
         private const string SessionId = "codeastrogator-mcp";
 
         /// <summary>
-        /// Time (ms) the CLI is allowed to wait on a permission/AskUserQuestion prompt before it
-        /// gives up. The CLI's default MCP tool-call timeout is short (≈ a minute) — far too little
-        /// for a human decision — so we raise it via the <c>MCP_TOOL_TIMEOUT</c> env var on the CLI
-        /// process (see ClaudeSessionService). Also written to the config's <c>timeout</c> field
-        /// (belt-and-braces; the env var is the one the CLI actually applies to tool calls).
+        /// Default time (ms) the CLI is allowed to wait on a permission/AskUserQuestion prompt
+        /// before it gives up (1 hour) — far longer than the CLI's own short default (≈ a minute),
+        /// which would "time out" a human decision. The effective value is the instance
+        /// <see cref="ToolTimeoutMs"/> (seeded from the user's "Prompt timeout" setting).
         /// </summary>
-        public const int ToolTimeoutMs = 3_600_000; // 1 hour
+        public const int DefaultToolTimeoutMs = 3_600_000; // 1 hour
+
+        /// <summary>
+        /// Effective per-tool-call timeout (ms) written to the config's <c>timeout</c> field.
+        /// Verified against CLI 2.1.178: the config <c>timeout</c> field IS applied to tool calls
+        /// and TAKES PRECEDENCE over the <c>MCP_TOOL_TIMEOUT</c> env var (the opposite of the older
+        /// 2.1.16x behaviour) — so the user's configured timeout must live here, not only in the env
+        /// var. Set before <see cref="Start"/>; change later via <see cref="UpdateToolTimeout"/>.
+        /// </summary>
+        public int ToolTimeoutMs { get; set; } = DefaultToolTimeoutMs;
 
         private readonly string _authToken = Guid.NewGuid().ToString("n");
         private readonly System.Collections.Concurrent.ConcurrentDictionary<TcpClient, byte> _clients
@@ -288,7 +296,7 @@ namespace CodeAstrogator.Core
 
         // ── --mcp-config file ─────────────────────────────────────────────────────
 
-        internal static JObject BuildMcpConfig(int port, string authToken) => new JObject
+        internal static JObject BuildMcpConfig(int port, string authToken, int timeoutMs = DefaultToolTimeoutMs) => new JObject
         {
             ["mcpServers"] = new JObject
             {
@@ -297,20 +305,38 @@ namespace CodeAstrogator.Core
                     ["type"] = "http",
                     ["url"] = $"http://127.0.0.1:{port}/mcp",
                     ["headers"] = new JObject { ["X-Auth"] = authToken },
-                    ["timeout"] = ToolTimeoutMs, // allow a slow human decision (see MCP_TOOL_TIMEOUT)
+                    // The CLI honours this for tool calls and prefers it over MCP_TOOL_TIMEOUT
+                    // (verified 2.1.178) → carry the user's configured prompt timeout here.
+                    ["timeout"] = timeoutMs,
                 },
             },
         };
 
-        private static string WriteMcpConfig(int port, string authToken)
+        private string WriteMcpConfig(int port, string authToken)
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "CodeAstrogator");
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "mcp-permission-" + port + ".json");
-            File.WriteAllText(path, BuildMcpConfig(port, authToken).ToString(Formatting.None));
+            File.WriteAllText(path, BuildMcpConfig(port, authToken, ToolTimeoutMs).ToString(Formatting.None));
             return path;
+        }
+
+        /// <summary>
+        /// Updates the per-tool-call timeout and rewrites the live <c>--mcp-config</c> file so the
+        /// next turn picks it up (the per-turn host re-reads the file each turn; the persistent
+        /// host only at process restart, like the env var). No-op if unchanged or not started.
+        /// </summary>
+        public void UpdateToolTimeout(int timeoutMs)
+        {
+            if (timeoutMs <= 0 || timeoutMs == ToolTimeoutMs)
+                return;
+            ToolTimeoutMs = timeoutMs;
+            if (_mcpConfigPath == null)
+                return; // not started yet — Start() will write it with the new value
+            try { File.WriteAllText(_mcpConfigPath, BuildMcpConfig(Port, _authToken, ToolTimeoutMs).ToString(Formatting.None)); }
+            catch { /* best-effort; the env var still carries the value as a fallback */ }
         }
 
         // ── minimal HTTP/1.1 read/write over the socket ───────────────────────────

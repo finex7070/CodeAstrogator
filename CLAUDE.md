@@ -38,6 +38,13 @@ UI isoliert testen: `WebUI\index.html` im Browser (Mock-Adapter simuliert komple
 Erst nach der Antwort die Version im selben/nächsten Turn editieren und in der Zusammenfassung nennen.
 Sparsam bleiben — der User fand häufige Minor-/Patch-Bumps zu viel.
 
+**Direkt zusammen mit der Versionsfrage** (idealerweise im selben `AskUserQuestion`-Aufruf als
+zweite Frage) **immer auch fragen, ob alle aktuellen Änderungen committet und gepusht werden
+sollen** — Optionen z. B. **Commit + Push**, **Nur Commit**, **Nein**. Bei „Ja": auf dem
+Branch **`develope`** committen (nicht direkt auf `main`; Branch anlegen, falls er noch nicht
+existiert), Commit-Message mit der `Co-Authored-By: Claude …`-Zeile abschließen, dann gemäß
+Antwort pushen. Erst nach der Antwort ausführen.
+
 ## Architektur in einem Satz je Schicht
 `WebUI/` (single-page, dependency-frei, §3-Nachrichten-Kontrakt) ↔ `Bridge/WebViewBridge.cs`
 (Kontrakt host-seitig, UI-Thread-Marshaling) → `Core/` (UI-frei + getestet: NdjsonParser,
@@ -63,7 +70,11 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   `2025-11-25` (zurückspiegeln); Transport HTTP via **`TcpListener`** (kein URL-ACL); `GET /mcp`
   darf 405 sein. Read-only-Befehle prompten nicht (CLI-Klassifizierer). Permission-Card **ersetzt**
   die Tool-Card gleicher `tool_use_id` (CLI sendet `tool_use` VOR dem Prompt).
-- Geprüft gegen CLI **2.1.162**; `--effort`, `--permission-mode`-Werte, das MCP-Permission-
-  Protokoll (s. o.) und das Format des `/usage`-Report-Texts (Usage-Meter werden über
-  `claude -p /usage --output-format json` geholt und geparst — s. `ClaudeUsageClient`)
-  beim CLI-Update gegentesten.
+- **MCP-Tool-Timeout (versionsabhängig! 2026-06-17 gegen 2.1.178 geprüft):** Das Config-`timeout`-Feld
+  in `--mcp-config` **hat Vorrang** vor der Env-Var `MCP_TOOL_TIMEOUT` (umgekehrt zu 2.1.16x). Der
+  User-„Prompt timeout" wird daher ins **Config-`timeout`** geschrieben (`McpPermissionBridge.ToolTimeoutMs`,
+  via `UpdateToolTimeout` neu geschrieben); Env-Var bleibt nur Fallback. Beide in **ms**.
+- Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
+  `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
+  des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.
+  `ClaudeUsageClient`) beim CLI-Update gegentesten.

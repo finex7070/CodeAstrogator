@@ -75,7 +75,15 @@ namespace CodeAstrogator.Tests
             Assert.Equal("http", srv.Value<string>("type"));
             Assert.Equal("http://127.0.0.1:54321/mcp", srv.Value<string>("url"));
             Assert.Equal("tok123", srv["headers"]!.Value<string>("X-Auth"));
-            Assert.Equal(McpPermissionBridge.ToolTimeoutMs, srv.Value<int>("timeout"));
+            Assert.Equal(McpPermissionBridge.DefaultToolTimeoutMs, srv.Value<int>("timeout"));
+        }
+
+        [Fact]
+        public void BuildMcpConfig_UsesExplicitTimeout()
+        {
+            var cfg = McpPermissionBridge.BuildMcpConfig(54321, "tok123", 90_000);
+            var srv = cfg["mcpServers"]![McpPermissionBridge.ServerName]!;
+            Assert.Equal(90_000, srv.Value<int>("timeout"));
         }
 
         [Theory]
