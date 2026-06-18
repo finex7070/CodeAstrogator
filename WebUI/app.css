@@ -316,7 +316,16 @@ button:focus { outline: none; }
   line-height: 1.55;
 }
 .msg-user .gutter { color: var(--msg-user-fg); }
-.msg-assistant .gutter { color: var(--msg-assistant-fg); } /* Claude glyph = brand purple */
+.msg-assistant .gutter { width: 18px; } /* room for the head-logo avatar */
+.gutter-logo {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
 .msg-body {
   flex: 1 1 auto;
   min-width: 0;
@@ -456,7 +465,7 @@ button:focus { outline: none; }
   font-family: var(--font-serif);
   font-size: 18px;
   letter-spacing: 0.5px;
-  color: var(--text);
+  color: var(--accent);
 }
 .wordmark .spark { color: var(--accent); margin-right: 4px; }
 .robot { display: block; }

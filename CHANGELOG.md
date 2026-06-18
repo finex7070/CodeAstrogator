@@ -4,6 +4,23 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.4.3] – 2026-06-18
+
+### Changed
+- **The "Code Astrogator" wordmark on the welcome screen now uses the accent color.** It was rendered in the default text color; it now picks up `--accent` (so it also follows a custom accent color set in the gear popover).
+- **"Detailed" verbosity now actually differs from "Normal."** Verbosity is a transcript display setting with three levels; previously *Normal* and *Detailed* were nearly identical — the only difference was whether thinking cards started expanded, and even that didn't apply to cards already on screen when you switched. Now *Detailed* starts **both thinking and tool cards expanded** (showing each tool call's input and output inline), while *Normal* keeps them collapsed (click to expand) and *Compact* still hides system notes and thinking entirely. Switching the level also re-applies to the cards already in the current transcript, and the gear popover now shows a one-line description of each level.
+- **The assistant message avatar is now the Code Astrogator head** instead of the `✳` sparkle glyph. Each of Claude's messages in the transcript is prefixed with the small astronaut-head logo (`WebUI\head.png`, derived from the head master); the user `›` glyph and system notes are unchanged.
+
+### Added
+- **"Changelog…" button in the gear popover.** Below "Advanced options…" the appearance popover now has a Changelog entry that opens the project changelog (`https://github.com/finex7070/CodeAstrogator/blob/main/CHANGELOG.md`) in the system browser.
+- **Head-only logo for small icons.** Added a head-only master (`Resources\codeastrogator-head.png`) — the astronaut's helmet and face cropped from the full-body logo, with no shoulders and the raised hand removed, centered in the frame. The small icons used where the logo is shown tiny (`icon-16/20/24/32`, i.e. the "View → Other Windows → Code Astrogator" menu entry and the tool-window tab) are now rendered from this head variant, so they stay legible at 16–32 px instead of shrinking the whole body. The Marketplace icon/preview and the large welcome-screen logo keep the full-body figure.
+- **New setting: "Reference it by default in new chats."** Controls the starting state of the active-file reference (the file chip in the composer) for each new chat. With it on (the default, unchanged from before), a new chat references the active editor file right away. With it off, a new chat starts with the reference toggled **off** (the chip is shown struck-through) so nothing is sent unless you click the chip to opt in for that chat. It's a sub-option of "Reference the active editor file in each prompt" (greyed out while the master switch is off) and does not change the current chat — only what fresh chats start with.
+
+### Fixed
+- **Remote sessions now start on the very first open of a project.** `claude remote-control` refuses to start in an untrusted workspace (`"Error: Workspace not trusted. Please run `claude` … first"`), unlike the headless `claude -p` chat turn which bypasses the workspace-trust check entirely. So opening a project for the first time and immediately starting a remote session failed with that error (you had to drop to a terminal and run `claude` once to accept the trust dialog). The extension now pre-accepts workspace trust for the directory you opened in Visual Studio — it sets the same `hasTrustDialogAccepted` flag in `~/.claude.json` that the interactive dialog writes — right before launching the remote-control server. (Best-effort and non-destructive: an existing project entry is reused and left untouched when already trusted; the global config is written atomically; any failure simply falls back to the CLI's own trust error. Verified against CLI 2.1.178.)
+
+---
+
 ## [0.4.2] – 2026-06-17
 
 ### Added

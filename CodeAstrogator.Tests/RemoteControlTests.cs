@@ -2,10 +2,95 @@ using System;
 using System.IO;
 using System.Linq;
 using CodeAstrogator.Core;
+using Newtonsoft.Json.Linq;
 using Xunit;
 
 namespace CodeAstrogator.Tests
 {
+    public class ClaudeWorkspaceTrustTests
+    {
+        private static string TempConfig() =>
+            Path.Combine(Path.GetTempPath(), "castr-trust-" + Guid.NewGuid().ToString("n") + ".json");
+
+        [Fact]
+        public void EnsureTrusted_CreatesEntry_WithForwardSlashKey()
+        {
+            var cfg = TempConfig();
+            try
+            {
+                Assert.True(ClaudeWorkspaceTrust.EnsureTrusted(@"C:\Users\Jan\Repo\", cfg));
+
+                var root = JObject.Parse(File.ReadAllText(cfg));
+                var entry = root["projects"]?["C:/Users/Jan/Repo"] as JObject;
+                Assert.NotNull(entry);
+                Assert.True(entry!.Value<bool>("hasTrustDialogAccepted"));
+            }
+            finally { File.Delete(cfg); }
+        }
+
+        [Fact]
+        public void EnsureTrusted_FlipsExistingEntry_WithoutDuplicatingOrLosingFields()
+        {
+            var cfg = TempConfig();
+            try
+            {
+                File.WriteAllText(cfg, new JObject
+                {
+                    ["numStartups"] = 7,
+                    ["projects"] = new JObject
+                    {
+                        ["C:/Users/Jan/Repo"] = new JObject
+                        {
+                            ["hasTrustDialogAccepted"] = false,
+                            ["allowedTools"] = new JArray("Edit"),
+                        },
+                    },
+                }.ToString());
+
+                // Path differs only by slash style / casing — must reuse the existing key.
+                Assert.True(ClaudeWorkspaceTrust.EnsureTrusted(@"c:\Users\Jan\Repo", cfg));
+
+                var root = JObject.Parse(File.ReadAllText(cfg));
+                var projects = (JObject)root["projects"]!;
+                Assert.Single(projects.Properties());
+                var entry = (JObject)projects["C:/Users/Jan/Repo"]!;
+                Assert.True(entry.Value<bool>("hasTrustDialogAccepted"));
+                Assert.Equal("Edit", ((JArray)entry["allowedTools"]!).Single().Value<string>());
+                Assert.Equal(7, root.Value<int>("numStartups")); // unrelated state preserved
+            }
+            finally { File.Delete(cfg); }
+        }
+
+        [Fact]
+        public void EnsureTrusted_AlreadyTrusted_LeavesFileByteIdentical()
+        {
+            var cfg = TempConfig();
+            try
+            {
+                File.WriteAllText(cfg, new JObject
+                {
+                    ["projects"] = new JObject
+                    {
+                        ["C:/Users/Jan/Repo"] = new JObject { ["hasTrustDialogAccepted"] = true },
+                    },
+                }.ToString());
+                var before = File.ReadAllText(cfg);
+
+                Assert.True(ClaudeWorkspaceTrust.EnsureTrusted(@"C:\Users\Jan\Repo", cfg));
+
+                Assert.Equal(before, File.ReadAllText(cfg));
+            }
+            finally { File.Delete(cfg); }
+        }
+
+        [Fact]
+        public void EnsureTrusted_NullOrEmptyDirectory_ReturnsFalse()
+        {
+            Assert.False(ClaudeWorkspaceTrust.EnsureTrusted(null));
+            Assert.False(ClaudeWorkspaceTrust.EnsureTrusted("   "));
+        }
+    }
+
     public class RemoteControlOutputParserTests
     {
         [Fact]

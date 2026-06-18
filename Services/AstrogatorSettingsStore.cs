@@ -56,6 +56,7 @@ namespace CodeAstrogator.Services
                 RestoreLastSession = GetBool(nameof(AstrogatorOptions.RestoreLastSession), d.RestoreLastSession),
                 AutoAddActiveFile = GetBool(nameof(AstrogatorOptions.AutoAddActiveFile), d.AutoAddActiveFile),
                 IncludeSelectedLines = GetBool(nameof(AstrogatorOptions.IncludeSelectedLines), d.IncludeSelectedLines),
+                ActiveFileOnByDefault = GetBool(nameof(AstrogatorOptions.ActiveFileOnByDefault), d.ActiveFileOnByDefault),
                 ThemeModeString = GetString(nameof(AstrogatorOptions.ThemeModeString), d.ThemeModeString),
                 VerbosityString = GetString(nameof(AstrogatorOptions.VerbosityString), d.VerbosityString),
                 UsePersistentCli = GetBool(nameof(AstrogatorOptions.UsePersistentCli), d.UsePersistentCli),
@@ -85,6 +86,7 @@ namespace CodeAstrogator.Services
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.RestoreLastSession), o.RestoreLastSession);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.AutoAddActiveFile), o.AutoAddActiveFile);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.IncludeSelectedLines), o.IncludeSelectedLines);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ActiveFileOnByDefault), o.ActiveFileOnByDefault);
             _store.SetString(Collection, nameof(AstrogatorOptions.ThemeModeString), o.ThemeModeString ?? "auto");
             _store.SetString(Collection, nameof(AstrogatorOptions.VerbosityString), o.VerbosityString ?? "normal");
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UsePersistentCli), o.UsePersistentCli);

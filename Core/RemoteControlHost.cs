@@ -118,6 +118,11 @@ namespace CodeAstrogator.Core
                 _stopRequested = false;
                 StartedUtc = DateTime.UtcNow;
 
+                // `remote-control` refuses to start in an untrusted workspace (unlike headless
+                // `claude -p`). Pre-accept the trust dialog for the directory the user opened so a
+                // first-ever remote session works without dropping to a terminal. (Best-effort.)
+                ClaudeWorkspaceTrust.EnsureTrusted(workingDirectory);
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = executablePath,
