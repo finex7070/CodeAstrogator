@@ -44,7 +44,9 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
-    <!-- Extension logo (Resources\codeastrogator.png is the 256px master; the rest are generated). -->
+    <!-- Extension logo (Resources\codeastrogator.png is the 256px full-body master; icon-90/preview-200
+         are generated from it. Resources\codeastrogator-head.png is the head-only master for small sizes;
+         icon-16/20/24/32 are generated from it. Both masters are source-only, not shipped. -->
     <None Remove="Resources\**" />
     <!-- Shown in the Extensions manager / Marketplace (referenced by source.extension.vsixmanifest). -->
     <Content Include="Resources\icon-90.png"><IncludeInVSIX>true</IncludeInVSIX></Content>

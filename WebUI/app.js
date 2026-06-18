@@ -734,10 +734,22 @@
     return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }) + " " + time;
   }
 
-  /** Verbosity: compact hides system notes + thinking; detailed expands thinking. */
+  /** Tool/thinking cards start expanded only in "detailed"; class suffix for card creation. */
+  function collapsedInit() { return state.verbosity === "detailed" ? "" : " collapsed"; }
+
+  /**
+   * Verbosity:
+   *  - compact  → hides system notes + thinking entirely (CSS .v-compact)
+   *  - normal   → everything shown; thinking + tool cards collapsed (click to expand)
+   *  - detailed → thinking + tool cards expanded by default (input/output visible)
+   * Switching re-applies the density to cards already in the transcript (todo cards stay open).
+   */
   function applyVerbosity() {
     root.classList.toggle("v-compact", state.verbosity === "compact");
     root.classList.toggle("v-detailed", state.verbosity === "detailed");
+    const expand = state.verbosity === "detailed";
+    transcriptInner.querySelectorAll(".thinking-card, .tool-card:not(.todo-card)")
+      .forEach((c) => c.classList.toggle("collapsed", !expand));
   }
   function formatNum(n) { return (Number(n) || 0).toLocaleString("en-US"); }
 
@@ -813,7 +825,19 @@
   function makeMsgRow(role, gutterGlyph) {
     const row = el("div", "msg msg-" + role);
     const bubble = el("div", "msg-body");      // tinted card (bg/padding live here)
-    const g = el("div", "gutter", gutterGlyph || ""); // role glyph — now INSIDE the card
+    // role glyph — now INSIDE the card; assistant uses the head logo instead of a glyph
+    const g = el("div", "gutter");
+    if (role === "assistant") {
+      const av = document.createElement("img");
+      av.setAttribute("class", "gutter-logo");
+      av.setAttribute("src", "head.png");
+      av.setAttribute("alt", "");
+      av.setAttribute("aria-hidden", "true");
+      av.setAttribute("draggable", "false");
+      g.appendChild(av);
+    } else {
+      g.textContent = gutterGlyph || "";
+    }
     const content = el("div", "msg-content");
     bubble.appendChild(g);
     bubble.appendChild(content);
@@ -1007,7 +1031,7 @@
     // tool card just resolves to the CLI's "did not answer".)
 
     const isAgent = m.name === "Task" || m.name === "Agent"; // decision #14
-    const card = el("div", "tool-card collapsed" + (isAgent ? " agent-card" : ""));
+    const card = el("div", "tool-card" + collapsedInit() + (isAgent ? " agent-card" : ""));
     card.dataset.toolId = m.id;
     const head = el("div", "tool-head");
     head.appendChild(toolIcon(m.name));
@@ -1608,7 +1632,7 @@
         break;
       }
       case "tool": {
-        const card = el("div", "tool-card collapsed");
+        const card = el("div", "tool-card" + collapsedInit());
         const head = el("div", "tool-head");
         head.appendChild(toolIcon(msg.toolName));
         head.appendChild(el("span", "tool-name", msg.toolName || "Tool"));
@@ -2602,21 +2626,29 @@
     });
     pop.appendChild(seg);
 
-    // Verbosity — hides/shows system notes & thinking cards
+    // Verbosity — controls how much of each turn the transcript shows
     pop.appendChild(el("div", "appearance-title appearance-title-2", "Verbosity"));
     const segV = el("div", "segmented");
+    const VERBOSITY_HINTS = {
+      compact: "Hides system notes and thinking; tool calls collapsed.",
+      normal: "Shows everything; thinking and tool cards collapsed (click to expand).",
+      detailed: "Shows everything with thinking and tool cards (input/output) expanded.",
+    };
+    const vHint = el("div", "mm-hint", VERBOSITY_HINTS[state.verbosity] || VERBOSITY_HINTS.normal);
     [["compact", "Compact"], ["normal", "Normal"], ["detailed", "Detailed"]].forEach(([level, label]) => {
       const b = el("button", "seg-btn" + (state.verbosity === level ? " active" : ""), label);
       b.addEventListener("click", () => {
         state.verbosity = level;
         segV.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
         b.classList.add("active");
+        vHint.textContent = VERBOSITY_HINTS[level] || VERBOSITY_HINTS.normal;
         applyVerbosity();
         post("verbosity.set", { level });
       });
       segV.appendChild(b);
     });
     pop.appendChild(segV);
+    pop.appendChild(vHint);
 
     // Accent color — custom brand color (persisted host-side, applied as :root overrides)
     pop.appendChild(el("div", "appearance-title appearance-title-2", "Accent color"));
@@ -2627,6 +2659,12 @@
     const optBtn = el("button", "menu-item appearance-options-link", "Advanced options…");
     optBtn.addEventListener("click", () => { closeAllOverlays(); post("options.open", {}); });
     pop.appendChild(optBtn);
+
+    // Changelog — opens the GitHub CHANGELOG in the system browser (target=_blank → host opens it)
+    const CHANGELOG_URL = "https://github.com/finex7070/CodeAstrogator/blob/main/CHANGELOG.md";
+    const clBtn = el("button", "menu-item appearance-options-link", "Changelog…");
+    clBtn.addEventListener("click", () => { closeAllOverlays(); window.open(CHANGELOG_URL, "_blank", "noopener"); });
+    pop.appendChild(clBtn);
 
     openPopover(this, pop, { align: "end" });
   });
