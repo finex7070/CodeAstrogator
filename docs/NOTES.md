@@ -89,7 +89,7 @@ found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout
 - `ToolWindows/` — `ClaudeChatWindow(Control)` (WebView2, virtual host `codeastrogator.local`).
 - `Options/AstrogatorOptions.cs` — in-memory snapshot of the Unified Settings (CLI path, model,
   Effort, Theme, Verbosity, Restore last session, AutoAddActiveFile, IncludeSelectedLines,
-  UsePersistentCli);
+  ActiveFileOnByDefault, UsePersistentCli);
   definitions in `CodeAstrogatorExtension.cs` (see "Unified Settings").
 - `WebUI/` — index.html / app.css / app.js / qr.js (dependency-free; mock adapter when the
   host is missing; qr.js = own QR encoder for the remote link).
@@ -199,14 +199,26 @@ compact_boundary evaluation) — details in the respective sections below.
   `SaveOptions`. `session.init` additionally carries **`accent`**; the UI applies it via `applyAccent`
   (`:root` inline overrides). From the gear popover (swatches + custom picker).
 - **`verbosity.set` (web → host)** `{ level: "compact"|"normal"|"detailed" }` +
-  `session.init.verbosity` — Compact hides system notes & thinking, Detailed expands
-  thinking by default. Persisted in the Unified Settings.
+  `session.init.verbosity` — purely a client-side display density (the host only persists
+  the string + forwards it; CLI output is unaffected). **Compact** (`v-compact`) hides
+  `.sys-note` + `.thinking-card` via CSS. **Normal** (no class) shows everything; thinking
+  **and** tool cards start collapsed. **Detailed** (`v-detailed`) starts thinking **and** tool
+  cards expanded (input/output visible) — wired via `collapsedInit()` at card creation
+  (thinking `upgradeThinkingToCard`, live tool card, transcript-rebuild tool card).
+  `applyVerbosity()` also **re-applies** the collapse state to existing
+  `.thinking-card, .tool-card:not(.todo-card)` so switching takes effect on the current
+  transcript live (todo cards stay open). (v0.4.3: before this, Normal vs Detailed only
+  differed in the thinking-card default and didn't update existing cards.) Persisted in the
+  Unified Settings. A `.mm-hint` line under the gear popover segment describes each level.
 - **`files.listRequest` (web → host) / `files.list` (host → web)** `{ files: [{path, isDir}] }`
   — workspace file list for the `@`-mention autocomplete (BFS, bin/obj/.git/… excluded,
   max. 2000 entries, 30 s cache host-side).
 - **`options.open` (web → host)** `{}` — "Advanced options…" entry at the bottom of the
   gear popover; the host opens Tools → Options → Code Astrogator → General
   (`Package.ShowOptionPage`). The mock shows a system note instead.
+- **"Changelog…" entry (2026-06-18)** — directly below "Advanced options…" in the gear popover.
+  No host message: it just calls `window.open(CHANGELOG_URL, "_blank")` with the GitHub URL, which
+  the WebView routes through `OnNewWindowRequested` → system browser (same path as transcript links).
 - **`session.delete` (web → host) (v0.4.2)** `{ sessionId }` — trash button per history row (revealed on
   hover, `.hi-delete`), gated by a **confirmation modal** (`openConfirmModal`, reusable; the
   Delete button is styled `.modal-btn.danger`). Host: `HandleSessionDelete` → `SessionHistoryStore.Delete`
@@ -397,9 +409,15 @@ compact_boundary evaluation) — details in the respective sections below.
     Off ⇒ feature fully off, **chip completely hidden**, no reference.
   - **Session toggle** = click on the chip → web→host `activeFile.setEnabled { enabled }`.
     Changes **only** `_activeFileSessionEnabled` in the bridge, **does NOT persist** to the
-    option; applies until the session changes (reset to on in
+    option; applies until the session changes (reset to `ActiveFileDefaultOn` in
     `HandleSessionNew`/`HandleSessionLoad`/remote import). Off = chip with
     **strikethrough** (CSS `.active-file-chip.off`).
+  - **Default option** `ActiveFileOnByDefault` (boolean, default on, v0.4.3) = what the per-session
+    toggle resets to at the start of a fresh chat (seeded in the bridge ctor + every session reset
+    via `ActiveFileDefaultOn`). On = a new chat references the file immediately (legacy behaviour);
+    off = a new chat starts with the chip **off** (strikethrough) and the user clicks it to opt in
+    per chat. Sub-option of `AutoAddActiveFile` in the settings window (greyed out when the master
+    switch is off, like `IncludeSelectedLines`). Does not retroactively flip the current chat.
   - Effective reference only when `ActiveFileEffective = Option && Session`.
 - **Tracking host-side:** `Services/ActiveDocumentTracker` via `IVsMonitorSelection`
   on `SEID_DocumentFrame` (focusing a tool window — including our chat — does not change
@@ -451,6 +469,12 @@ compact_boundary evaluation) — details in the respective sections below.
   outer sibling. Glyph color role-specific: user = `--msg-user-fg` (blue), Claude `✳` =
   `--msg-assistant-fg` (orange). `makeMsgRow` still returns `body` = the content element
   (all append paths unchanged). System notes (empty glyph) keep their indentation.
+  - **Assistant avatar (2026-06-18):** the assistant `✳` glyph was replaced by the head logo —
+    `makeMsgRow` renders an `<img class="gutter-logo" src="head.png">` for `role === "assistant"`
+    (user/system still use the text glyph). `WebUI\head.png` = 32-px head icon (downscaled from
+    `Resources\codeastrogator-head.png`), served from the WebUI folder like `logo.png`; CSS
+    `.gutter-logo` 18×18 + `.msg-assistant .gutter { width:18px }`. The `--msg-assistant-fg`
+    glyph color no longer applies (it's an image now).
 - **Attachment chips in the transcript:** `appendMsgAttachments(body, attachments)` renders one
   `.att-chip` per file (file icon + name, `path` as tooltip). Used by `renderUserMessage` (live) and
   `renderHistoricMessage` (role user). **Bug fixed:** the chips were previously built but never appended to
@@ -495,6 +519,19 @@ compact_boundary evaluation) — details in the respective sections below.
   start/connect/stop incl. an imported fake session.
 - **Limitation (deliberate):** Remote sessions run in the RC server, not in the
   tool window — no live mirror. The takeover only happens on end.
+- **Workspace trust (v0.4.3, CLI 2.1.178):** Unlike headless `claude -p` (which bypasses the
+  workspace-trust check entirely), `claude remote-control` **refuses to start in an untrusted
+  directory** (`"Error: Workspace not trusted. Please run `claude` … first"`). Opening a project
+  for the first time and immediately starting a remote session therefore failed with that error.
+  Fix: `Core/ClaudeWorkspaceTrust.EnsureTrusted(dir)` pre-sets `projects[dir].hasTrustDialogAccepted
+  = true` in `~/.claude.json` (the same flag the interactive trust dialog writes) right before
+  `RemoteControlHost.Start` launches the process — for the directory the user explicitly opened in
+  VS. The project key is the working directory with **forward slashes** (e.g. `C:/Users/Jan/Repo`,
+  trailing separators trimmed); an existing entry in any slash/case variant is reused (no duplicate
+  key) and left byte-identical when already trusted. Read-modify-write is atomic (temp + replace,
+  Newtonsoft `Formatting.Indented` = 2 spaces, matching the CLI). Best-effort: any I/O/parse failure
+  is swallowed so the CLI still surfaces its own trust error. **Re-verify the `hasTrustDialogAccepted`
+  key on CLI updates.**
 
 ## Slash commands (2026-06-03)
 - **`slash.commands` (host → web)** `{ commands: ["clear", "compact", …] }` — the CLI's
@@ -864,9 +901,23 @@ then spike 0-B, then phases 2/3 with intermediate verification.
   `#6a3fa0`/`#583488`/`rgba(106,63,160,0.12)`. The entire UI uses `var(--accent)` → one place
   per theme is enough. `ThemeService` does not overwrite `--accent` (the brand color stays fixed, the comment
   "clay" → "purple brand" updated).
-- **Master:** `Resources\codeastrogator.png` (astronaut robot, 256×256, transparent). All other
-  sizes are generated from it via System.Drawing (HighQualityBicubic) — for a new logo
-  just replace the master and re-render the 6 sizes (16/20/24/32/90/200).
+- **Master:** `Resources\codeastrogator.png` (astronaut robot, 256×256, transparent). The
+  Marketplace sizes (`icon-90`, `preview-200`) and the WebUI empty-state logo are generated
+  from it via System.Drawing (HighQualityBicubic) — for a new logo just replace the master
+  and re-render.
+- **Head-only master (2026-06-18):** `Resources\codeastrogator-head.png` (256×256, transparent) —
+  the helmet/face only, **no shoulders, no waving hand**, centered. The **small** sizes
+  `icon-16/20/24/32` are generated from it (the full body is an unreadable blob at 16–32 px —
+  menu entry + tool-window tab via the ImageMoniker).
+  Re-render recipe (System.Drawing, HighQualityBicubic, all on a 32bpp ARGB copy):
+  1. **Erase the raised hand** from a copy of the full master — it overlaps the helmet's lower-left,
+     so a plain rectangular crop can't avoid it. Clear to transparent: `x≤92 & y≥84` (glove/forearm)
+     **plus** `x≤72 & y≥55` (the fingertips poking up left of the left ear knob). Leaves the helmet
+     outline (x>92 there) and the left ear knob (x 78–95, y 55–88) intact.
+  2. **Crop the head box** `x76,y14,w117,h105` (left ear knob → antenna ball; dome top → collar).
+  3. **Center aspect-correct** on a 256 canvas (margin 10 → drawn 236×212 at 10,22).
+  4. **Downscale** to 16/20/24/32.
+  Both masters are source-only (`<None Remove="Resources\**">` in csproj), not shipped in the VSIX.
 - **VSIX manifest** (`source.extension.vsixmanifest`): `<Icon>Resources\icon-90.png` +
   `<PreviewImage>Resources\preview-200.png` (Extensions Manager / Marketplace) and
   `<Asset Type="Microsoft.VisualStudio.ImageManifest" Path="Resources\CodeAstrogator.imagemanifest"/>`.

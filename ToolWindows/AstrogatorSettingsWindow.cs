@@ -33,6 +33,7 @@ namespace CodeAstrogator.ToolWindows
         private readonly CheckBox _restore;
         private readonly CheckBox _autoAdd;
         private readonly CheckBox _includeLines;
+        private readonly CheckBox _activeFileDefault;
         private readonly CheckBox _noticeFetch;
         private readonly CheckBox _updateCheck;
         private readonly TextBox _promptTimeout;
@@ -66,8 +67,9 @@ namespace CodeAstrogator.ToolWindows
             _restore = MakeCheck("Restore the last session when the chat window opens", new Thickness(0, 8, 0, 0));
             _autoAdd = MakeCheck("Reference the active editor file in each prompt", new Thickness(0, 8, 0, 0));
             _includeLines = MakeCheck("Include the selected line range in the file reference", new Thickness(20, 6, 0, 0));
-            _autoAdd.Checked += (_, __) => _includeLines.IsEnabled = true;
-            _autoAdd.Unchecked += (_, __) => _includeLines.IsEnabled = false;
+            _activeFileDefault = MakeCheck("Reference it by default in new chats (otherwise a new chat starts with the reference off; toggle it on via the chip)", new Thickness(20, 6, 0, 0));
+            _autoAdd.Checked += (_, __) => { _includeLines.IsEnabled = true; _activeFileDefault.IsEnabled = true; };
+            _autoAdd.Unchecked += (_, __) => { _includeLines.IsEnabled = false; _activeFileDefault.IsEnabled = false; };
             _noticeFetch = MakeCheck("Periodically check the project's GitHub for announcements and show them as a banner (makes a network request)", new Thickness(0, 8, 0, 0));
             _updateCheck = MakeCheck("Notify me about new versions (checks the project's GitHub for updates and shows a banner)", new Thickness(0, 8, 0, 0));
             _promptTimeout = MakeTextBox();
@@ -86,6 +88,7 @@ namespace CodeAstrogator.ToolWindows
             panel.Children.Add(_restore);
             panel.Children.Add(_autoAdd);
             panel.Children.Add(_includeLines);
+            panel.Children.Add(_activeFileDefault);
             panel.Children.Add(Header("Announcements & updates"));
             panel.Children.Add(_noticeFetch);
             panel.Children.Add(_updateCheck);
@@ -147,6 +150,8 @@ namespace CodeAstrogator.ToolWindows
             _autoAdd.IsChecked = o.AutoAddActiveFile;
             _includeLines.IsChecked = o.IncludeSelectedLines;
             _includeLines.IsEnabled = o.AutoAddActiveFile;
+            _activeFileDefault.IsChecked = o.ActiveFileOnByDefault;
+            _activeFileDefault.IsEnabled = o.AutoAddActiveFile;
             _noticeFetch.IsChecked = o.NoticeFetchEnabled;
             _updateCheck.IsChecked = o.UpdateCheckEnabled;
             _promptTimeout.Text = AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes).ToString();
@@ -171,6 +176,7 @@ namespace CodeAstrogator.ToolWindows
                 RestoreLastSession = _restore.IsChecked == true,
                 AutoAddActiveFile = _autoAdd.IsChecked == true,
                 IncludeSelectedLines = _includeLines.IsChecked == true,
+                ActiveFileOnByDefault = _activeFileDefault.IsChecked == true,
                 NoticeFetchEnabled = _noticeFetch.IsChecked == true,
                 NoticeFetchDecided = true, // setting it here counts as having decided → no consent popup
                 UpdateCheckEnabled = _updateCheck.IsChecked == true,

@@ -212,6 +212,7 @@ namespace CodeAstrogator
             to.PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(from.PromptTimeoutMinutes);
             to.RestoreLastSession = from.RestoreLastSession;
             to.AutoAddActiveFile = from.AutoAddActiveFile;
+            to.ActiveFileOnByDefault = from.ActiveFileOnByDefault;
             to.IncludeSelectedLines = from.IncludeSelectedLines;
             to.ThemeModeString = from.ThemeModeString ?? "auto";
             to.VerbosityString = from.VerbosityString ?? "normal";
