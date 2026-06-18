@@ -44,7 +44,7 @@ namespace CodeAstrogator.Bridge
         private JArray? _slashCommands;       // CLI-reported slash commands (system/init)
         private RemoteControlHost? _remote;   // `claude remote-control` server (at most one)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
-        private bool _activeFileSessionEnabled = true; // per-session override (option has priority)
+        private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission> _pendingPermissions
             = new System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission>();
@@ -83,6 +83,7 @@ namespace CodeAstrogator.Bridge
             _session.Settings.Ultracode = opt.UltracodeEnabled;
             _session.Settings.PermissionMode = opt.PermissionModeString;
             _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
+            _activeFileSessionEnabled = opt.ActiveFileOnByDefault; // initial per-session toggle = option default
 
             // In-process MCP permission server (Teil A §A5). Best-effort: if it fails to start,
             // IsAvailable stays false and edits fall back to the CLI default (no prompt flags).
@@ -856,7 +857,7 @@ namespace CodeAstrogator.Bridge
                 _history.StartNew();
             _session.ResetSession();
             _sessionStartAnnounced = false;
-            _activeFileSessionEnabled = true; // per-session override resets with the session
+            _activeFileSessionEnabled = ActiveFileDefaultOn; // per-session override resets to the option default
             SendSessionInit();
             SendActiveFile();
             SaveHistory();
@@ -907,7 +908,7 @@ namespace CodeAstrogator.Bridge
                 return;
 
             AttachToRecord(record);
-            _activeFileSessionEnabled = true; // per-session override resets with the session
+            _activeFileSessionEnabled = ActiveFileDefaultOn; // per-session override resets to the option default
             SendSessionInit();
             SendActiveFile();
             SendTranscript(record);
@@ -954,7 +955,7 @@ namespace CodeAstrogator.Bridge
             {
                 _session.ResetSession();
                 _sessionStartAnnounced = false;
-                _activeFileSessionEnabled = true; // per-session override resets with the session
+                _activeFileSessionEnabled = ActiveFileDefaultOn; // per-session override resets to the option default
                 SendSessionInit();                // resets the transcript view to the fresh session
                 SendActiveFile();
             }
@@ -1174,7 +1175,7 @@ namespace CodeAstrogator.Bridge
                 }
 
                 AttachToRecord(latest!);
-                _activeFileSessionEnabled = true;
+                _activeFileSessionEnabled = ActiveFileDefaultOn; // per-session override resets to the option default
                 SendSessionInit();
                 SendActiveFile();
                 SendTranscript(latest!);
@@ -1774,6 +1775,10 @@ namespace CodeAstrogator.Bridge
         /// <summary>True only when both the option and the per-session toggle are on.</summary>
         private bool ActiveFileEffective =>
             _package.GetOptions().AutoAddActiveFile && _activeFileSessionEnabled;
+
+        /// <summary>Initial state of the per-session active-file toggle for a fresh session
+        /// (the "Reference it by default in new chats" option; the user can still flip it per chat).</summary>
+        private bool ActiveFileDefaultOn => _package.GetOptions().ActiveFileOnByDefault;
 
         /// <summary>
         /// Tells the UI about the active editor file: <c>optionEnabled</c> governs whether

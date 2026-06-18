@@ -71,6 +71,10 @@ namespace CodeAstrogator.Options
         public bool RestoreLastSession { get; set; } = true;
         public bool AutoAddActiveFile { get; set; } = true;
         public bool IncludeSelectedLines { get; set; } = true;
+        /// <summary>Default state of the per-chat active-file reference: true = a new chat starts
+        /// with the file referenced (chip on); false = it starts off and the user toggles it on via
+        /// the composer chip. Only meaningful when <see cref="AutoAddActiveFile"/> is enabled.</summary>
+        public bool ActiveFileOnByDefault { get; set; } = true;
         public string ThemeModeString { get; set; } = "auto";
         public string VerbosityString { get; set; } = "normal";
 
