@@ -4,6 +4,19 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.0] – 2026-06-19
+
+### Added
+- **Review edits in the editor (opt-in).** A new "Review edits in the editor" toggle (off by default). When it's on and Claude proposes a file edit (Edit/Write/MultiEdit) in a mode that actually asks (Ask/Plan), the chat shows a compact file card with **"Accept all"**, **"Open in editor"** and **"Reject all"** instead of the inline diff card. Clicking **Open in editor** opens the file and shows the proposed change **inline in the code editor** — to-be-deleted lines highlighted red, to-be-added lines as green "phantom" lines (the file itself is never modified during review) — with **Accept/Reject buttons per hunk**. Accepting only some hunks applies exactly those: the tool input is reconstructed from the accepted hunks and handed back to the CLI (rejecting everything denies the edit). This is the inline, Copilot-style review flow from the roadmap (permission hook + per-hunk partial apply). It only takes effect in Ask/Plan mode — in Auto-accept/Bypass the CLI applies edits without prompting. The diff and reconstruction logic is covered by unit tests.
+- **"Accept all" on the edit-review file card.** Applies the whole proposed edit straight from the chat card without opening the editor (a plain allow, which the CLI receives as the full original edit). "Open in editor" is now a secondary action next to it.
+- **Scrollbar marks for inline reviews.** While a review is open in the editor, each proposed change shows as a coloured tick next to the vertical scrollbar — like git change marks — so you can see at a glance where the changes are (green = additions, red = deletions, purple = changed, grey = already decided).
+- **Jump to next/previous change.** A small floating toolbar (pinned to the top-right of the editor) with ▲/▼ buttons that scroll to the previous/next change in the review, plus a "N to review" counter.
+
+### Changed
+- **The "Review edits in the editor" toggle moved into the Permission menu** (the model/mode popover), nested directly beneath the mode it applies to: it now sits under **"Ask before edits"** and only shows while Ask is selected, mirroring **"Auto-accept commands"** which sits under "Auto-accept edits". A sub-toggle that doesn't apply to the currently selected mode is hidden rather than shown dimmed.
+
+---
+
 ## [0.4.3] – 2026-06-18
 
 ### Changed
