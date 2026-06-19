@@ -217,6 +217,7 @@ namespace CodeAstrogator
             to.ThemeModeString = from.ThemeModeString ?? "auto";
             to.VerbosityString = from.VerbosityString ?? "normal";
             to.UsePersistentCli = from.UsePersistentCli;
+            to.ReviewEditsInEditor = from.ReviewEditsInEditor;
         }
 
         private void RecordSettingsError(string message)
@@ -250,6 +251,16 @@ namespace CodeAstrogator
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             return GetService(typeof(SDTE)) as DTE2;
+        }
+
+        /// <summary>MEF composition container — used to resolve editor services
+        /// (e.g. <c>IVsEditorAdaptersFactoryService</c> to turn an <c>IVsTextView</c> into an
+        /// <c>IWpfTextView</c> for the inline edit-review adornments). UI thread.</summary>
+        internal Microsoft.VisualStudio.ComponentModelHost.IComponentModel? GetComponentModel()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            return GetService(typeof(Microsoft.VisualStudio.ComponentModelHost.SComponentModel))
+                as Microsoft.VisualStudio.ComponentModelHost.IComponentModel;
         }
 
         /// <summary>Working directory for the CLI child process = open solution/folder (Teil A §A3).</summary>

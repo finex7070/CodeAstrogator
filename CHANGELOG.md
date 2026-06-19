@@ -4,6 +4,13 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.0] – 2026-06-19
+
+### Added
+- **Review edits in the editor (opt-in).** A new "Review edits in the editor" toggle in the gear/appearance popover (off by default). When it's on and Claude proposes a file edit (Edit/Write/MultiEdit) in a mode that actually asks (Ask/Plan), the chat shows a compact file card with **"Open in editor"** and **"Reject all"** instead of the inline diff card. Clicking **Open in editor** opens the file and shows the proposed change **inline in the code editor** — to-be-deleted lines highlighted red, to-be-added lines as green "phantom" lines (the file itself is never modified during review) — with **Accept/Reject buttons per hunk**. Accepting only some hunks applies exactly those: the tool input is reconstructed from the accepted hunks and handed back to the CLI (rejecting everything denies the edit). This is the inline, Copilot-style review flow from the roadmap (permission hook + per-hunk partial apply). It only takes effect in Ask/Plan mode — in Auto-accept/Bypass the CLI applies edits without prompting. The diff and reconstruction logic is covered by unit tests.
+
+---
+
 ## [0.4.3] – 2026-06-18
 
 ### Changed
