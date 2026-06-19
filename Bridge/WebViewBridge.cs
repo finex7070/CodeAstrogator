@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CodeAstrogator.Core;
+using CodeAstrogator.Core.EditReview;
 using CodeAstrogator.Options;
 using CodeAstrogator.Services;
 using EnvDTE;
@@ -46,6 +47,7 @@ namespace CodeAstrogator.Bridge
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
+        private readonly EditReviewController _editReview; // inline edit-review adornments (opt-in)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission> _pendingPermissions
             = new System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission>();
         // recorded (approved) permission messages by tool_use_id, so a later tool.result can
@@ -66,6 +68,7 @@ namespace CodeAstrogator.Bridge
             public string ToolName = "";
             public JObject Input = new JObject();
             public JObject? Diff;
+            public EditReviewSession? Review; // set when this edit is reviewed in the editor (opt-in)
         }
 
         public WebViewBridge(CoreWebView2 webView, CodeAstrogatorPackage package)
@@ -94,6 +97,9 @@ namespace CodeAstrogator.Bridge
             };
             try { _permission.Start(); } catch { /* leave unavailable */ }
             _session.PermissionBridge = _permission;
+            // Inline edit-review (opt-in): opens edited files with a red/green diff + per-hunk
+            // Accept/Reject; calls FinalizeEditReview when every hunk in a request is decided.
+            _editReview = new EditReviewController(_package, FinalizeEditReview);
             _history = SessionHistoryStore.LoadFrom(
                 SessionHistoryStore.GetHistoryPath(package.GetSolutionDirectory()));
 
@@ -136,6 +142,7 @@ namespace CodeAstrogator.Bridge
             _webView.WebMessageReceived -= OnWebMessageReceived;
             _session.StopTurn();
             DenyAllPendingPermissions("Tool window closed");
+            _editReview.Dispose(); // remove any open edit-review adornments
             _permission.Dispose(); // stops the MCP listener + deletes the config file
             (_processHost as IDisposable)?.Dispose(); // persistent host owns a live process
             _remote?.Dispose(); // kills the remote-control process tree
@@ -252,6 +259,13 @@ namespace CodeAstrogator.Bridge
                 case "autoAcceptCommands.set":
                     _package.GetOptions().AutoAcceptCommands = msg.Value<bool?>("enabled") ?? false;
                     _package.SaveOptions();
+                    break;
+                case "reviewEditsInEditor.set":
+                    _package.GetOptions().ReviewEditsInEditor = msg.Value<bool?>("enabled") ?? false;
+                    _package.SaveOptions();
+                    break;
+                case "editReview.open":
+                    HandleEditReviewOpen(msg.Value<string>("requestId") ?? "");
                     break;
                 case "consent.set":
                     // first-run consent popup answered (announcements + updates) → persist both
@@ -459,6 +473,24 @@ namespace CodeAstrogator.Bridge
                 : null;
 
             var diff0 = isQuestion ? null : BuildPermissionDiff(req.ToolName, req.Input); // file read off the UI thread
+
+            // "Review edits in the editor" (opt-in): for file edits, build the per-hunk review off
+            // the UI thread and show a file card (Open in editor / Reject all) instead of the inline
+            // diff card. Falls back to the normal card when there's nothing to review.
+            EditReviewSession? review = null;
+            if (!isQuestion
+                && _package.GetOptions().ReviewEditsInEditor
+                && EditReviewSession.IsReviewableTool(req.ToolName))
+            {
+                try
+                {
+                    var built = EditReviewSession.Build(req.ToolName, req.Input, () => ReadFileSafe(req.Input));
+                    if (built.HasHunks)
+                        review = built;
+                }
+                catch { review = null; }
+            }
+
             var pending = new PendingPermission
             {
                 Tcs = new TaskCompletionSource<PermissionDecision>(TaskCreationOptions.RunContinuationsAsynchronously),
@@ -466,6 +498,7 @@ namespace CodeAstrogator.Bridge
                 ToolName = req.ToolName,
                 Input = req.Input,
                 Diff = diff0,
+                Review = review,
             };
             _pendingPermissions[req.RequestId] = pending;
             // Bridge-lifetime token: only fires on Dispose, but keep it tidy by disposing the
@@ -504,6 +537,12 @@ namespace CodeAstrogator.Bridge
                     };
                     if (approveAlwaysSuggestions != null)
                         card["approveAlwaysSuggestions"] = new JArray(approveAlwaysSuggestions.ToArray());
+                    if (review != null)
+                    {
+                        // file card: the diff is reviewed in the editor (Open in editor / Reject all)
+                        card["editInEditor"] = true;
+                        card["hunkCount"] = review.Hunks.Count;
+                    }
                     if (diff != null)
                         card["diff"] = diff;
                 }
@@ -526,6 +565,7 @@ namespace CodeAstrogator.Bridge
                 allow ? null : msg.Value<string>("message"), allow ? msg["updatedInput"] as JObject : null);
             if (p == null)
                 return; // unknown/stale (e.g. mock)
+            _editReview.Close(requestId); // a chat Approve-all/Reject-all closes any open editor review
             // Persist the decided card so it survives a reload (transcript.load role "permission").
             RecordPermissionMessage(p, allow ? "approved" : "rejected");
             if (!allow)
@@ -678,8 +718,73 @@ namespace CodeAstrogator.Bridge
                 // Settle the host-side task AND tell the UI to close the (now orphaned) card, so a
                 // timed-out/abandoned permission or question card doesn't stay open and interactive.
                 if (ResolvePending(key, "deny", reason) != null)
+                {
+                    _editReview.Close(key); // tear down any open editor-review adornments
                     Post(new JObject { ["type"] = "permission.expire", ["requestId"] = key });
+                }
             }
+        }
+
+        // ── inline edit review (opt-in: "Review edits in the editor") ────────────
+
+        /// <summary>web→host editReview.open: open the edited file with the inline red/green diff +
+        /// per-hunk Accept/Reject adornments. No-op if the request is stale or not an editor review.</summary>
+        private void HandleEditReviewOpen(string requestId)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (string.IsNullOrEmpty(requestId)
+                || !_pendingPermissions.TryGetValue(requestId, out var p) || p.Review == null)
+                return;
+            try { _editReview.Open(requestId, p.Review); }
+            catch (Exception ex) { PostError("Could not open the edit for review: " + ex.Message); }
+        }
+
+        /// <summary>Called by the EditReviewController once every hunk of a request is decided.
+        /// Reconstructs the tool input from the accepted hunks and settles the blocked CLI call:
+        /// allow + updatedInput when anything was accepted, otherwise deny. UI thread.</summary>
+        private void FinalizeEditReview(string requestId)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!_pendingPermissions.TryGetValue(requestId, out var pending) || pending.Review == null)
+                return;
+            var updated = pending.Review.BuildUpdatedInput(); // null = nothing accepted → deny
+            var allow = updated != null;
+            var p = ResolvePending(requestId, allow ? "allow" : "deny",
+                allow ? null : "All edits rejected by user", updated);
+            if (p == null)
+                return; // already settled (raced with turn end / a chat decision)
+            _editReview.Close(requestId);
+            // Persist what was ACTUALLY applied (the accepted-hunks reconstruction), so a reload doesn't
+            // show the full original diff for a partial accept.
+            if (allow && updated != null)
+            {
+                p.Input = updated;
+                p.Diff = BuildPermissionDiff(p.ToolName, updated);
+            }
+            RecordPermissionMessage(p, allow ? "approved" : "rejected");
+            if (!allow)
+                PostSystemNote("Edit rejected by user");
+            Post(new JObject
+            {
+                ["type"] = "permission.finalize",
+                ["requestId"] = requestId,
+                ["status"] = allow ? "approved" : "rejected",
+            });
+            PostStatusAfterDecision();
+        }
+
+        /// <summary>Reads the edited file's current text (background thread; "" if unreadable).
+        /// Used to anchor Edit/MultiEdit hunks to real file lines and as the Write old-text.</summary>
+        private static string ReadFileSafe(JObject input)
+        {
+            try
+            {
+                var path = input.Value<string>("file_path");
+                if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path))
+                    return System.IO.File.ReadAllText(path);
+            }
+            catch { }
+            return "";
         }
 
         // ── pattern-based auto-approve (Settings + "Always" button) ──────────────
@@ -1560,6 +1665,7 @@ namespace CodeAstrogator.Bridge
                         && _pendingPermissions.ContainsKey(result.ToolUseId))
                     {
                         ResolvePending(result.ToolUseId, "deny", "Timed out — no answer");
+                        _editReview.Close(result.ToolUseId); // tear down any open editor-review adornments
                         Post(new JObject { ["type"] = "permission.expire", ["requestId"] = result.ToolUseId });
                         // background thread → can't call PostStatusAfterDecision (UI-thread only); Post
                         // marshals, so compute the same state inline (working unless others are open).
@@ -1869,6 +1975,7 @@ namespace CodeAstrogator.Bridge
                 ["ultracode"] = _session.Settings.Ultracode,
                 ["permissionMode"] = _session.Settings.PermissionMode,
                 ["autoAcceptCommands"] = options.AutoAcceptCommands,
+                ["reviewEditsInEditor"] = options.ReviewEditsInEditor,
                 ["cwd"] = _package.GetSolutionDirectory() ?? "",
                 ["tokens"] = _session.TotalTokens,
                 ["contextTokens"] = _history.Current.ContextTokens,

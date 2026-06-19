@@ -60,6 +60,7 @@ namespace CodeAstrogator.Services
                 ThemeModeString = GetString(nameof(AstrogatorOptions.ThemeModeString), d.ThemeModeString),
                 VerbosityString = GetString(nameof(AstrogatorOptions.VerbosityString), d.VerbosityString),
                 UsePersistentCli = GetBool(nameof(AstrogatorOptions.UsePersistentCli), d.UsePersistentCli),
+                ReviewEditsInEditor = GetBool(nameof(AstrogatorOptions.ReviewEditsInEditor), d.ReviewEditsInEditor),
             };
         }
 
@@ -90,6 +91,7 @@ namespace CodeAstrogator.Services
             _store.SetString(Collection, nameof(AstrogatorOptions.ThemeModeString), o.ThemeModeString ?? "auto");
             _store.SetString(Collection, nameof(AstrogatorOptions.VerbosityString), o.VerbosityString ?? "normal");
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UsePersistentCli), o.UsePersistentCli);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ReviewEditsInEditor), o.ReviewEditsInEditor);
         }
 
         private string GetString(string name, string fallback) =>

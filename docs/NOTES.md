@@ -687,9 +687,11 @@ compact_boundary evaluation) — details in the respective sections below.
   chosen mode ≠ `acceptEdits` (it stays clickable — it is a sticky preference).
 
 ## Permission hook & inline diff review (Roadmap #1+#3)
-> **Phase 0-A + Phase 1 IMPLEMENTED** (2026-06-04), still to be verified in real VS.
-> **Phase 2/3 (extended editor inline diff) still PLANNED.** Plan file:
-> `~/.claude/plans/keen-marinating-harbor.md`.
+> **Phase 0-A + Phase 1 IMPLEMENTED** (2026-06-04), verified in real VS.
+> **Phase 0-B + 2 + 3 (inline edit review in the editor) IMPLEMENTED** (2026-06-19) — code complete,
+> builds, the pure diff/reconstruction core is unit-tested; the **WPF adornment rendering still needs
+> manual VS verification** (see the "Inline edit review in the editor" subsection below). Plan file:
+> `docs/currentplan.md`.
 
 **Spike 0-A — empirically confirmed against CLI 2.1.162 (important, some research assumptions were wrong):**
 - HTTP transport works; `GET /mcp` (SSE attempt) may be **405** (the CLI continues POST-only).
@@ -792,6 +794,56 @@ is a **preview before the allow** — the CLI writes only on "Accept" (possibly 
   status-change expiry expires **all still-open** cards (true abandonment, e.g. turn end),
   answered ones are long gone from the set by then. The set is cleared on `session.init`/`transcript.load`.
   Affects `WebViewBridge.HandlePermissionDecision`/`HandleQuestionAnswer` + `app.js`.
+
+### Inline edit review in the editor (Phase 0-B + 2 + 3, 2026-06-19)
+Opt-in "Review edits in the editor" (gear popover toggle → `AstrogatorOptions.ReviewEditsInEditor`,
+default off). When **on** and a file-edit prompt (Edit/Write/MultiEdit) fires **in a mode that actually
+prompts** (Ask/Plan — not acceptEdits/bypass, where the CLI auto-applies edits), the chat shows a **file
+card** ("Open in editor" / "Reject all") instead of the inline diff card; the diff is reviewed **in the
+code editor** with per-hunk Accept/Reject, and partial acceptance is returned via `updatedInput`.
+
+- **Pure core (UI-free, unit-tested) — `Core/EditReview/`:**
+  - `LineDiff.Compute(old,new)` → ordered `LineSegment`s (Unchanged/Changed). Trims common prefix/suffix,
+    LCS-diffs the middle → **multiple hunks** (unlike the single-block WebUI `buildDiff`). Equality ignores a
+    trailing `\r` (CRLF==LF) but segments emit verbatim lines so a **full accept reproduces `new_string`
+    exactly**. LCS capped at 4000 lines/side (falls back to one big hunk).
+  - `EditReviewSession.Build(tool, input, readFile)` → per-edit units (Edit/Write = 1; MultiEdit = one per
+    `edits[]`), each diffed; `ReviewHunk { Index, UnitIndex, AnchorLine (1-based, anchored via the same
+    CRLF-normalised `FindStartLine`), DeletedLines, AddedLines, mutable State }`. `BuildUpdatedInput()`
+    reconstructs from **accepted hunks only**: Edit→`new_string`, Write→`content`, MultiEdit→surviving
+    `edits[]` (fully-rejected edits dropped, `replace_all`/order preserved). **Nothing accepted → returns
+    null → caller denies** (a null `updatedInput` would re-apply the full original edit). Tests: `EditReviewTests`.
+- **Editor adornments (MEF) — `Editor/`:** `EditReviewMef.cs` exports two `AdornmentLayerDefinition`s
+  (deletions below text, additions+buttons above) + an `ILineTransformSourceProvider`/`...Source` that
+  **reserves bottom space** for phantom added lines by **adding to `line.DefaultLineTransform`** (composition,
+  not absolute). `EditReviewViewAdorner.cs` (one per `IWpfTextView`, static `ConditionalWeakTable` registry)
+  draws on `LayoutChanged`: red fill on to-be-deleted buffer lines, **green phantom added lines in the
+  reserved gap** (buffer NEVER modified, positioned via `ITextViewLine.TextBottom`, **no `ViewportTop`
+  subtraction** under `TextRelative`), and per-hunk Accept/Reject WPF buttons. Reserved space is a function of
+  the **hunk set only** (not per-hunk decisions) so transforms compute once; `DisplayTextLineContainingBufferPosition`
+  forces the relayout. Cancels the review if the buffer changes mid-review.
+- **Host wiring — `Services/EditReviewController.cs` + `Bridge/WebViewBridge.cs`:** the controller opens the
+  doc (`VsShellUtilities.OpenDocument` + `IVsEditorAdaptersFactoryService.GetWpfTextView` via the package's
+  new `GetComponentModel()`), hands the shared `EditReviewSession` to the view's adorner, and on **all hunks
+  decided** invokes `FinalizeEditReview(requestId)` — the bridge then calls `BuildUpdatedInput()` itself and
+  `ResolvePending(allow+updatedInput / deny)`. The edit-review request lives in `_pendingPermissions` like any
+  prompt (status stays `waiting-permission`; teardown via `DenyAllPendingPermissions`/ToolResult-while-open/
+  Dispose all `Close()` the adorner). **Manifest** now ships a `MefComponent` asset; csproj references
+  `System.ComponentModel.Composition`.
+- **Contract (web↔host):** host→web `permission.request` gains `editInEditor:true` + `hunkCount` (renders the
+  file card); host→web **`permission.finalize {requestId,status}`** stamps the card decided + frees the
+  composer (then the usual `permission.result` upgrades approved→applied/failed). web→host
+  **`editReview.open {requestId}`** and **`reviewEditsInEditor.set {enabled}`**. "Reject all"/"Approve all"
+  reuse the existing `permission.decision` path (which also `Close()`s the editor). Persistence is unchanged
+  (decided cards persist as role `permission` with the diff → historic render shows the read-only diff; the
+  `editInEditor` flag is **not** persisted).
+- **⚠ Needs manual VS verification (cannot be unit-tested):** that `ILineTransformSource.GetLineTransform`
+  re-fires when a review attaches / after a hunk decision (the green text must land in a real reserved gap,
+  not over code); button clickability vs. layer order; geometry/positioning. Fallbacks if the pure-phantom
+  path misbehaves (same `EditReviewController` seam): (A) temporary buffer-insert + guaranteed revert,
+  (B) `InterLineAdornmentTag` (settable Height), (C) VS diff viewer + per-file Accept/Reject in the chat card.
+  An independent API-reflection panel (against the shipped 17.14.249 ref DLLs) confirmed every editor API used
+  here exists with the signatures used; this re-fire side-effect is the one thing it could not validate offline.
 
 ## AskUserQuestion (interactive follow-up questions) — solved 2026-06-05 (real in-turn card via the permission hook)
 - **Key finding (CLI 2.1.165, throwaway probes):** `AskUserQuestion` **routes through the
