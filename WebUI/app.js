@@ -1249,11 +1249,17 @@
     // render the card pre-decided as "approved" (tool.result then upgrades it to "applied")
     if (editInEditor) {
       const actions = el("div", "perm-actions");
-      const open = el("button", "btn-approve", "Open in editor");
+      // "Accept all" applies the full edit without opening the editor — a plain allow, which the
+      // host echoes back as the original input (= every hunk accepted).
+      const acceptAll = el("button", "btn-approve", "Accept all");
+      acceptAll.title = "Apply every change without opening the editor";
+      acceptAll.addEventListener("click", () => decidePermission(m.requestId, "allow"));
+      const open = el("button", "btn-secondary", "Open in editor");
       open.title = "Open the file and accept/reject each change inline";
       open.addEventListener("click", () => post("editReview.open", { requestId: m.requestId }));
       const reject = el("button", "btn-reject", "Reject all");
       reject.addEventListener("click", () => decidePermission(m.requestId, "deny"));
+      actions.appendChild(acceptAll);
       actions.appendChild(open);
       actions.appendChild(reject);
       card.appendChild(actions);
@@ -2685,20 +2691,6 @@
     pop.appendChild(el("div", "appearance-title appearance-title-2", "Accent color"));
     pop.appendChild(buildAccentPicker());
 
-    // Editing — review file edits inline in the code editor instead of the chat diff card
-    pop.appendChild(el("div", "appearance-title appearance-title-2", "Editing"));
-    const erRow = el("div", "toggle-row" + (state.reviewEditsInEditor ? " on" : ""));
-    erRow.appendChild(el("span", "label", "Review edits in the editor"));
-    erRow.appendChild(el("span", "toggle-switch"));
-    erRow.addEventListener("click", () => {
-      state.reviewEditsInEditor = !state.reviewEditsInEditor;
-      erRow.classList.toggle("on", state.reviewEditsInEditor);
-      post("reviewEditsInEditor.set", { enabled: state.reviewEditsInEditor });
-    });
-    pop.appendChild(erRow);
-    pop.appendChild(el("div", "mm-hint",
-      "File edits open in the code editor with an inline red/green diff and per-hunk Accept/Reject. Applies in Ask/Plan mode."));
-
     // Footer: opens the host-side settings window (all options) via options.open
     pop.appendChild(el("div", "appearance-divider"));
     const optBtn = el("button", "menu-item appearance-options-link", "Advanced options…");
@@ -3024,9 +3016,36 @@
     s3.appendChild(el("div", "mm-hint", "Multi-agent orchestration — spawns subagent workflows, uses far more tokens."));
     pop.appendChild(s3);
 
-    // Permission radio
+    // Permission radio — each mode's sub-toggle (if any) is nested directly beneath its radio
+    // and shown only while that mode is selected.
     const s4 = el("div", "mm-section");
     s4.appendChild(el("div", "mm-section-title", "Permission"));
+
+    // "Auto-accept commands" (under Auto-accept edits) — also run Bash/PowerShell/MCP without a
+    // prompt (questions still ask). "Review edits in the editor" (under Ask) — file edits open
+    // inline in the code editor with per-hunk Accept/Reject instead of the chat diff card.
+    function buildSubToggle(stateKey, msgType, label, hint) {
+      const wrap = el("div", "mm-subtoggle");
+      const row = el("div", "toggle-row" + (state[stateKey] ? " on" : ""));
+      row.appendChild(el("span", "label", label));
+      row.appendChild(el("span", "toggle-switch"));
+      row.addEventListener("click", () => {
+        state[stateKey] = !state[stateKey];
+        row.classList.toggle("on", state[stateKey]);
+        post(msgType, { enabled: state[stateKey] });
+      });
+      wrap.appendChild(row);
+      wrap.appendChild(el("div", "mm-hint", hint));
+      return wrap;
+    }
+    // mode → its nested sub-toggle element (modes without one stay bare)
+    const subToggles = {
+      acceptEdits: buildSubToggle("autoAcceptCommands", "autoAcceptCommands.set", "Auto-accept commands",
+        "In Auto-accept edits, also run Bash, PowerShell and MCP tools without asking. Questions still prompt."),
+      ask: buildSubToggle("reviewEditsInEditor", "reviewEditsInEditor.set", "Review edits in the editor",
+        "Open file edits in the code editor with an inline red/green diff and per-hunk Accept/Reject."),
+    };
+
     const perms = [
       ["ask", "Ask before edits"],
       ["acceptEdits", "Auto-accept edits"],
@@ -3043,32 +3062,18 @@
         row.classList.add("selected");
         updateModelModeLabel();
         post("permission.set", { mode });
-        syncAutoAcceptCommands();
+        syncSubToggles();
       });
       s4.appendChild(row);
+      if (subToggles[mode]) s4.appendChild(subToggles[mode]); // nested directly under its mode
     });
 
-    // "Auto-accept commands" — extends Auto-accept-edits to also run Bash/PowerShell/MCP
-    // without a prompt (questions still ask). Only meaningful in acceptEdits → dimmed otherwise.
-    const cmdRow = el("div", "toggle-row" + (state.autoAcceptCommands ? " on" : ""));
-    cmdRow.appendChild(el("span", "label", "Auto-accept commands"));
-    cmdRow.appendChild(el("span", "toggle-switch"));
-    cmdRow.addEventListener("click", () => {
-      state.autoAcceptCommands = !state.autoAcceptCommands;
-      cmdRow.classList.toggle("on", state.autoAcceptCommands);
-      post("autoAcceptCommands.set", { enabled: state.autoAcceptCommands });
-    });
-    s4.appendChild(cmdRow);
-    const cmdHint = el("div", "mm-hint", "In Auto-accept edits, also run Bash, PowerShell and MCP tools without asking. Questions still prompt.");
-    s4.appendChild(cmdHint);
-
-    // dim the command toggle unless Auto-accept edits is the selected mode
-    function syncAutoAcceptCommands() {
-      const active = state.permissionMode === "acceptEdits";
-      cmdRow.classList.toggle("disabled", !active);
-      cmdHint.classList.toggle("disabled", !active);
+    // show only the selected mode's sub-toggle
+    function syncSubToggles() {
+      for (const mode in subToggles)
+        subToggles[mode].style.display = state.permissionMode === mode ? "" : "none";
     }
-    syncAutoAcceptCommands();
+    syncSubToggles();
 
     pop.appendChild(s4);
 
