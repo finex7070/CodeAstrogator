@@ -189,6 +189,7 @@ namespace CodeAstrogator.ToolWindows
                 UltracodeEnabled = _current.UltracodeEnabled,
                 PermissionModeString = _current.PermissionModeString,
                 AutoAcceptCommands = _current.AutoAcceptCommands,
+                ReviewEditsInEditor = _current.ReviewEditsInEditor,
                 AccentColor = _current.AccentColor,
             };
             _package.UpdateOptions(updated);

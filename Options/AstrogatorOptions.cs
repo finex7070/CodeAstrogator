@@ -84,5 +84,13 @@ namespace CodeAstrogator.Options
         /// Opt-in; the per-turn host stays the default. See docs/NOTES.md ("Persistent CLI").
         /// </summary>
         public bool UsePersistentCli { get; set; } = false;
+
+        /// <summary>When on, file-edit permission prompts (Edit/Write/MultiEdit) are reviewed
+        /// <em>in the code editor</em> instead of via the inline diff card: the chat shows a file
+        /// card, clicking it opens the file with an inline red/green diff and per-hunk Accept/Reject
+        /// (partial acceptance is returned to the CLI via <c>updatedInput</c>). Off by default;
+        /// toggled in the gear/appearance popover. Only takes effect in the modes that actually
+        /// prompt for edits (Ask/Plan) — in Auto-accept/Bypass the CLI applies edits without a prompt.</summary>
+        public bool ReviewEditsInEditor { get; set; } = false;
     }
 }

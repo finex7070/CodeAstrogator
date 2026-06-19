@@ -22,6 +22,7 @@
     filesRequested: false,
     permissionMode: "ask",
     autoAcceptCommands: false, // in acceptEdits mode, also auto-approve Bash/PowerShell/MCP
+    reviewEditsInEditor: false, // review file edits inline in the code editor (per-hunk) instead of the chat diff card
     cwd: "",
     tokens: 0,
     contextTokens: 0,        // context size after the last turn (input incl. cache + output)
@@ -398,6 +399,7 @@
       case "tool.result": return toolResult(m);
       case "permission.request": return permissionRequest(m);
       case "permission.result": return applyPermissionResult(m);
+      case "permission.finalize": return finalizePermissionCard(m.requestId, m.status);
       case "permission.expire": return expirePermissionCard(m.requestId);
       case "mode.update": return applyModeUpdate(m);
       case "question.request": return questionRequest(m);
@@ -524,6 +526,7 @@
     if (m.accent !== undefined) applyAccent(m.accent); // sticky custom brand color
     state.permissionMode = m.permissionMode || state.permissionMode;
     if (m.autoAcceptCommands !== undefined) state.autoAcceptCommands = !!m.autoAcceptCommands;
+    if (m.reviewEditsInEditor !== undefined) state.reviewEditsInEditor = !!m.reviewEditsInEditor;
     state.cwd = m.cwd || "";
     state.tokens = m.tokens || 0;
     state.contextTokens = m.contextTokens || 0;
@@ -1221,8 +1224,17 @@
     head.appendChild(el("span", "perm-status")); // filled in once decided/expired
     card.appendChild(head);
 
+    // edit-review mode (toggle on + a file edit): the diff is reviewed in the editor, not here.
+    const editInEditor = !!m.editInEditor && !m.autoApproved;
+
     const body = el("div", "perm-body"); // collapses after a decision
-    if (m.diff && (m.diff.oldText != null || m.diff.newText != null)) {
+    if (editInEditor) {
+      const n = m.hunkCount || 0;
+      const label = n > 0
+        ? (n === 1 ? "1 change to review in the editor" : n + " changes to review in the editor")
+        : "Review this edit in the editor";
+      body.appendChild(el("div", "perm-editreview", label));
+    } else if (m.diff && (m.diff.oldText != null || m.diff.newText != null)) {
       body.appendChild(buildDiff(m.diff.oldText || "", m.diff.newText || "", m.diff.startLine || 1));
     } else {
       const j = el("div", "perm-json");
@@ -1235,7 +1247,23 @@
 
     // auto-approved edits (acceptEdits/bypass): no decision needed — skip the buttons and
     // render the card pre-decided as "approved" (tool.result then upgrades it to "applied")
-    if (!m.autoApproved) {
+    if (editInEditor) {
+      const actions = el("div", "perm-actions");
+      // "Accept all" applies the full edit without opening the editor — a plain allow, which the
+      // host echoes back as the original input (= every hunk accepted).
+      const acceptAll = el("button", "btn-approve", "Accept all");
+      acceptAll.title = "Apply every change without opening the editor";
+      acceptAll.addEventListener("click", () => decidePermission(m.requestId, "allow"));
+      const open = el("button", "btn-secondary", "Open in editor");
+      open.title = "Open the file and accept/reject each change inline";
+      open.addEventListener("click", () => post("editReview.open", { requestId: m.requestId }));
+      const reject = el("button", "btn-reject", "Reject all");
+      reject.addEventListener("click", () => decidePermission(m.requestId, "deny"));
+      actions.appendChild(acceptAll);
+      actions.appendChild(open);
+      actions.appendChild(reject);
+      card.appendChild(actions);
+    } else if (!m.autoApproved) {
       const actions = el("div", "perm-actions");
       const approve = el("button", "btn-approve", "Approve");
       const reject = el("button", "btn-reject", "Reject");
@@ -1383,6 +1411,15 @@
   function expirePermissionCard(requestId) {
     setPermCardState(requestId, "expired");  // permission card (no-op if not one)
     expireQuestionCard(requestId);           // question card (no-op if not one)
+    state.pendingPermissions.delete(requestId);
+    updateSendEnabled();
+  }
+
+  // host→web permission.finalize: the host decided an edit-review card (in the editor or via
+  // Reject-all) — stamp the card decided + free the composer, exactly like decidePermission does
+  // for a chat decision. A later permission.result then upgrades approved → applied/failed.
+  function finalizePermissionCard(requestId, status) {
+    setPermCardState(requestId, status || "approved");
     state.pendingPermissions.delete(requestId);
     updateSendEnabled();
   }
@@ -2979,9 +3016,36 @@
     s3.appendChild(el("div", "mm-hint", "Multi-agent orchestration — spawns subagent workflows, uses far more tokens."));
     pop.appendChild(s3);
 
-    // Permission radio
+    // Permission radio — each mode's sub-toggle (if any) is nested directly beneath its radio
+    // and shown only while that mode is selected.
     const s4 = el("div", "mm-section");
     s4.appendChild(el("div", "mm-section-title", "Permission"));
+
+    // "Auto-accept commands" (under Auto-accept edits) — also run Bash/PowerShell/MCP without a
+    // prompt (questions still ask). "Review edits in the editor" (under Ask) — file edits open
+    // inline in the code editor with per-hunk Accept/Reject instead of the chat diff card.
+    function buildSubToggle(stateKey, msgType, label, hint) {
+      const wrap = el("div", "mm-subtoggle");
+      const row = el("div", "toggle-row" + (state[stateKey] ? " on" : ""));
+      row.appendChild(el("span", "label", label));
+      row.appendChild(el("span", "toggle-switch"));
+      row.addEventListener("click", () => {
+        state[stateKey] = !state[stateKey];
+        row.classList.toggle("on", state[stateKey]);
+        post(msgType, { enabled: state[stateKey] });
+      });
+      wrap.appendChild(row);
+      wrap.appendChild(el("div", "mm-hint", hint));
+      return wrap;
+    }
+    // mode → its nested sub-toggle element (modes without one stay bare)
+    const subToggles = {
+      acceptEdits: buildSubToggle("autoAcceptCommands", "autoAcceptCommands.set", "Auto-accept commands",
+        "In Auto-accept edits, also run Bash, PowerShell and MCP tools without asking. Questions still prompt."),
+      ask: buildSubToggle("reviewEditsInEditor", "reviewEditsInEditor.set", "Review edits in the editor",
+        "Open file edits in the code editor with an inline red/green diff and per-hunk Accept/Reject."),
+    };
+
     const perms = [
       ["ask", "Ask before edits"],
       ["acceptEdits", "Auto-accept edits"],
@@ -2998,32 +3062,18 @@
         row.classList.add("selected");
         updateModelModeLabel();
         post("permission.set", { mode });
-        syncAutoAcceptCommands();
+        syncSubToggles();
       });
       s4.appendChild(row);
+      if (subToggles[mode]) s4.appendChild(subToggles[mode]); // nested directly under its mode
     });
 
-    // "Auto-accept commands" — extends Auto-accept-edits to also run Bash/PowerShell/MCP
-    // without a prompt (questions still ask). Only meaningful in acceptEdits → dimmed otherwise.
-    const cmdRow = el("div", "toggle-row" + (state.autoAcceptCommands ? " on" : ""));
-    cmdRow.appendChild(el("span", "label", "Auto-accept commands"));
-    cmdRow.appendChild(el("span", "toggle-switch"));
-    cmdRow.addEventListener("click", () => {
-      state.autoAcceptCommands = !state.autoAcceptCommands;
-      cmdRow.classList.toggle("on", state.autoAcceptCommands);
-      post("autoAcceptCommands.set", { enabled: state.autoAcceptCommands });
-    });
-    s4.appendChild(cmdRow);
-    const cmdHint = el("div", "mm-hint", "In Auto-accept edits, also run Bash, PowerShell and MCP tools without asking. Questions still prompt.");
-    s4.appendChild(cmdHint);
-
-    // dim the command toggle unless Auto-accept edits is the selected mode
-    function syncAutoAcceptCommands() {
-      const active = state.permissionMode === "acceptEdits";
-      cmdRow.classList.toggle("disabled", !active);
-      cmdHint.classList.toggle("disabled", !active);
+    // show only the selected mode's sub-toggle
+    function syncSubToggles() {
+      for (const mode in subToggles)
+        subToggles[mode].style.display = state.permissionMode === mode ? "" : "none";
     }
-    syncAutoAcceptCommands();
+    syncSubToggles();
 
     pop.appendChild(s4);
 
@@ -3144,6 +3194,13 @@
         case "options.open": return sendIn("system.note", { id: nid("note"), text: "(mock) Would open the Code Astrogator settings window" }, 80);
         case "permission.set": return;
         case "autoAcceptCommands.set": return;
+        case "reviewEditsInEditor.set": return;
+        case "editReview.open":
+          // No real editor in the mock — simulate the user accepting the edit inline.
+          sendIn("system.note", { id: nid("note"), text: "(mock) Would open the file for inline review" }, 60);
+          sendIn("permission.finalize", { requestId: msg.requestId, status: "approved" }, 500);
+          sendIn("permission.result", { requestId: msg.requestId, status: "applied" }, 1100);
+          return;
         case "permission.decision": return onDecision(msg);
         case "permission.approveAlways":
           sendIn("system.note", { id: nid("note"), text: "(mock) Added auto-approve pattern" }, 40);
@@ -3403,6 +3460,9 @@
           requestId: reqId,
           toolName: "Edit",
           input: { file_path: "src/Program.cs" },
+          // when "Review edits in the editor" is on, render the file card (Open in editor / Reject all)
+          editInEditor: state.reviewEditsInEditor,
+          hunkCount: 2,
           diff: {
             path: "src/Program.cs",
             startLine: 12, // demo: edit sits partway into the file
