@@ -63,6 +63,14 @@ namespace CodeAstrogator.Editor
 
         public bool HasReview => _review != null;
 
+        /// <summary>The review's hunks (empty when no review is attached). Read by the scrollbar
+        /// overview margin to draw a mark per hunk.</summary>
+        public IReadOnlyList<ReviewHunk> ReviewHunks => _review?.Hunks ?? Array.Empty<ReviewHunk>();
+
+        /// <summary>Raised whenever the set of hunks or their state changes (attach / clear / decide),
+        /// so the scrollbar overview margin can repaint its marks.</summary>
+        public event Action? ReviewChanged;
+
         /// <summary>Attaches a review to this view and (re)draws it. Replaces any prior review.</summary>
         public void SetReview(EditReviewSession review, Action onCompleted)
         {
@@ -77,6 +85,7 @@ namespace CodeAstrogator.Editor
             _view.TextBuffer.Changed += OnBufferChanged;
             ForceRelayout();   // re-query the line transform so the reserved space appears, then draw
             Draw();
+            ReviewChanged?.Invoke();
         }
 
         /// <summary>Removes the review, its adornments and the reserved space.</summary>
@@ -92,6 +101,7 @@ namespace CodeAstrogator.Editor
             _below?.RemoveAllAdornments();
             _above?.RemoveAllAdornments();
             ForceRelayout();   // give the reclaimed vertical space back
+            ReviewChanged?.Invoke();
         }
 
         private void Detach()
@@ -174,6 +184,101 @@ namespace CodeAstrogator.Editor
                 try { DrawHunk(hunk, snapshot); }
                 catch { /* never let a draw error break the editor */ }
             }
+            try { DrawNavToolbar(snapshot); }
+            catch { /* the floating toolbar must never break the editor */ }
+        }
+
+        /// <summary>A small floating toolbar (fixed at the top-right of the viewport) with Prev/Next
+        /// buttons that jump the caret/scroll to the previous/next review hunk, plus a remaining-count
+        /// label. Redrawn each layout pass; OwnerControlled so it stays pinned regardless of scroll.</summary>
+        private void DrawNavToolbar(ITextSnapshot snapshot)
+        {
+            if (_above == null || _review == null || _review.Hunks.Count == 0)
+                return;
+            int pending = 0;
+            foreach (var h in _review.Hunks)
+                if (h.State == HunkState.Pending) pending++;
+
+            var bar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Background = new SolidColorBrush(Color.FromArgb(0xF0, 0x25, 0x29, 0x33)),
+            };
+            bar.Children.Add(MakeNavButton("▲", "Go to the previous change", () => Navigate(-1, snapshot)));
+            bar.Children.Add(MakeNavButton("▼", "Go to the next change", () => Navigate(+1, snapshot)));
+            bar.Children.Add(new TextBlock
+            {
+                Text = pending > 0 ? pending + " to review" : "all reviewed",
+                Foreground = DimText,
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 8, 0),
+            });
+
+            bar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w = bar.DesiredSize.Width;
+            Canvas.SetLeft(bar, Math.Max(_view.ViewportLeft, _view.ViewportRight - w - 16));
+            Canvas.SetTop(bar, _view.ViewportTop + 6);
+            _above.AddAdornment(AdornmentPositioningBehavior.OwnerControlled, null, "nav", bar, null);
+        }
+
+        private Button MakeNavButton(string glyph, string tip, Action onClick)
+        {
+            var b = new Button
+            {
+                Content = glyph,
+                ToolTip = tip,
+                Margin = new Thickness(2, 1, 2, 1),
+                Padding = new Thickness(7, 1, 7, 1),
+                FontSize = 11,
+                Cursor = System.Windows.Input.Cursors.Hand,
+            };
+            b.Click += (s, e) => onClick();
+            return b;
+        }
+
+        /// <summary>Scrolls to the previous (dir &lt; 0) or next (dir &gt; 0) hunk relative to the first
+        /// visible line, wrapping around at the ends.</summary>
+        private void Navigate(int dir, ITextSnapshot snapshot)
+        {
+            if (_review == null || _review.Hunks.Count == 0)
+                return;
+            var lines = new List<int>();
+            foreach (var h in _review.Hunks)
+                lines.Add(Clamp(h.AnchorLine - 1, 0, snapshot.LineCount - 1));
+            lines.Sort();
+
+            int curr = CurrentTopLine();
+            int target = -1;
+            if (dir > 0)
+            {
+                foreach (var l in lines) if (l > curr) { target = l; break; }
+                if (target < 0) target = lines[0]; // past the last → wrap to the first
+            }
+            else
+            {
+                for (int i = lines.Count - 1; i >= 0; i--) if (lines[i] < curr) { target = lines[i]; break; }
+                if (target < 0) target = lines[lines.Count - 1]; // before the first → wrap to the last
+            }
+            try
+            {
+                var line = snapshot.GetLineFromLineNumber(Clamp(target, 0, snapshot.LineCount - 1));
+                _view.ViewScroller.EnsureSpanVisible(new SnapshotSpan(line.Start, line.End),
+                    EnsureSpanVisibleOptions.AlwaysCenter);
+            }
+            catch { /* best effort */ }
+        }
+
+        private int CurrentTopLine()
+        {
+            try
+            {
+                var lines = _view.TextViewLines;
+                if (lines != null && lines.Count > 0)
+                    return lines.FirstVisibleLine.Start.GetContainingLine().LineNumber;
+            }
+            catch { }
+            return 0;
         }
 
         private void DrawHunk(ReviewHunk hunk, ITextSnapshot snapshot)
@@ -273,6 +378,7 @@ namespace CodeAstrogator.Editor
                 return;
             hunk.State = state;
             Draw(); // refresh button labels / dimming
+            ReviewChanged?.Invoke(); // repaint the scrollbar marks (decided hunks dim)
             if (_review.AllDecided && !_completed)
             {
                 _completed = true;

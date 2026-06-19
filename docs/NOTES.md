@@ -796,11 +796,17 @@ is a **preview before the allow** — the CLI writes only on "Accept" (possibly 
   Affects `WebViewBridge.HandlePermissionDecision`/`HandleQuestionAnswer` + `app.js`.
 
 ### Inline edit review in the editor (Phase 0-B + 2 + 3, 2026-06-19)
-Opt-in "Review edits in the editor" (gear popover toggle → `AstrogatorOptions.ReviewEditsInEditor`,
-default off). When **on** and a file-edit prompt (Edit/Write/MultiEdit) fires **in a mode that actually
-prompts** (Ask/Plan — not acceptEdits/bypass, where the CLI auto-applies edits), the chat shows a **file
-card** ("Open in editor" / "Reject all") instead of the inline diff card; the diff is reviewed **in the
-code editor** with per-hunk Accept/Reject, and partial acceptance is returned via `updatedInput`.
+Opt-in "Review edits in the editor" (toggle in the **Permission section of the model/mode popover** →
+`AstrogatorOptions.ReviewEditsInEditor`, default off). Each mode's sub-toggle is **nested directly beneath its
+radio and shown only while that mode is selected** (`mm-subtoggle` wrappers, `syncSubToggles` show/hides by
+`display`): "Review edits in the editor" sits under **Ask**, "Auto-accept commands" under **Auto-accept edits**.
+When **on** and a file-edit prompt (Edit/Write/MultiEdit) fires **in a mode that actually prompts** (Ask/Plan — not
+acceptEdits/bypass, where the CLI auto-applies edits), the chat shows a **file
+card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline diff card; the diff is reviewed
+**in the code editor** with per-hunk Accept/Reject, and partial acceptance is returned via `updatedInput`.
+**"Accept all"** applies the full edit straight from the chat card without opening the editor — it is a plain
+`permission.decision allow` (no `updatedInput`), which the MCP bridge echoes back as the original input
+(`decision.UpdatedInput ?? originalInput`), i.e. every hunk accepted.
 
 - **Pure core (UI-free, unit-tested) — `Core/EditReview/`:**
   - `LineDiff.Compute(old,new)` → ordered `LineSegment`s (Unchanged/Changed). Trims common prefix/suffix,
@@ -821,7 +827,19 @@ code editor** with per-hunk Accept/Reject, and partial acceptance is returned vi
   reserved gap** (buffer NEVER modified, positioned via `ITextViewLine.TextBottom`, **no `ViewportTop`
   subtraction** under `TextRelative`), and per-hunk Accept/Reject WPF buttons. Reserved space is a function of
   the **hunk set only** (not per-hunk decisions) so transforms compute once; `DisplayTextLineContainingBufferPosition`
-  forces the relayout. Cancels the review if the buffer changes mid-review.
+  forces the relayout. Cancels the review if the buffer changes mid-review. The adorner also draws a **fixed
+  Prev/Next nav toolbar** (▲/▼ + "N to review" count, `OwnerControlled` so it stays pinned top-right while
+  scrolling) — `Navigate(±1)` jumps to the prev/next hunk anchor relative to the first visible line (wraps at
+  the ends) via `ViewScroller.EnsureSpanVisible(AlwaysCenter)`. It raises a **`ReviewChanged`** event on
+  attach/clear/decide and exposes **`ReviewHunks`** so the scrollbar margin can repaint.
+- **Scrollbar marks (MEF) — `Editor/EditReviewScrollbarMargin.cs`:** an `IWpfTextViewMarginProvider`
+  (`[MarginContainer(PredefinedMarginNames.VerticalScrollBarContainer)]`, `[Order(After=…OverviewChangeTracking)]`)
+  adds a thin strip next to the vertical scrollbar (like git change / error marks). Gets the
+  `IVerticalScrollBar` via `marginContainer.GetTextViewMargin(PredefinedMarginNames.VerticalScrollBar)`, draws
+  one coloured tick per hunk at `GetYCoordinateOfBufferPosition(anchorLine.Start)` (green=add, red=delete,
+  purple=changed, dim grey=decided). Repaints on the adorner's `ReviewChanged` and the scrollbar's
+  `TrackSpanChanged`. **Note `PredefinedMarginNames`, not `PredefinedOverviewMarginNames`** (the latter doesn't
+  exist in the 17.14 SDK).
 - **Host wiring — `Services/EditReviewController.cs` + `Bridge/WebViewBridge.cs`:** the controller opens the
   doc (`VsShellUtilities.OpenDocument` + `IVsEditorAdaptersFactoryService.GetWpfTextView` via the package's
   new `GetComponentModel()`), hands the shared `EditReviewSession` to the view's adorner, and on **all hunks
@@ -833,13 +851,17 @@ code editor** with per-hunk Accept/Reject, and partial acceptance is returned vi
 - **Contract (web↔host):** host→web `permission.request` gains `editInEditor:true` + `hunkCount` (renders the
   file card); host→web **`permission.finalize {requestId,status}`** stamps the card decided + frees the
   composer (then the usual `permission.result` upgrades approved→applied/failed). web→host
-  **`editReview.open {requestId}`** and **`reviewEditsInEditor.set {enabled}`**. "Reject all"/"Approve all"
-  reuse the existing `permission.decision` path (which also `Close()`s the editor). Persistence is unchanged
+  **`editReview.open {requestId}`** and **`reviewEditsInEditor.set {enabled}`**. "Accept all"/"Reject all"
+  reuse the existing `permission.decision` path (allow/deny respectively; allow also `Close()`s any open
+  editor review and echoes the original input = full accept). Persistence is unchanged
   (decided cards persist as role `permission` with the diff → historic render shows the read-only diff; the
   `editInEditor` flag is **not** persisted).
 - **⚠ Needs manual VS verification (cannot be unit-tested):** that `ILineTransformSource.GetLineTransform`
   re-fires when a review attaches / after a hunk decision (the green text must land in a real reserved gap,
-  not over code); button clickability vs. layer order; geometry/positioning. Fallbacks if the pure-phantom
+  not over code); button clickability vs. layer order; geometry/positioning. **Also unverifiable offline (added
+  2026-06-19):** that the scrollbar-mark margin actually lands in the `VerticalScrollBarContainer` and its
+  ticks line up with the scrollbar in both bar- and map-mode (the 6px strip may shift the scrollbar slightly);
+  that the Prev/Next nav toolbar stays pinned and `EnsureSpanVisible` centers the target hunk. Fallbacks if the pure-phantom
   path misbehaves (same `EditReviewController` seam): (A) temporary buffer-insert + guaranteed revert,
   (B) `InterLineAdornmentTag` (settable Height), (C) VS diff viewer + per-file Accept/Reject in the chat card.
   An independent API-reflection panel (against the shipped 17.14.249 ref DLLs) confirmed every editor API used

@@ -588,7 +588,7 @@ button:focus { outline: none; }
   border-top: 1px solid var(--border);
   font-family: var(--font-ui);
 }
-.btn-approve, .btn-reject, .btn-always {
+.btn-approve, .btn-reject, .btn-always, .btn-secondary {
   flex: 1 1 auto;
   border-radius: 6px;
   padding: 6px 12px;
@@ -633,6 +633,9 @@ button:focus { outline: none; }
 .approve-pop-actions .btn-approve, .approve-pop-actions .btn-reject { flex: 0 0 auto; min-width: 90px; }
 .btn-reject { background: transparent; color: var(--text); }
 .btn-reject:hover { border-color: var(--error); color: var(--error); }
+/* neutral secondary action (e.g. "Open in editor" next to the primary "Accept all") */
+.btn-secondary { background: transparent; color: var(--text); }
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
 /* result badge + re-expand chevron in the head */
 .perm-status { margin-left: auto; font-size: 11px; font-weight: 600; font-family: var(--font-ui); white-space: nowrap; }
 .perm-card.approved .perm-status { color: var(--ok); }
@@ -1381,9 +1384,11 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .toggle-row.on .toggle-switch { background: var(--accent); }
 .toggle-row.on .toggle-switch::after { transform: translateX(16px); background: #fff; }
-/* dimmed when the toggle only applies in another mode (e.g. Auto-accept commands needs acceptEdits) */
-.toggle-row.disabled { opacity: 0.45; }
+/* dimmed + non-interactive when the toggle only applies in another mode */
+.toggle-row.disabled { opacity: 0.45; pointer-events: none; }
 .mm-hint.disabled { opacity: 0.55; }
+/* a mode's sub-toggle, nested directly beneath its Permission radio (indented + accent rail) */
+.mm-subtoggle { margin-left: 15px; padding-left: 7px; border-left: 2px solid var(--accent-faint); }
 
 /* Autocomplete (slash) anchored to composer */
 .autocomplete { min-width: 200px; }
