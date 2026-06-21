@@ -36,7 +36,6 @@
     authMode: "oauth",
     status: "ready",
     remoteActive: false,     // remote-control mode locks composer + transcript
-    remoteUrl: null,
     activeFile: { name: null, path: null, optionEnabled: true, enabled: true, lines: null }, // active editor tab reference
     messages: [],            // rendered message records
     attachments: [],         // {id, name}
@@ -111,9 +110,6 @@
   const btnRemote = $("btn-remote");
   const remotePanel = $("remote-panel");
   const remoteStatus = $("remote-status");
-  const remoteQr = $("remote-qr");
-  const remoteUrlEl = $("remote-url");
-  const btnRemoteCopy = $("btn-remote-copy");
   const btnRemoteEnd = $("btn-remote-end");
 
   // Notice / announcement banner — content + on/off come from a remote JSON file fetched from
@@ -595,6 +591,11 @@
       updateSendEnabled();
       hideWorkingIndicator();
     }
+    // While a turn runs, block actions that would switch/clear the session and orphan the live
+    // process (the host also guards these via IsBusy). New chat + remote control are disabled.
+    const turnActive = isTurnActive();
+    $("btn-new").disabled = turnActive || state.remoteActive;
+    btnRemote.disabled = turnActive;
     // permission expiry: status moved away while one or more cards are still open
     // (host abandoned them — e.g. turn ended/errored). Expire every still-pending card.
     // Cards the user just answered are already removed from the set, so they're untouched.
@@ -767,6 +768,11 @@
     let full = (md ? md.label : state.model) + " · " + modeLabel;
     if (state.ultracode) full += " · Ultra";
     modelModeLabel.textContent = full;
+    // Special looping effects on the pill — Ultracode wins over Max when both are on
+    // (see .modelmode-btn.is-ultra / .is-max). is-max only set when Ultracode is off.
+    const isMax = state.effort === "max";
+    modelModeBtn.classList.toggle("is-ultra", state.ultracode);
+    modelModeBtn.classList.toggle("is-max", isMax && !state.ultracode);
     // compact: show only model short label is handled by CSS truncation; provide model label
   }
 
@@ -2073,11 +2079,12 @@
   // -------------------------------------------------------------------------
   // Composer: send / stop / keyboard
   // -------------------------------------------------------------------------
+  function isTurnActive() {
+    // a turn is running while it works or waits for a permission decision (the CLI process is alive)
+    return state.status === "working" || state.status === "waiting-permission";
+  }
   function canSend() {
-    return input.value.trim().length > 0 &&
-      !state.remoteActive &&
-      state.status !== "working" &&
-      state.status !== "waiting-permission";
+    return input.value.trim().length > 0 && !state.remoteActive && !isTurnActive();
   }
   function updateSendEnabled() {
     if (state.status === "working") { sendBtn.disabled = false; return; }
@@ -2441,10 +2448,11 @@
   }
 
   // -------------------------------------------------------------------------
-  // Remote control (claude remote-control server) — locks composer + transcript,
-  // shows link + QR, "End remote session" loads the remote session afterwards.
+  // Remote control — opens the CURRENT chat in an interactive `claude --remote-control`
+  // session in the VS terminal (the CLI shows the QR/link there). Locks the composer +
+  // transcript while active; "End remote session" closes the terminal and reloads the
+  // (now-advanced) conversation. Host contract: remote.state { state, inTerminal, message }.
   // -------------------------------------------------------------------------
-  let remoteQrUrl = null; // last URL rendered into the canvas
 
   /** Locks everything except the remote panel: header actions (rename, history,
       new chat) and the composer controls (+, /, Model·Mode, attachment chips). */
@@ -2459,8 +2467,6 @@
     const s = m.state || "";
     if (s === "stopped") {
       state.remoteActive = false;
-      state.remoteUrl = null;
-      remoteQrUrl = null;
       remotePanel.hidden = true;
       btnRemote.classList.remove("active");
       setRemoteLocked(false);
@@ -2479,54 +2485,18 @@
     remoteStatus.classList.toggle("error", s === "error");
     btnRemoteEnd.textContent = s === "error" ? "Close" : "End remote session";
 
-    if (s === "error" || s === "starting") {
-      remoteStatus.textContent = s === "error"
-        ? (m.message || "Remote control failed.")
-        : "Starting remote control…";
-      remoteQr.hidden = true;
-      remoteUrlEl.hidden = true;
-      btnRemoteCopy.hidden = true;
-      return;
+    if (s === "starting") {
+      remoteStatus.textContent = "Opening the interactive session in the terminal…";
+    } else if (s === "error") {
+      remoteStatus.textContent = m.message || "Remote control failed.";
+    } else { // ready
+      remoteStatus.textContent = m.message
+        || "Running in the terminal — scan the QR code or open the link shown there to connect from the Claude app or claude.ai/code.";
     }
-
-    // ready
-    const n = m.activeSessions || 0;
-    remoteStatus.textContent = n > 0
-      ? n + " active remote session" + (n > 1 ? "s" : "")
-      : "Scan with the Claude app or open the link to connect";
-    if (m.url) {
-      state.remoteUrl = m.url;
-      remoteUrlEl.textContent = m.url;
-      remoteUrlEl.hidden = false;
-      btnRemoteCopy.hidden = false;
-      drawRemoteQr(m.url);
-    }
-  }
-
-  /** 1px/module into the canvas (CSS scales it up with image-rendering: pixelated). */
-  function drawRemoteQr(url) {
-    if (remoteQrUrl === url) { remoteQr.hidden = false; return; }
-    const modules = typeof qrEncode === "function" ? qrEncode(url) : null;
-    if (!modules) { remoteQr.hidden = true; return; } // URL too long / qr.js missing
-    const quiet = 4;
-    const dim = modules.length + quiet * 2;
-    remoteQr.width = dim;
-    remoteQr.height = dim;
-    const ctx = remoteQr.getContext("2d");
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, dim, dim);
-    ctx.fillStyle = "#000";
-    for (let y = 0; y < modules.length; y++) {
-      for (let x = 0; x < modules.length; x++) {
-        if (modules[y][x]) ctx.fillRect(x + quiet, y + quiet, 1, 1);
-      }
-    }
-    remoteQr.hidden = false;
-    remoteQrUrl = url;
   }
 
   btnRemote.addEventListener("click", () => {
-    if (state.remoteActive || state.status === "working") return;
+    if (state.remoteActive || isTurnActive()) return;
     post("remote.start", {});
     applyRemoteState({ state: "starting" }); // optimistic — host confirms
   });
@@ -2536,13 +2506,6 @@
     remoteStatus.classList.remove("error");
     remoteStatus.textContent = "Stopping…";
     post("remote.stop", {});
-  });
-
-  btnRemoteCopy.addEventListener("click", () => {
-    if (!state.remoteUrl) return;
-    copyText(state.remoteUrl);
-    btnRemoteCopy.textContent = "Copied!";
-    setTimeout(() => { btnRemoteCopy.textContent = "Copy link"; }, 1500);
   });
 
   // -------------------------------------------------------------------------
@@ -2564,30 +2527,40 @@
       historyPanelEl.appendChild(el("div", "history-empty", "No sessions yet."));
       return;
     }
+    // While a turn runs, switching/deleting the active session would disrupt it — show the list
+    // read-only with a hint (the host also guards this via IsBusy).
+    const busy = isTurnActive();
+    if (busy)
+      historyPanelEl.appendChild(el("div", "history-hint", "Stop the current turn to switch or delete sessions."));
     sessions.forEach((s) => {
       // A div (not a button) so the delete button can nest inside without invalid markup.
-      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : ""));
+      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : "") + (busy ? " disabled" : ""));
       const top = el("div", "hi-top");
       top.appendChild(el("span", "hi-title", s.title || "Untitled"));
       top.appendChild(el("span", "hi-time", relativeTime(s.updatedAt)));
-      const del = el("button", "hi-delete");
-      del.title = "Delete session";
-      del.setAttribute("aria-label", "Delete session");
-      del.appendChild(iconTrash());
-      del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
-      top.appendChild(del);
+      if (!busy) {
+        const del = el("button", "hi-delete");
+        del.title = "Delete session";
+        del.setAttribute("aria-label", "Delete session");
+        del.appendChild(iconTrash());
+        del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
+        top.appendChild(del);
+      }
       item.appendChild(top);
       if (s.preview) item.appendChild(el("div", "hi-preview", s.preview));
-      item.addEventListener("click", () => {
-        post("session.load", { sessionId: s.id });
-        closeAllOverlays();
-      });
+      if (!busy) {
+        item.addEventListener("click", () => {
+          post("session.load", { sessionId: s.id });
+          closeAllOverlays();
+        });
+      }
       historyPanelEl.appendChild(item);
     });
     if (openOverlay) openOverlay.reposition();
   }
 
   $("btn-new").addEventListener("click", () => {
+    if (isTurnActive()) return; // a turn is running — don't clear/switch (button is also disabled)
     // optimistic empty state
     state.messages = [];
     state.title = "Untitled";
@@ -2702,6 +2675,9 @@
     const clBtn = el("button", "menu-item appearance-options-link", "Changelog…");
     clBtn.addEventListener("click", () => { closeAllOverlays(); window.open(CHANGELOG_URL, "_blank", "noopener"); });
     pop.appendChild(clBtn);
+
+    // Installed extension version (from session.init) — so the user knows what they're running.
+    if (appVersion) pop.appendChild(el("div", "appearance-version", "Version " + appVersion));
 
     openPopover(this, pop, { align: "end" });
   });
@@ -2983,12 +2959,14 @@
       ["max", "Max"],
     ];
     EFFORT_LEVELS.forEach(([lvl, label]) => {
-      const b = el("button", "seg-btn" + (state.effort === lvl ? " active" : ""), label);
+      // "max" gets a marker class so the segment (and the bottom pill) can play a special looping effect.
+      const b = el("button", "seg-btn" + (lvl === "max" ? " seg-effort-max" : "") + (state.effort === lvl ? " active" : ""), label);
       b.title = lvl;
       b.addEventListener("click", () => {
         state.effort = lvl;
         segE.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
         b.classList.add("active");
+        updateModelModeLabel();   // refresh the bottom pill so Max's effect turns on/off immediately
         post("effort.set", { effort: lvl });
       });
       segE.appendChild(b);
@@ -3003,7 +2981,7 @@
     // orchestration in the CLI). Not an effort level, hence its own toggle.
     const s3 = el("div", "mm-section");
     s3.appendChild(el("div", "mm-section-title", "Ultracode"));
-    const ultraRow = el("div", "toggle-row" + (state.ultracode ? " on" : ""));
+    const ultraRow = el("div", "toggle-row ultra-row" + (state.ultracode ? " on" : ""));
     ultraRow.appendChild(el("span", "label", "Ultracode"));
     ultraRow.appendChild(el("span", "toggle-switch"));
     ultraRow.addEventListener("click", () => {
