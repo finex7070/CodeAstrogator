@@ -43,7 +43,7 @@ namespace CodeAstrogator.Bridge
         private System.Threading.Timer? _usageTimer; // periodic idle refresh of the usage meters
         private const int UsageRefreshIntervalMs = 5 * 60 * 1000; // every 5 min while idle
         private JArray? _slashCommands;       // CLI-reported slash commands (system/init)
-        private RemoteControlHost? _remote;   // `claude remote-control` server (at most one)
+        private RemoteTerminalLauncher? _remoteTerminal; // interactive `claude --remote-control` session (VS terminal)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
@@ -145,7 +145,7 @@ namespace CodeAstrogator.Bridge
             _editReview.Dispose(); // remove any open edit-review adornments
             _permission.Dispose(); // stops the MCP listener + deletes the config file
             (_processHost as IDisposable)?.Dispose(); // persistent host owns a live process
-            _remote?.Dispose(); // kills the remote-control process tree
+            _remoteTerminal?.Dispose(); // releases the integrated-terminal proxy (the terminal closes with VS)
             lock (_history)
                 _history.Save(); // synchronous — tool window / VS is closing
         }
@@ -197,8 +197,8 @@ namespace CodeAstrogator.Bridge
                     SendActiveFile();
                     if (_package.SettingsLoadError != null)
                         PostSystemNote("⚠ Settings could not be read — using defaults. " + _package.SettingsLoadError);
-                    if (_remote?.IsRunning == true) // WebView reloaded while remote control runs
-                        PostRemoteState(_remote.Url != null ? "ready" : "starting", _remote.Url);
+                    if (RemoteSessionActive) // WebView reloaded while a remote session runs
+                        PostRemoteTerminalState("ready", RemoteRunningMessage());
                     RefreshUsage();
                     FlushQueuedUiMessages(); // deliver actions queued before the UI was ready
                     break;
@@ -339,8 +339,8 @@ namespace CodeAstrogator.Bridge
             var text = msg.Value<string>("text") ?? "";
             if (string.IsNullOrWhiteSpace(text) || _session.IsBusy)
                 return;
-            if (_remote?.IsRunning == true)
-                return; // remote control owns the workspace — the UI locks the composer too
+            if (RemoteSessionActive)
+                return; // remote control owns the session in the terminal — the UI locks the composer too
 
             var typedText = text; // what the user actually typed — shown in the bubble + title
 
@@ -955,9 +955,23 @@ namespace CodeAstrogator.Bridge
             catch { return 1; }
         }
 
+        /// <summary>Guards turn-disrupting actions: while a turn runs (working or awaiting a permission
+        /// decision), switching/clearing the session would orphan the live process and land its events on
+        /// the wrong conversation. Posts a note and returns true so the caller bails.</summary>
+        private bool TurnRunningBlocks(string action)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!_session.IsBusy)
+                return false;
+            PostSystemNote("Stop the current turn first to " + action + ".");
+            return true;
+        }
+
         private void HandleSessionNew()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (TurnRunningBlocks("start a new chat"))
+                return;
             lock (_history)
                 _history.StartNew();
             _session.ResetSession();
@@ -1006,6 +1020,8 @@ namespace CodeAstrogator.Bridge
         private void HandleSessionLoad(string sessionId)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (TurnRunningBlocks("switch sessions"))
+                return;
             SessionRecord? record;
             lock (_history)
                 record = _history.Load(sessionId);
@@ -1047,6 +1063,20 @@ namespace CodeAstrogator.Bridge
             ThreadHelper.ThrowIfNotOnUIThread();
             if (string.IsNullOrEmpty(sessionId))
                 return;
+
+            // Deleting the *active* session while its turn runs would behave like "new chat" mid-turn
+            // (orphaned process). Deleting any other session is harmless.
+            if (_session.IsBusy)
+            {
+                string currentId;
+                lock (_history)
+                    currentId = _history.Current.Id;
+                if (sessionId == currentId)
+                {
+                    PostSystemNote("Stop the current turn first to delete the active session.");
+                    return;
+                }
+            }
 
             bool deleted, wasCurrent;
             lock (_history)
@@ -1172,7 +1202,7 @@ namespace CodeAstrogator.Bridge
             }
         }
 
-        // ── remote control (`claude remote-control` server) ──────────────────
+        // ── remote control (interactive `claude --remote-control` in the VS terminal) ──
 
         private void HandleRemoteStart()
         {
@@ -1180,54 +1210,92 @@ namespace CodeAstrogator.Bridge
 
             if (_session.IsBusy)
             {
-                PostRemoteState("error", message: "A turn is still running — stop it before starting remote control.");
+                PostRemoteTerminalState("error", "A turn is still running — stop it before starting remote control.");
                 return;
             }
-            if (_remote?.IsRunning == true)
+            if (RemoteSessionActive)
             {
                 // already running (e.g. UI reloaded) — re-announce the current state
-                PostRemoteState(_remote.Url != null ? "ready" : "starting", _remote.Url);
+                PostRemoteTerminalState("ready", RemoteRunningMessage());
                 return;
             }
 
             var exe = ClaudeExecutableLocator.Locate(_package.GetOptions().ClaudeExecutablePath);
             if (exe == null)
             {
-                PostRemoteState("error", message: "Claude CLI not found — set the executable path via the gear menu → Advanced options.");
+                PostRemoteTerminalState("error", "Claude CLI not found — set the executable path via the gear menu → Advanced options.");
                 return;
             }
 
-            if (_remote == null)
+            // Resume the current chat's CLI session if it has one (≥1 turn); otherwise start fresh.
+            string? resumeId;
+            lock (_history)
+                resumeId = _history.Current.HasCliSession ? _history.Current.Id : null;
+
+            var cwd = _package.GetSolutionDirectory();
+            // remote control refuses an untrusted workspace — pre-accept it (best-effort).
+            ClaudeWorkspaceTrust.EnsureTrusted(cwd);
+
+            if (_remoteTerminal == null)
             {
-                _remote = new RemoteControlHost();
-                _remote.StateChanged += state => PostRemoteState(
-                    state.State, state.Url, state.ActiveSessions, state.Message);
+                _remoteTerminal = new RemoteTerminalLauncher();
+                _remoteTerminal.Ended += OnRemoteTerminalEnded;
             }
-            _remote.Start(exe, _package.GetSolutionDirectory());
+
+            PostRemoteTerminalState("starting");
+
+            var launcher = _remoteTerminal;
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                bool ok;
+                try { ok = await launcher.StartAsync(exe, resumeId, cwd, _package.DisposalToken); }
+                catch { ok = false; }
+
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (ok)
+                    PostRemoteTerminalState("ready", RemoteRunningMessage(resumeId != null));
+                else
+                    PostRemoteTerminalState("error",
+                        "Couldn't start remote control" + (launcher.LastError != null ? ": " + launcher.LastError : "."));
+            }).Task.Forget();
         }
 
         /// <summary>
-        /// Stops the server, then imports the CLI sessions it touched and loads the
-        /// most recent one into the chat (UI unlocks on remote.state "stopped" first).
+        /// Ends the interactive remote session (closes the terminal). The launcher's Ended event
+        /// then imports the now-advanced conversation and reloads it (see <see cref="OnRemoteTerminalEnded"/>).
         /// </summary>
         private void HandleRemoteStop()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            var remote = _remote;
-            if (remote == null)
+            var launcher = _remoteTerminal;
+            if (launcher == null || !launcher.IsActive)
             {
-                PostRemoteState("stopped");
+                PostRemoteTerminalState("stopped");
                 return;
             }
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try { await launcher.EndAsync(_package.DisposalToken); }
+                catch { /* Ended still fires; the import/unlock happens there */ }
+            }).Task.Forget();
+        }
 
+        /// <summary>
+        /// Fired (off the UI thread) when the remote terminal/console closes — imports the CLI sessions
+        /// touched since start and loads the most recent one (unlocking the UI first). For a resumed
+        /// session this is the same conversation, now advanced by whatever happened on the phone/web.
+        /// </summary>
+        private void OnRemoteTerminalEnded()
+        {
             // small slack: the pre-created session file may predate StartedUtc slightly
-            var since = remote.StartedUtc.AddSeconds(-10);
-            var cwd = _package.GetSolutionDirectory() ?? ""; // UI-thread-only — capture here
-            remote.Stop();
+            var since = (_remoteTerminal?.StartedUtc ?? DateTime.UtcNow).AddSeconds(-10);
 
             _package.JoinableTaskFactory.RunAsync(async () =>
             {
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var cwd = _package.GetSolutionDirectory() ?? ""; // UI-thread-only — capture here
+
                 await TaskScheduler.Default;
                 await Task.Delay(500).ConfigureAwait(false); // let the CLI flush its session files
 
@@ -1253,7 +1321,7 @@ namespace CodeAstrogator.Bridge
 
                 await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
 
-                PostRemoteState("stopped"); // always unlock the UI first
+                PostRemoteTerminalState("stopped"); // always unlock the UI first
 
                 if (discoveryError != null)
                 {
@@ -1263,7 +1331,7 @@ namespace CodeAstrogator.Bridge
 
                 if (imported.Count == 0)
                 {
-                    PostSystemNote("Remote control stopped — no remote session was started");
+                    PostSystemNote("Remote control ended — no changes to import");
                     return;
                 }
 
@@ -1286,21 +1354,30 @@ namespace CodeAstrogator.Bridge
                 SendTranscript(latest!);
                 PostSystemNote(imported.Count == 1
                     ? "Remote session imported"
-                    : $"Remote control stopped — {imported.Count} sessions imported (latest loaded)");
+                    : $"Remote control ended — {imported.Count} sessions imported (latest loaded)");
                 SaveHistory();
             }).Task.Forget();
         }
 
-        private void PostRemoteState(string state, string? url = null, int activeSessions = 0, string? message = null)
+        /// <summary>True while an interactive remote-control session is open in the terminal/console.</summary>
+        private bool RemoteSessionActive => _remoteTerminal?.IsActive == true;
+
+        /// <summary>User-facing status line shown in the (locked) remote panel while a session runs.</summary>
+        private string RemoteRunningMessage(bool resumed = true)
+        {
+            return (resumed ? "This chat is now live in the terminal. " : "A new remote session is live in the terminal. ")
+                + "Open the link shown there from the Claude app or claude.ai/code. "
+                + "When you're done, close the terminal or click \"End remote session\" to return here.";
+        }
+
+        private void PostRemoteTerminalState(string state, string? message = null)
         {
             var msg = new JObject
             {
                 ["type"] = "remote.state",
                 ["state"] = state,
-                ["activeSessions"] = activeSessions,
+                ["inTerminal"] = true,
             };
-            if (url != null)
-                msg["url"] = url;
             if (message != null)
                 msg["message"] = message;
             Post(msg);
@@ -1350,7 +1427,7 @@ namespace CodeAstrogator.Bridge
         public void AddFileAttachments(System.Collections.Generic.IEnumerable<string> paths)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (_remote?.IsRunning == true)
+            if (RemoteSessionActive)
                 return; // composer (and attachments) are locked during remote control
 
             var attachments = new JArray();
@@ -1377,7 +1454,7 @@ namespace CodeAstrogator.Bridge
         public void AddSelectionToPrompt(string? path, int startLine, int endLine, string text)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (_remote?.IsRunning == true || string.IsNullOrEmpty(text))
+            if (RemoteSessionActive || string.IsNullOrEmpty(text))
                 return; // composer locked during remote control / nothing selected
 
             var name = string.IsNullOrEmpty(path) ? "selection" : System.IO.Path.GetFileName(path);
