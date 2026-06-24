@@ -97,32 +97,59 @@ namespace CodeAstrogator.ToolWindows
                 VirtualHost, webUiDir, CoreWebView2HostResourceAccessKind.Allow);
 
             // target="_blank" links (banner / rendered markdown) open in the system browser
-            // instead of spawning a bare WebView2 popup window.
+            // instead of spawning a bare WebView2 popup window. File drops that open in a new
+            // window (multi-file drops) are caught here too — see OnNewWindowRequested.
             core.NewWindowRequested += OnNewWindowRequested;
 
             _bridge = new WebViewBridge(core, package);
             _bridgeReady.TrySetResult(_bridge);
 
-            // Drag & drop: let the host (not Chromium) handle external drops so we get the real
-            // file paths the CLI needs (HTML5 File objects don't expose the filesystem path).
-            // AllowExternalDrop=false makes the WebView2 control forward OS drops as WPF routed
-            // events — but it raises the BUBBLING DragOver/Drop events, NOT the tunneling Preview*
-            // ones, so we must subscribe to those (PreviewDragOver/PreviewDrop never fire here).
-            _webView.AllowExternalDrop = false;
-            _webView.AllowDrop = true;
-            _webView.DragOver += OnWebViewDragOver;
-            _webView.Drop += OnWebViewDrop;
+            // Drag & drop of files/folders → attachment chips (the CLI reads them by path).
+            //
+            // History: we used to set AllowExternalDrop=false and try to handle the OS drop via WPF
+            // routed events (DragOver/Drop). That forwarding is NOT contractual and simply does not
+            // happen in the current WebView2 runtime — AllowExternalDrop=false just makes Chromium
+            // REJECT the drop (the "no-drop" cursor the user saw everywhere). No WPF route, tunneling
+            // or bubbling, ever fired.
+            //
+            // Fix: let Chromium ACCEPT the drop (AllowExternalDrop=true). The page has no JS drop
+            // handler, so Chromium's default action for a dropped file is to NAVIGATE to its
+            // file:// URL. We intercept that navigation (OnNavigationStarting / OnNewWindowRequested),
+            // CANCEL it (never let the SPA navigate away), and recover the real local path from the
+            // URL → AddFileAttachments. This keeps real paths AND folder support, and relies only on
+            // documented CoreWebView2 navigation events instead of fragile drag-event forwarding.
+            _webView.AllowExternalDrop = true;
+            core.NavigationStarting += OnNavigationStarting;
 
             core.Navigate($"https://{VirtualHost}/index.html");
         }
 
-        /// <summary>Opens new-window links (target="_blank") in the user's default browser.</summary>
-        private static void OnNewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)
+        /// <summary>Cancels file:// navigations caused by dropping a file onto the page and turns
+        /// them into attachments instead (keeps the SPA from navigating away to the file).</summary>
+        private void OnNavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
         {
-            e.Handled = true;
+            ThreadHelper.ThrowIfNotOnUIThread(); // CoreWebView2 events are raised on the UI thread
+            if (IsFileUri(e.Uri))
+            {
+                e.Cancel = true; // do not navigate the app to the dropped file
+                AttachDroppedFileUri(e.Uri);
+            }
+        }
+
+        /// <summary>Opens real web links (target="_blank") in the system browser; turns file://
+        /// "new window" requests (e.g. a multi-file drop) into attachments.</summary>
+        private void OnNewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread(); // CoreWebView2 events are raised on the UI thread
+            e.Handled = true; // never spawn a bare WebView2 popup
             var uri = e.Uri;
             if (string.IsNullOrEmpty(uri))
                 return;
+            if (IsFileUri(uri))
+            {
+                AttachDroppedFileUri(uri);
+                return;
+            }
             // Only follow real web links — never let the page launch arbitrary local schemes.
             if (!uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
                 && !uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
@@ -141,25 +168,18 @@ namespace CodeAstrogator.ToolWindows
             }
         }
 
-        private static void OnWebViewDragOver(object sender, DragEventArgs e)
-        {
-            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
-                ? DragDropEffects.Copy
-                : DragDropEffects.None;
-            e.Handled = true;
-        }
+        private static bool IsFileUri(string? uri) =>
+            !string.IsNullOrEmpty(uri) && uri!.StartsWith("file:", StringComparison.OrdinalIgnoreCase);
 
-        private void OnWebViewDrop(object sender, DragEventArgs e)
+        /// <summary>Converts a dropped file:// URL to a local path and attaches it (UI thread).</summary>
+        private void AttachDroppedFileUri(string uri)
         {
-            ThreadHelper.ThrowIfNotOnUIThread(); // WPF drop events are raised on the UI thread
-            if (_bridge != null
-                && e.Data.GetDataPresent(DataFormats.FileDrop)
-                && e.Data.GetData(DataFormats.FileDrop) is string[] paths
-                && paths.Length > 0)
-            {
-                _bridge.AddFileAttachments(paths); // → attach.added chips (CLI reads files by path)
-            }
-            e.Handled = true;
+            ThreadHelper.ThrowIfNotOnUIThread(); // called from UI-thread navigation events
+            string? path = null;
+            try { path = new Uri(uri).LocalPath; } // file:///C:/a%20b/f.png → C:\a b\f.png (decodes %20)
+            catch { /* malformed URL — ignore */ }
+            if (!string.IsNullOrEmpty(path))
+                _bridge?.AddFileAttachments(new[] { path! });
         }
 
         /// <summary>

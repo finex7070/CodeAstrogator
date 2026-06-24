@@ -81,8 +81,8 @@ found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout
   `ClaudeExecutableLocator` (CLI discovery + auth probe), `ClaudeUsageClient` (limits/plan),
   `WorkspaceFileLister` (@-mention file list), `IPermissionBridge` + `McpPermissionBridge`
   (in-process MCP server for `--permission-prompt-tool`, Phase 1, see "Permission hook"),
-  `RemoteControlHost` (+`RemoteControlOutputParser`, `claude remote-control` server),
-  `CliSessionReader` (CLI session discovery + transcript import, see "Remote Control").
+  `CliSessionReader` (CLI session discovery + transcript import, see "Remote Control";
+  remote control itself now lives in `Services/RemoteTerminalLauncher` — interactive console, see "Remote Control").
 - `Bridge/WebViewBridge.cs` — complete §3 message contract host-side, thread marshaling.
 - `Services/` — `ThemeService` (VS colors → CSS vars), `SessionHistoryStore`
   (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file).
@@ -150,6 +150,40 @@ found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout
   (`OnNewWindowRequested`) → `target="_blank"` links (banner **and** rendered Markdown links) open
   in the **system browser** (`Process.Start`, `UseShellExecute=true`; http/https only) instead of in a
   bare WebView2 popup.
+
+## Tasks banner (2026-06-24)
+- **What:** A third banner below the header (`#tasks-banner`, class `notice-banner tasks-banner`)
+  that aggregates the CLI's **`Task*` tool calls** into a live, collapsible checklist (☐ pending /
+  ◐ in_progress / ☑ completed + a done/total count) so a long multi-step turn can be followed at a
+  glance without scrolling the individual tool cards. The cards still render as normal in the
+  transcript — the banner is an additive summary.
+- **Pure web-side — no new host↔web messages.** Driven entirely by `app.js` off the existing
+  `tool.use` / `tool.result` stream and the `transcript.load` history (`role:"tool"` records).
+  Nothing changed in the Bridge/Core.
+- **Tracking (`app.js`):** `trackTaskTool(name, id, input)` dispatches `TaskCreate`→`taskOnCreate`,
+  `TaskUpdate`→`taskOnUpdate`. State lives in `state.tasks` (`[{id, subject, activeForm, status}]`).
+  - **Id mapping:** `TaskCreate` input has **no** id, so a task gets a **provisional sequential id**
+    (`taskSeq`, matching the CLI's 1-based numbering); on its `tool.result` (`reconcileTaskId`) the
+    real id is parsed from the summary text **`Task #N created…`** and overwrites the provisional one
+    (so deletions/resumes can't desync the `taskId` mapping). History has no result text → the
+    sequential id stands (correct in the common, no-deletion case).
+  - `TaskUpdate` (`input.taskId` + `status`/`subject`/`activeForm`) updates the matching row; an
+    update for an unseen task (truncated history) **synthesizes** a row; `status:"deleted"` removes it.
+  - In_progress rows show `activeForm` (falls back to `subject`); others show `subject`.
+- **Lifecycle — one list per turn (2026-06-24):** A task list belongs to **one turn**. When a turn
+  ends (`turnResult` sets `taskBatchClosed=true`), the **next `TaskCreate` clears the previous,
+  worked-through list and starts a fresh one** instead of appending — so each follow-up prompt shows
+  *its own* list, not an ever-growing pile. Mere `TaskUpdate`s (no new create) keep updating the
+  current list, and additional `TaskCreate`s **within the same turn** still append. `resetTasks()`
+  (from `applySessionInit` / `loadTranscript`) clears everything for a new/loaded chat. ✕
+  (`#tasks-close`) dismisses **for the session** (`state.tasksDismissed`); a **new `TaskCreate`**
+  re-shows it (status updates do **not** un-dismiss). Head row toggles `.collapsed` to fold just the list.
+- **History = no banner (2026-06-24):** The tasks banner is a **live-turn aid only**. Reopening a
+  chat (`transcript.load`) does **NOT** rebuild it — `renderHistoricMessage` deliberately skips
+  `trackTaskTool` for historic `tool` records, and `loadTranscript`'s `resetTasks()` leaves the banner
+  empty. (Live tracking runs solely from `toolUse` / `toolResult`.)
+- **Mock:** `WebUI/index.html` (browser isolation) simulates a 3-task `TaskCreate` burst + a
+  `TaskUpdate` walk (in_progress → completed) so the banner can be verified without VS.
 
 ## Open items / Roadmap (from plan §A8 + findings)
 1. **MCP permission bridge + inline diff review** — **Phase 1 implemented** (standard chat card,
@@ -219,6 +253,9 @@ compact_boundary evaluation) — details in the respective sections below.
 - **"Changelog…" entry (2026-06-18)** — directly below "Advanced options…" in the gear popover.
   No host message: it just calls `window.open(CHANGELOG_URL, "_blank")` with the GitHub URL, which
   the WebView routes through `OnNewWindowRequested` → system browser (same path as transcript links).
+- **Installed version line (v0.5.1)** — directly below the "Changelog…" entry, a `.appearance-version`
+  div renders `Version <x.y.z>` from the `appVersion` already carried by `session.init`
+  (`GetInstalledVersion()` in `WebViewBridge.cs`). Hidden when `appVersion` is empty (e.g. mock).
 - **`session.delete` (web → host) (v0.4.2)** `{ sessionId }` — trash button per history row (revealed on
   hover, `.hi-delete`), gated by a **confirmation modal** (`openConfirmModal`, reusable; the
   Delete button is styled `.modal-btn.danger`). Host: `HandleSessionDelete` → `SessionHistoryStore.Delete`
@@ -226,6 +263,14 @@ compact_boundary evaluation) — details in the respective sections below.
   (`ResetSession` + `SendSessionInit`); always re-sends `session.list` so an open popover refreshes.
   `.history-item` is now a `<div>` (was a `<button>`) so the delete button can nest without invalid markup.
   The CLI keeps its own conversation store, so a deleted session may still be `--resume`-able.
+- **Turn-running guard (v0.5.1):** switching/clearing the conversation mid-turn would orphan the live CLI
+  process (`ResetSession`/`AttachToRecord` don't stop it — events would land on the wrong session). So
+  `HandleSessionNew` / `HandleSessionLoad` and `HandleSessionDelete` (active session only) bail via
+  `TurnRunningBlocks(action)` → `PostSystemNote("Stop the current turn first…")` while `_session.IsBusy`
+  (covers both *working* and *waiting-permission*). Client mirrors it: `isTurnActive()` =
+  `status === "working" || "waiting-permission"`; `applyStatus` disables **New chat** + **remote** while
+  active, the history popover renders read-only (`.history-item.disabled` + `.history-hint`), and the
+  remote-start click is guarded. Deleting a *non-active* session mid-turn is still allowed.
 - **`session.rename` (web → host)** `{ sessionId, title }` — the edit icon to the right of the
   header title (visible on header hover/focus) opens a rename modal (Enter = Save,
   Esc = Cancel). The UI sets the title optimistically; the host trims, caps at 120
@@ -327,6 +372,20 @@ compact_boundary evaluation) — details in the respective sections below.
   `--effort low|medium|high|xhigh|max`; passed through per turn
   (default **high**, configurable in Tools → Options).
   "ultracode" is deliberately **not** a level (prompt keyword for multi-agent, not an effort level).
+  - **"Max" looping effect (v0.5.1):** the **max** segment always carries a `seg-effort-max` marker
+    class, and `updateModelModeLabel()` toggles `is-max` on `#btn-modelmode` when `state.effort === "max"`
+    (the effort click handler now calls `updateModelModeLabel()` so the pill flips immediately). CSS
+    `.seg-btn.seg-effort-max.active` and `.modelmode-btn.is-max` apply a flowing purple gradient
+    (`@keyframes max-flow`, `background-size:200%`) + pulsing glow — `max-glow` (outer halo, used on the
+    free-standing pill) vs `max-glow-inset` (the segment sits in an `overflow:hidden` track, so an outer
+    halo would be clipped). A `prefers-reduced-motion` block drops the motion but keeps gradient + a steady glow.
+  - **"Ultracode" looping effect (v0.5.1):** the Ultracode toggle row carries an `ultra-row` marker class;
+    `.ultra-row.on .toggle-switch` turns the switch into a flowing multi-hue spectrum (cyan→indigo→purple→pink,
+    reusing `max-flow` + a tight glow — kept small because `.popover` is `overflow-y:auto`). The bottom pill
+    is driven by `updateModelModeLabel()`, which toggles **`is-ultra`** when `state.ultracode` and **`is-max`**
+    only when `state.effort === "max" && !state.ultracode` — i.e. **Ultracode wins over Max on the pill**.
+    `.modelmode-btn.is-ultra` uses the spectrum gradient + `@keyframes ultra-glow` (cyan/violet halo). The
+    `prefers-reduced-motion` block stops the motion (keeps gradient + steady glow).
 - **Session/weekly limits:** stream-json delivers no limit data. The host therefore calls
   the **`/usage` slash command headless** (`claude -p /usage --output-format json`,
   `ClaudeUsageClient.FetchAsync(exe, cwd, ct)`): runs **locally, no API turn, no cost**
@@ -486,46 +545,63 @@ compact_boundary evaluation) — details in the respective sections below.
   to the CLI still goes the text **with** the `@<path>` block. `SessionHistoryStore`
   serializes the whole message → `attachments` survives reload. The mock history shows two chips.
 
-## Remote Control (2026-06-03)
+## Remote Control (2026-06-03; reworked 2026-06-21 → interactive, resumes the current chat)
+- **What it does (v0.5.1):** opens the **current chat** in an **interactive** Claude Code session with
+  Remote Control enabled — `claude --resume <id> --remote-control` (a top-level flag) — in a standalone
+  **PowerShell** console. So you continue *this* conversation from the Claude app / claude.ai/code.
+  A fresh chat with no CLI session yet (`!HasCliSession`) starts a new remote session
+  (`claude --remote-control`, no `--resume`).
+- **QR vs tracking trade-off (user picked tracking):** the CLI renders its QR code only inside a
+  Windows-Terminal session (cmd / standalone-PowerShell conhost show just the link — confirmed with the user).
+  A `wt.exe` launch would show the QR, **but** wt hands off to the terminal process and exits immediately, so
+  the session can't be tracked (no auto-reload on close, "End" can't reach the terminal). The user preferred
+  the clean lifetime over the QR → we launch a standalone **PowerShell** console (trackable) and you get the
+  **link** there, not a QR. Rendering the QR in the extension panel isn't possible either: it needs the
+  connection URL, which isn't in any readable file (`session-env` empty, `remote-settings.json` minimal, not
+  in the session `.jsonl`) and the interactive console isn't captured. `WebUI/qr.js` stays unused.
+- **Why this shape (verified against CLI 2.1.178):** the headless `claude remote-control` *subcommand* has
+  **no `--resume`** — it always pre-creates a brand-new session (that was the old behaviour: hidden server,
+  takeover only on stop). The top-level `--remote-control` flag *does* combine with `--resume` (probed:
+  `--remote-control --resume <id> --permission-mode …` co-parse). It needs a real TTY, so it can't run
+  headless. The **VS integrated terminal** was the chosen target but isn't viable: its only API
+  (`ITerminalService` in `Microsoft.VisualStudio.Terminal.dll`, a brokered service) drags the VS-18 / .NET-10
+  ServiceHub + BCL set (`ServiceHub.Framework 4.10` → `System.Text.Json` / `Collections.Immutable` /
+  `IO.Pipelines` 10, `StreamJsonRpc 2.25`, `System.Memory 4.0.5`, …) into this net472 / 17.14-SDK project →
+  unresolvable `CS1705` cascade; even via reflection the brokered service may not be granted to a 3rd-party
+  extension. Hence a standalone PowerShell console (zero VS-internal refs).
 - **Contract:** web→host `remote.start {}` / `remote.stop {}`; host→web
-  `remote.state { state: "starting"|"ready"|"stopped"|"error", url?, activeSessions, message? }`.
-- **Host:** `Core/RemoteControlHost` starts `claude remote-control` (the CLI's standalone
-  server mode, runs without a TTY). `RemoteControlOutputParser` scrapes the
-  stdout line by line (ANSI stripped): URL (`https://claude.ai/code?environment=…`)
-  and `Capacity: n/32` (= active remote sessions); TUI redraw repetitions are
-  deduplicated. Stop = `taskkill /T /F` (the npm shim spawns a node child). The bridge kills
-  the process also in `Dispose()`. `prompt.send` is ignored with remote active.
-- **Session takeover on stop:** `Core/CliSessionReader` maps the cwd to the
-  CLI project folder (`~\.claude\projects\<munged>`, non-alphanumeric → `-`,
-  drive-letter case varies → case-insensitive match), finds `*.jsonl` touched since
-  RC start and imports them into our message schema (user text,
-  assistant text blocks of the same message.id merged, tool_use cards with status from
-  tool_result; meta/sidechain/command lines skipped; sessions without a
-  user message = unused pre-created session → skipped). All imports land
-  via `SessionHistoryStore.Import` in the history, the last one is loaded
-  (`remote.state stopped` first — the UI unlocks before `session.init`/`transcript.load`).
-  **Pitfall (fixed):** `GetSolutionDirectory()` is UI-thread-only — the cwd is captured
-  before the background discovery, and `stopped` is always sent thanks to try/catch
-  (otherwise the UI hung in "Stopping…").
-- **UI:** Broadcast button to the left of the history button; active = panel above the
-  transcript (status, link, QR, Copy, "End remote session"). Locked then are the
-  composer (`canSend` + `input.disabled`), all composer controls (+, /,
-  Model·Mode, attachment chips via `.remote-locked`) and the header actions
-  Rename/History/New chat (`setRemoteLocked`); only the gear (Appearance)
-  stays usable. Statusbar state `remote` (accent pulse). The host re-announces
-  `remote.state` after `ready` (WebView reload during an active remote session).
-  QR code dependency-free via `WebUI/qr.js` (own encoder: byte mode, ECC M,
-  v1–10, mask 0; verified via a jsQR round-trip in Node). The mock simulates
-  start/connect/stop incl. an imported fake session.
-- **Limitation (deliberate):** Remote sessions run in the RC server, not in the
-  tool window — no live mirror. The takeover only happens on end.
+  `remote.state { state: "starting"|"ready"|"stopped"|"error", inTerminal: true, message? }` (no url/QR — the
+  terminal shows those). The WebUI shows `message` in the panel; the old QR canvas / link / Copy button were removed.
+- **Host:** `Services/RemoteTerminalLauncher` runs `powershell.exe -NoExit -Command "& '<exe>' <args>"`
+  (single-quoted path; `<args>` = `--resume <id> --remote-control` or just `--remote-control`) with
+  `UseShellExecute=true` (its own console). Exposes `IsActive` / `StartedUtc` / `LastError` + an `Ended` event
+  fired once (Interlocked) from `Process.Exited` or `EndAsync`. `EndAsync` = `taskkill /PID <id> /T /F` (the
+  shell spawns the node CLI child). `WebViewBridge.HandleRemoteStart` picks the resume id
+  (`_history.Current.Id` iff `HasCliSession`), pre-accepts workspace trust, launches, posts `ready` +
+  `RemoteRunningMessage()`. `prompt.send` / attachment / selection adds are no-ops while `RemoteSessionActive`.
+  Bridge releases the launcher in `Dispose()`.
+- **Session reload on end (`OnRemoteTerminalEnded`, fired by `Ended`):** unchanged import path —
+  `Core/CliSessionReader` maps cwd → CLI project folder (`~\.claude\projects\<munged>`, non-alphanumeric → `-`,
+  case-insensitive drive letter), finds `*.jsonl` touched since `StartedUtc-10s`, imports into our message
+  schema (assistant blocks of one message.id merged, tool_use cards with status from tool_result; meta/
+  sidechain/command skipped; sessions without a user message skipped), `SessionHistoryStore.Import`, loads the
+  latest (`remote.state stopped` first → UI unlocks before `session.init`/`transcript.load`). For a resumed
+  session this is the same conversation, now advanced. **Pitfall (kept):** `GetSolutionDirectory()` is
+  UI-thread-only — captured on the UI thread before the background discovery; `stopped` always sent via try/catch.
+- **UI:** Broadcast button left of history; active = panel over the transcript (status line + "End remote
+  session"). Locked then: composer (`canSend` + `input.disabled`), all composer controls (+, /, Model·Mode,
+  attachment chips via `.remote-locked`) and Rename/History/New chat (`setRemoteLocked`); only the gear stays
+  usable. Statusbar state `remote` (accent pulse). Host re-announces `remote.state ready` on WebView reload
+  while active. (`WebUI/qr.js` is now unused by this flow but left in place.)
+- **Limitation (deliberate):** no live mirror in the tool window — you work in the terminal; the chat reloads
+  the advanced conversation when the session ends.
 - **Workspace trust (v0.4.3, CLI 2.1.178):** Unlike headless `claude -p` (which bypasses the
-  workspace-trust check entirely), `claude remote-control` **refuses to start in an untrusted
+  workspace-trust check entirely), `claude --remote-control` **refuses to start in an untrusted
   directory** (`"Error: Workspace not trusted. Please run `claude` … first"`). Opening a project
   for the first time and immediately starting a remote session therefore failed with that error.
   Fix: `Core/ClaudeWorkspaceTrust.EnsureTrusted(dir)` pre-sets `projects[dir].hasTrustDialogAccepted
   = true` in `~/.claude.json` (the same flag the interactive trust dialog writes) right before
-  `RemoteControlHost.Start` launches the process — for the directory the user explicitly opened in
+  `HandleRemoteStart` launches the terminal — for the directory the user explicitly opened in
   VS. The project key is the working directory with **forward slashes** (e.g. `C:/Users/Jan/Repo`,
   trailing separators trimmed); an existing entry in any slash/case variant is reused (no duplicate
   key) and left byte-identical when already trusted. Read-modify-write is atomic (temp + replace,
@@ -560,24 +636,31 @@ compact_boundary evaluation) — details in the respective sections below.
   exists as a standalone server mode (own sessions, no live mirror into the
   tool window); integration deliberately deferred.
 
-## Drag-and-drop of files (2026-06-05)
+## Drag-and-drop of files (2026-06-05, rewritten 2026-06-24)
 - **Goal:** Drag files/folders from Windows Explorer onto the chat panel → they get added as
   attachment chips (the CLI reads them via `@<path>`).
-- **Why host-side:** HTML5 drag-drop delivers `File` objects **without** a file path
-  (Chromium/security). But the CLI contract needs the path. So, as with `clipboard.paste`,
-  via the host: `ClaudeChatWindowControl` sets **`_webView.AllowExternalDrop = false`** (otherwise
-  Chromium consumes the drop) + `AllowDrop=true`, and handles **`DragOver`** (copy effect
-  on `DataFormats.FileDrop`) + **`Drop`** → `e.Data.GetData(DataFormats.FileDrop)` = real
-  `string[]` paths → **`WebViewBridge.AddFileAttachments(paths)`**.
-  - **Bugfix 2026-06-16:** Previously attached to `PreviewDragOver`/`PreviewDrop` → drag-and-drop did
-    **nothing**. The WPF WebView2 control forwards OS drops (with `AllowExternalDrop=false`) as
-    **bubbling** routed events, **not** as tunneling `Preview*` → the handlers never fired.
-    Switched to `DragOver`/`Drop`.
+- **Why not the DOM:** HTML5 drag-drop delivers `File` objects **without** a filesystem path
+  (Chromium sandbox), but the CLI contract needs the real path. So the path must be recovered host-side.
+- **Approach = navigation interception (the one that actually works in this runtime):**
+  `ClaudeChatWindowControl` sets **`_webView.AllowExternalDrop = true`** so Chromium **accepts** the
+  drop, and the page has **no JS drop handler** → Chromium's default action for a dropped file is to
+  **navigate to its `file://` URL**. We intercept that:
+  - **`CoreWebView2.NavigationStarting`** → if `e.Uri` is `file:` → **`e.Cancel = true`** (never let the
+    SPA navigate away) + `AttachDroppedFileUri` → `new Uri(uri).LocalPath` (decodes `%20` etc.) →
+    `WebViewBridge.AddFileAttachments`.
+  - **`CoreWebView2.NewWindowRequested`** (already used for `target=_blank` → system browser) also
+    handles `file:` URLs (a multi-file drop can open extra files as new windows) → same attach path.
+  - Both events fire on the **UI thread** (`ThrowIfNotOnUIThread`); folders work too (a dropped dir
+    navigates to `file:///dir` → `AddFileAttachments` accepts dirs).
+- **⚠️ Dead end — do NOT go back to it:** `AllowExternalDrop = false` + WPF routed drag events
+  (`DragOver`/`Drop`, tunneling **or** bubbling). The "forward OS drops to WPF" behaviour is **not in
+  the `AllowExternalDrop` spec** and **does not happen** in the current WebView2 runtime — `false` just
+  makes Chromium **reject** the drop (the **no-drop cursor** everywhere). Two prior fixes betting on
+  WPF routes (2026-06-16 bubbling-only; 2026-06-24 both routes) both failed for this reason.
 - **`AddFileAttachments` (public):** filters to existing files/dirs, builds `attach.added`
   ({name,path}); shared with the `+` picker (`HandleAttachFiles`). With remote control active
   it is locked (composer/attachments are locked anyway then). No UI contract needed — the existing
-  chip flow. (Drop anywhere on the panel; no separate overlay — the copy cursor + the appearing
-  chips are the feedback.)
+  chip flow. (Drop anywhere on the panel; the appearing chips are the feedback.)
 
 ## Editor context menu → prompt (2026-06-16)
 - **Two commands in the code-editor right-click menu** (`.vsct`: own group `EditorCtxGroup` in
@@ -891,6 +974,17 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   card read-only with the marked answers.
 - **Tool-card replacement:** The CLI sends the `tool_use` **before** the hook → briefly a generic
   tool card, which the `question.request` (as in the permission flow) removes via `data-tool-id`.
+  - **Race fix (2026-06-24):** "tool_use before the hook" is NOT guaranteed at the UI — the hook
+    arrives over the **HTTP MCP server** while `tool_use` arrives over **ndjson stdout**; the two are
+    independent and `question.request` can reach the WebView **first**. Then the late `tool.use` built
+    a **duplicate** tool card that `questionRequest` could no longer remove — and because the answer is
+    returned as an MCP **deny** (answer as the message), the CLI's `tool_result` is **`is_error:true`**,
+    so that orphaned card rendered as **"failed"** even though the answer was accepted (exact symptom the
+    user hit). Fix: a **race guard** at the top of `toolUse` — if a `.q-card`/`.perm-card` with the same
+    `data-request-id` already exists, skip building the tool card (the interactive card already
+    represents the call). Covers both orderings and hardens the permission race too. History was already
+    correct (`RecordQuestionMessage` replaces the `tool` record by id). Mock now fires `question.request`
+    **before** the racing `tool.use` and emits the errored `tool.result` to reproduce/verify.
 - **CSS:** `.q-card`/`.q-option`/`.q-other-input`/`.q-actions` (+ `.answered` read-only style) in
   `app.css` (replaces the old `.ask-*`). The mock posts `tool.use`+`question.request` in the demo turn.
 - **Modes:** works in **"Ask", "Auto-accept" AND "Plan"** — the hook is wired for all modes except

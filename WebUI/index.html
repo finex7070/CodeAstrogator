@@ -55,6 +55,24 @@
       </button>
     </div>
 
+    <!-- Tasks banner (below the header, above the transcript). Aggregates the CLI's Task* tool
+         calls (TaskCreate/TaskUpdate) into a live checklist with per-task status, so a long
+         multi-step turn can be followed at a glance instead of scrolling the tool cards. The head
+         collapses the list; X dismisses it for the session (a brand-new TaskCreate re-shows it).
+         Driven entirely by app.js (renderTasksBanner) — no host changes. -->
+    <div class="notice-banner tasks-banner" id="tasks-banner" role="status" hidden>
+      <div class="tasks-head" id="tasks-head" title="Click to collapse/expand">
+        <svg class="notice-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span class="tasks-title">Tasks</span>
+        <span class="tasks-count" id="tasks-count"></span>
+        <svg class="tasks-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        <button class="notice-close tasks-close" id="tasks-close" title="Dismiss" aria-label="Dismiss">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="tasks-list" id="tasks-list"></div>
+    </div>
+
     <!-- Transcript -->
     <div class="transcript-wrap">
       <main class="transcript" id="transcript" tabindex="-1">
@@ -73,9 +91,6 @@
             Remote Control
           </div>
           <div class="remote-status" id="remote-status">Starting remote control…</div>
-          <canvas class="remote-qr" id="remote-qr" hidden></canvas>
-          <div class="remote-url" id="remote-url" hidden></div>
-          <button class="remote-btn" id="btn-remote-copy" hidden>Copy link</button>
           <button class="remote-btn primary" id="btn-remote-end">End remote session</button>
         </div>
       </div>

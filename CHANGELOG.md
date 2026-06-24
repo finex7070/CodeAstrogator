@@ -4,6 +4,24 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.1] – 2026-06-21
+
+### Added
+- **The installed extension version is now shown in the gear popover.** Below the "Changelog…" entry the appearance popover displays "Version x.y.z" (using the version already sent in `session.init`), so you can tell at a glance which build you have installed.
+- **"Max" effort now has a special looping effect.** Max is the top effort level, so when it's selected the **Max** segment in the model/mode popover and the **model·mode pill** at the bottom of the composer both light up with a flowing purple gradient and a pulsing glow that loops for as long as Max stays selected — a little reward for going all-in. Honours `prefers-reduced-motion` (keeps the gradient + a steady glow, drops the motion).
+- **"Ultracode" now has its own looping effect too.** When Ultracode is on, its toggle switch in the popover and the bottom model·mode pill light up with a flowing multi-hue spectrum (cyan→indigo→purple→pink with a cyan/violet glow) — distinct from Max's purple, to evoke its multi-agent nature. When **both Max and Ultracode** are on, the bottom pill shows the **Ultracode** effect (Ultracode takes priority there). Also honours `prefers-reduced-motion`.
+- **Tasks banner.** When Claude works through a multi-step task list (the `TaskCreate`/`TaskUpdate` tools), a collapsible banner appears below the header showing each task with its live status (☐ pending · ◐ in progress · ☑ completed) and a done/total count. It's scoped to the current turn — a new prompt's first task starts a fresh list rather than piling up — and is dismissible with ✕ (a new task re-shows it). It's a live-turn aid only: reopening a chat from the history does not show it.
+
+### Fixed
+- **Switching the conversation mid-turn no longer disrupts the running turn.** Starting a new chat, loading or deleting the **active** session, or starting remote control while a turn was running (or waiting for a permission decision) used to detach from the live CLI process — orphaning it and letting its output land on the wrong conversation. These actions are now blocked while a turn is in progress: the **New chat** and **remote-control** buttons are disabled, the history list is read-only (with a hint), and the host also rejects the action with a note ("Stop the current turn first…"). Deleting a *different* (non-active) session mid-turn still works.
+- **Dragging files onto the chat works again.** Dropping a file or folder from Explorer showed a "no-drop" cursor and did nothing. The old approach relied on the WebView2 control forwarding OS drops as WPF events, which the current WebView2 runtime simply doesn't do (it rejected the drop outright). Drops are now accepted by the web view and the dropped item's real path is recovered host-side, so files **and folders** can again be dragged in as attachment chips (the CLI reads them by path).
+- **Answering one of Claude's questions no longer leaves a "failed" card.** With `AskUserQuestion`, the interactive question card and the underlying tool call arrive over two independent channels; when they raced, answering left a duplicate tool card stuck showing "failed" even though the answer was accepted. The duplicate is now suppressed.
+
+### Changed
+- **Remote control now opens your *current* chat, interactively.** Clicking the remote-control button used to start a hidden `claude remote-control` server in a **brand-new** session and only loaded the result into the chat after you ended it. It now opens the **current conversation** in an **interactive** Claude Code session with Remote Control enabled — `claude --resume <id> --remote-control` — in a **PowerShell** console, so you continue *this* chat from the Claude app or claude.ai/code (a fresh chat with no session yet starts a new remote session). Open the connection link shown in that console. The chat panel locks while it's running; **closing the console or clicking "End remote session"** re-imports the now-advanced conversation. (It runs in a console rather than the VS integrated terminal, whose API can't be referenced from this project without dragging in incompatible VS-18/.NET-10 assemblies — see `docs/NOTES.md`.)
+
+---
+
 ## [0.5.0] – 2026-06-19
 
 ### Added

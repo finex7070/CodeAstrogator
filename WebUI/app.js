@@ -36,12 +36,13 @@
     authMode: "oauth",
     status: "ready",
     remoteActive: false,     // remote-control mode locks composer + transcript
-    remoteUrl: null,
     activeFile: { name: null, path: null, optionEnabled: true, enabled: true, lines: null }, // active editor tab reference
     messages: [],            // rendered message records
     attachments: [],         // {id, name}
     activeAssistant: null,   // {id, textNode, accText, el}
     pendingPermissions: new Set(), // requestIds of open permission/question cards (parallel tool use)
+    tasks: [],               // task tracker: [{id, subject, activeForm, status}] from Task* tool calls
+    tasksDismissed: false,   // user closed the tasks banner (re-shown when a NEW task is created)
   };
 
   const MODELS = [
@@ -111,9 +112,6 @@
   const btnRemote = $("btn-remote");
   const remotePanel = $("remote-panel");
   const remoteStatus = $("remote-status");
-  const remoteQr = $("remote-qr");
-  const remoteUrlEl = $("remote-url");
-  const btnRemoteCopy = $("btn-remote-copy");
   const btnRemoteEnd = $("btn-remote-end");
 
   // Notice / announcement banner — content + on/off come from a remote JSON file fetched from
@@ -141,6 +139,118 @@
   const updateClose = $("update-close");
   if (updateClose && updateBanner) {
     updateClose.addEventListener("click", () => { updateBanner.hidden = true; });
+  }
+
+  // ── tasks banner ───────────────────────────────────────────────────────
+  // Tracks the CLI's Task* tool calls (TaskCreate adds, TaskUpdate changes status / deletes) into
+  // state.tasks and mirrors them into a collapsible checklist banner. Tasks persist for the whole
+  // chat (the CLI numbers them per session) and are cleared on session.init / transcript.load.
+  const tasksBanner = $("tasks-banner");
+  const tasksHead = $("tasks-head");
+  const tasksList = $("tasks-list");
+  const tasksCount = $("tasks-count");
+  const tasksClose = $("tasks-close");
+  if (tasksHead) {
+    tasksHead.addEventListener("click", () => { if (tasksBanner) tasksBanner.classList.toggle("collapsed"); });
+  }
+  if (tasksClose && tasksBanner) {
+    tasksClose.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't also toggle the collapse on the head
+      state.tasksDismissed = true;
+      tasksBanner.hidden = true;
+    });
+  }
+  // tool_use id → task, so a TaskCreate's result can reconcile the provisional id with the real one.
+  const taskByCreateToolId = Object.create(null);
+  let taskSeq = 0;
+  // A task list belongs to ONE turn: when a turn ends (turnResult), the next TaskCreate starts a
+  // fresh list (the previous, worked-through tasks are cleared) instead of appending — so each
+  // follow-up prompt shows its own list, not an ever-growing pile.
+  let taskBatchClosed = false;
+
+  function resetTasks() {
+    state.tasks = [];
+    for (const k in taskByCreateToolId) delete taskByCreateToolId[k];
+    taskSeq = 0;
+    taskBatchClosed = false;
+    state.tasksDismissed = false;
+    renderTasksBanner();
+  }
+  // Live tool.use OR a historic {id, toolName, input} record — both shapes carry id + input.
+  function trackTaskTool(name, id, input) {
+    if (name === "TaskCreate") taskOnCreate(id, input || {});
+    else if (name === "TaskUpdate") taskOnUpdate(input || {});
+  }
+  function taskOnCreate(toolId, input) {
+    if (taskBatchClosed) {
+      // first TaskCreate of a new turn → replace the previous turn's (finished) list
+      state.tasks = [];
+      for (const k in taskByCreateToolId) delete taskByCreateToolId[k];
+      taskBatchClosed = false;
+    }
+    taskSeq++;
+    // Provisional sequential id (matches the CLI's 1-based numbering); reconciled from the result
+    // text ("Task #N created…") when that arrives, so deletions/resumes can't desync the mapping.
+    const task = {
+      id: String(taskSeq),
+      subject: input.subject || input.activeForm || "Task",
+      activeForm: input.activeForm || "",
+      status: "pending",
+    };
+    state.tasks.push(task);
+    if (toolId != null) taskByCreateToolId[toolId] = task;
+    state.tasksDismissed = false; // a new task batch re-shows the banner even if it was dismissed
+    renderTasksBanner();
+  }
+  function reconcileTaskId(toolId, summary) {
+    const task = toolId != null ? taskByCreateToolId[toolId] : null;
+    if (!task) return;
+    const m = /#(\d+)/.exec(summary || "");
+    if (m) task.id = m[1];
+    delete taskByCreateToolId[toolId];
+    renderTasksBanner();
+  }
+  function taskOnUpdate(input) {
+    if (input.taskId == null) return;
+    const id = String(input.taskId);
+    let task = state.tasks.filter((t) => t.id === id).pop();
+    if (!task) {
+      // an update for a task we never saw created (truncated history) → synthesize a row
+      task = { id: id, subject: input.subject || ("Task #" + id), activeForm: input.activeForm || "", status: "pending" };
+      state.tasks.push(task);
+    }
+    if (input.subject) task.subject = input.subject;
+    if (input.activeForm) task.activeForm = input.activeForm;
+    if (input.status === "deleted") {
+      state.tasks = state.tasks.filter((t) => t !== task);
+    } else if (input.status) {
+      task.status = input.status;
+    }
+    renderTasksBanner();
+  }
+  function taskMark(status) {
+    return status === "completed" ? "☑" : status === "in_progress" ? "◐" : "☐";
+  }
+  function renderTasksBanner() {
+    if (!tasksBanner) return;
+    const tasks = state.tasks;
+    if (!tasks.length || state.tasksDismissed) { tasksBanner.hidden = true; return; }
+    const done = tasks.filter((t) => t.status === "completed").length;
+    if (tasksCount) tasksCount.textContent = done + "/" + tasks.length;
+    if (tasksList) {
+      tasksList.innerHTML = "";
+      tasks.forEach((t) => {
+        const st = t.status || "pending";
+        const row = el("div", "task-item " + st);
+        row.appendChild(el("span", "task-mark", taskMark(st)));
+        const label = st === "in_progress" && t.activeForm ? t.activeForm : t.subject;
+        const text = el("span", "task-text", label);
+        text.title = label;
+        row.appendChild(text);
+        tasksList.appendChild(row);
+      });
+    }
+    tasksBanner.hidden = false;
   }
 
   // GitHub URLs, both CORS-fetchable from the WebUI. The repo ("owner/repo") + notice branch come
@@ -535,6 +645,7 @@
     state.messages = [];
     state.activeAssistant = null;
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
+    resetTasks(); // new session → clear the tasks banner
     transcriptInner.innerHTML = "";
     renderEmptyOrSignin();
     updateTitle();
@@ -558,6 +669,7 @@
     state.messages = [];
     state.activeAssistant = null;
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
+    resetTasks(); // rebuilt below from the loaded tool messages
     transcriptInner.innerHTML = "";
     updateTitle();
     const msgs = m.messages || [];
@@ -595,6 +707,11 @@
       updateSendEnabled();
       hideWorkingIndicator();
     }
+    // While a turn runs, block actions that would switch/clear the session and orphan the live
+    // process (the host also guards these via IsBusy). New chat + remote control are disabled.
+    const turnActive = isTurnActive();
+    $("btn-new").disabled = turnActive || state.remoteActive;
+    btnRemote.disabled = turnActive;
     // permission expiry: status moved away while one or more cards are still open
     // (host abandoned them — e.g. turn ended/errored). Expire every still-pending card.
     // Cards the user just answered are already removed from the set, so they're untouched.
@@ -767,6 +884,11 @@
     let full = (md ? md.label : state.model) + " · " + modeLabel;
     if (state.ultracode) full += " · Ultra";
     modelModeLabel.textContent = full;
+    // Special looping effects on the pill — Ultracode wins over Max when both are on
+    // (see .modelmode-btn.is-ultra / .is-max). is-max only set when Ultracode is off.
+    const isMax = state.effort === "max";
+    modelModeBtn.classList.toggle("is-ultra", state.ultracode);
+    modelModeBtn.classList.toggle("is-max", isMax && !state.ultracode);
     // compact: show only model short label is handled by CSS truncation; provide model label
   }
 
@@ -1028,10 +1150,24 @@
   function toolUse(m) {
     if (m.name === "TodoWrite") return todoCard(m);
     if (m.name === "ExitPlanMode" || m.name === "exit_plan_mode") return planCard(m);
+    // Mirror Task* calls into the tasks banner (still rendered as a normal tool card below).
+    trackTaskTool(m.name, m.id, m.input);
     // AskUserQuestion: render a normal tool card here; when the permission hook fires
     // (question.request) it replaces this card with the interactive question card — same
     // tool_use_id, same pattern as the permission flow. (Bypass mode has no hook → the
     // tool card just resolves to the CLI's "did not answer".)
+    //
+    // Race guard: the permission/question hook (HTTP MCP server) and this tool.use (ndjson stdout)
+    // are independent channels and can arrive in EITHER order. When the question/permission card
+    // lands first, building a tool card here would leave a duplicate that the hook can't remove —
+    // and for AskUserQuestion the answer is delivered as an MCP *deny* (with the answer as the
+    // message), so the CLI's tool_result is is_error → that orphaned card rendered as "failed"
+    // even though the answer was accepted. If an interactive card for this id already exists, it
+    // already represents the call → skip the tool card. (The forward order is handled by
+    // permissionRequest/questionRequest removing the tool card.)
+    if (m.id != null && transcriptInner.querySelector(
+        '.q-card[data-request-id="' + cssEscape(m.id) + '"], .perm-card[data-request-id="' + cssEscape(m.id) + '"]'))
+      return;
 
     const isAgent = m.name === "Task" || m.name === "Agent"; // decision #14
     const card = el("div", "tool-card" + collapsedInit() + (isAgent ? " agent-card" : ""));
@@ -1106,6 +1242,7 @@
   }
 
   function toolResult(m) {
+    reconcileTaskId(m.id, m.summary); // assign a TaskCreate its real "#N" id (no-op for other tools)
     const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     if (!card) return;
     const status = card.querySelector(".tool-status");
@@ -1609,6 +1746,7 @@
   function turnResult(m) {
     if (m.contextTokens != null) state.contextTokens = m.contextTokens; // kept for /compact note
     if (m.limits) state.limits = m.limits;
+    taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     updateStatusbar();
     // turn separator + readable elapsed time (cost/token counts intentionally dropped)
     appendNode(el("hr", "turn-divider"));
@@ -1669,6 +1807,9 @@
         break;
       }
       case "tool": {
+        // NOTE: intentionally NOT calling trackTaskTool here — the tasks banner is a live-turn aid,
+        // not part of a reopened (historic) chat. loadTranscript() resets the banner and we leave it
+        // empty for history.
         const card = el("div", "tool-card" + collapsedInit());
         const head = el("div", "tool-head");
         head.appendChild(toolIcon(msg.toolName));
@@ -2073,11 +2214,12 @@
   // -------------------------------------------------------------------------
   // Composer: send / stop / keyboard
   // -------------------------------------------------------------------------
+  function isTurnActive() {
+    // a turn is running while it works or waits for a permission decision (the CLI process is alive)
+    return state.status === "working" || state.status === "waiting-permission";
+  }
   function canSend() {
-    return input.value.trim().length > 0 &&
-      !state.remoteActive &&
-      state.status !== "working" &&
-      state.status !== "waiting-permission";
+    return input.value.trim().length > 0 && !state.remoteActive && !isTurnActive();
   }
   function updateSendEnabled() {
     if (state.status === "working") { sendBtn.disabled = false; return; }
@@ -2441,10 +2583,11 @@
   }
 
   // -------------------------------------------------------------------------
-  // Remote control (claude remote-control server) — locks composer + transcript,
-  // shows link + QR, "End remote session" loads the remote session afterwards.
+  // Remote control — opens the CURRENT chat in an interactive `claude --remote-control`
+  // session in the VS terminal (the CLI shows the QR/link there). Locks the composer +
+  // transcript while active; "End remote session" closes the terminal and reloads the
+  // (now-advanced) conversation. Host contract: remote.state { state, inTerminal, message }.
   // -------------------------------------------------------------------------
-  let remoteQrUrl = null; // last URL rendered into the canvas
 
   /** Locks everything except the remote panel: header actions (rename, history,
       new chat) and the composer controls (+, /, Model·Mode, attachment chips). */
@@ -2459,8 +2602,6 @@
     const s = m.state || "";
     if (s === "stopped") {
       state.remoteActive = false;
-      state.remoteUrl = null;
-      remoteQrUrl = null;
       remotePanel.hidden = true;
       btnRemote.classList.remove("active");
       setRemoteLocked(false);
@@ -2479,54 +2620,18 @@
     remoteStatus.classList.toggle("error", s === "error");
     btnRemoteEnd.textContent = s === "error" ? "Close" : "End remote session";
 
-    if (s === "error" || s === "starting") {
-      remoteStatus.textContent = s === "error"
-        ? (m.message || "Remote control failed.")
-        : "Starting remote control…";
-      remoteQr.hidden = true;
-      remoteUrlEl.hidden = true;
-      btnRemoteCopy.hidden = true;
-      return;
+    if (s === "starting") {
+      remoteStatus.textContent = "Opening the interactive session in the terminal…";
+    } else if (s === "error") {
+      remoteStatus.textContent = m.message || "Remote control failed.";
+    } else { // ready
+      remoteStatus.textContent = m.message
+        || "Running in the terminal — scan the QR code or open the link shown there to connect from the Claude app or claude.ai/code.";
     }
-
-    // ready
-    const n = m.activeSessions || 0;
-    remoteStatus.textContent = n > 0
-      ? n + " active remote session" + (n > 1 ? "s" : "")
-      : "Scan with the Claude app or open the link to connect";
-    if (m.url) {
-      state.remoteUrl = m.url;
-      remoteUrlEl.textContent = m.url;
-      remoteUrlEl.hidden = false;
-      btnRemoteCopy.hidden = false;
-      drawRemoteQr(m.url);
-    }
-  }
-
-  /** 1px/module into the canvas (CSS scales it up with image-rendering: pixelated). */
-  function drawRemoteQr(url) {
-    if (remoteQrUrl === url) { remoteQr.hidden = false; return; }
-    const modules = typeof qrEncode === "function" ? qrEncode(url) : null;
-    if (!modules) { remoteQr.hidden = true; return; } // URL too long / qr.js missing
-    const quiet = 4;
-    const dim = modules.length + quiet * 2;
-    remoteQr.width = dim;
-    remoteQr.height = dim;
-    const ctx = remoteQr.getContext("2d");
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, dim, dim);
-    ctx.fillStyle = "#000";
-    for (let y = 0; y < modules.length; y++) {
-      for (let x = 0; x < modules.length; x++) {
-        if (modules[y][x]) ctx.fillRect(x + quiet, y + quiet, 1, 1);
-      }
-    }
-    remoteQr.hidden = false;
-    remoteQrUrl = url;
   }
 
   btnRemote.addEventListener("click", () => {
-    if (state.remoteActive || state.status === "working") return;
+    if (state.remoteActive || isTurnActive()) return;
     post("remote.start", {});
     applyRemoteState({ state: "starting" }); // optimistic — host confirms
   });
@@ -2536,13 +2641,6 @@
     remoteStatus.classList.remove("error");
     remoteStatus.textContent = "Stopping…";
     post("remote.stop", {});
-  });
-
-  btnRemoteCopy.addEventListener("click", () => {
-    if (!state.remoteUrl) return;
-    copyText(state.remoteUrl);
-    btnRemoteCopy.textContent = "Copied!";
-    setTimeout(() => { btnRemoteCopy.textContent = "Copy link"; }, 1500);
   });
 
   // -------------------------------------------------------------------------
@@ -2564,30 +2662,40 @@
       historyPanelEl.appendChild(el("div", "history-empty", "No sessions yet."));
       return;
     }
+    // While a turn runs, switching/deleting the active session would disrupt it — show the list
+    // read-only with a hint (the host also guards this via IsBusy).
+    const busy = isTurnActive();
+    if (busy)
+      historyPanelEl.appendChild(el("div", "history-hint", "Stop the current turn to switch or delete sessions."));
     sessions.forEach((s) => {
       // A div (not a button) so the delete button can nest inside without invalid markup.
-      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : ""));
+      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : "") + (busy ? " disabled" : ""));
       const top = el("div", "hi-top");
       top.appendChild(el("span", "hi-title", s.title || "Untitled"));
       top.appendChild(el("span", "hi-time", relativeTime(s.updatedAt)));
-      const del = el("button", "hi-delete");
-      del.title = "Delete session";
-      del.setAttribute("aria-label", "Delete session");
-      del.appendChild(iconTrash());
-      del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
-      top.appendChild(del);
+      if (!busy) {
+        const del = el("button", "hi-delete");
+        del.title = "Delete session";
+        del.setAttribute("aria-label", "Delete session");
+        del.appendChild(iconTrash());
+        del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
+        top.appendChild(del);
+      }
       item.appendChild(top);
       if (s.preview) item.appendChild(el("div", "hi-preview", s.preview));
-      item.addEventListener("click", () => {
-        post("session.load", { sessionId: s.id });
-        closeAllOverlays();
-      });
+      if (!busy) {
+        item.addEventListener("click", () => {
+          post("session.load", { sessionId: s.id });
+          closeAllOverlays();
+        });
+      }
       historyPanelEl.appendChild(item);
     });
     if (openOverlay) openOverlay.reposition();
   }
 
   $("btn-new").addEventListener("click", () => {
+    if (isTurnActive()) return; // a turn is running — don't clear/switch (button is also disabled)
     // optimistic empty state
     state.messages = [];
     state.title = "Untitled";
@@ -2702,6 +2810,9 @@
     const clBtn = el("button", "menu-item appearance-options-link", "Changelog…");
     clBtn.addEventListener("click", () => { closeAllOverlays(); window.open(CHANGELOG_URL, "_blank", "noopener"); });
     pop.appendChild(clBtn);
+
+    // Installed extension version (from session.init) — so the user knows what they're running.
+    if (appVersion) pop.appendChild(el("div", "appearance-version", "Version " + appVersion));
 
     openPopover(this, pop, { align: "end" });
   });
@@ -2983,12 +3094,14 @@
       ["max", "Max"],
     ];
     EFFORT_LEVELS.forEach(([lvl, label]) => {
-      const b = el("button", "seg-btn" + (state.effort === lvl ? " active" : ""), label);
+      // "max" gets a marker class so the segment (and the bottom pill) can play a special looping effect.
+      const b = el("button", "seg-btn" + (lvl === "max" ? " seg-effort-max" : "") + (state.effort === lvl ? " active" : ""), label);
       b.title = lvl;
       b.addEventListener("click", () => {
         state.effort = lvl;
         segE.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
         b.classList.add("active");
+        updateModelModeLabel();   // refresh the bottom pill so Max's effect turns on/off immediately
         post("effort.set", { effort: lvl });
       });
       segE.appendChild(b);
@@ -3003,7 +3116,7 @@
     // orchestration in the CLI). Not an effort level, hence its own toggle.
     const s3 = el("div", "mm-section");
     s3.appendChild(el("div", "mm-section-title", "Ultracode"));
-    const ultraRow = el("div", "toggle-row" + (state.ultracode ? " on" : ""));
+    const ultraRow = el("div", "toggle-row ultra-row" + (state.ultracode ? " on" : ""));
     ultraRow.appendChild(el("span", "label", "Ultracode"));
     ultraRow.appendChild(el("span", "toggle-switch"));
     ultraRow.addEventListener("click", () => {
@@ -3202,6 +3315,12 @@
           sendIn("permission.result", { requestId: msg.requestId, status: "applied" }, 1100);
           return;
         case "permission.decision": return onDecision(msg);
+        case "question.answer":
+          // Reproduce the host: the answer is delivered to the CLI as an MCP *deny* (answer text as
+          // the message), so the tool_result comes back is_error → an errored tool.result. With the
+          // race guard there is no tool card for this id, so this is a harmless no-op (no "failed"
+          // card); without it the racing tool.use card below would render as failed.
+          return sendIn("tool.result", { id: msg.requestId, status: "error", summary: "The user answered:\n- Framework: (see answer)" }, 40);
         case "permission.approveAlways":
           sendIn("system.note", { id: nid("note"), text: "(mock) Added auto-approve pattern" }, 40);
           return onDecision({ requestId: msg.requestId, behavior: "allow" });
@@ -3426,17 +3545,34 @@
       }, delay + 600);
       sched(() => { if (stopped) return; handle({ type: "tool.result", id: todoId, status: "ok", summary: "" }); }, delay + 680);
 
+      // Task* tools → tasks banner. Create three, then walk #1 in_progress → completed.
+      const taskSubjects = ["Parse NDJSON stream", "Map events to UI messages", "Write fixture tests"];
+      taskSubjects.forEach((subject, i) => {
+        const tcId = nid("tc");
+        sched(() => {
+          if (stopped) return;
+          handle({ type: "tool.use", id: tcId, name: "TaskCreate", status: "running", input: { subject: subject, description: subject } });
+          handle({ type: "tool.result", id: tcId, status: "ok", summary: "Task #" + (i + 1) + " created successfully: " + subject });
+        }, delay + 700 + i * 40);
+      });
+      const tuId1 = nid("tu");
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: tuId1, name: "TaskUpdate", status: "running", input: { taskId: "1", status: "in_progress", activeForm: "Parsing NDJSON stream" } }); handle({ type: "tool.result", id: tuId1, status: "ok", summary: "Updated task #1 status" }); }, delay + 900);
+      const tuId2 = nid("tu");
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: tuId2, name: "TaskUpdate", status: "running", input: { taskId: "1", status: "completed" } }); handle({ type: "tool.result", id: tuId2, status: "ok", summary: "Updated task #1 status" }); }, delay + 1100);
+
       // AskUserQuestion → routed through the permission hook → interactive question card.
-      // tool.use first (CLI emits it before the prompt), then question.request replaces it.
+      // Reproduces the real-world RACE: the HTTP permission hook (question.request) can land BEFORE
+      // the ndjson tool.use. The late tool.use must NOT spawn a duplicate card (which would then
+      // render "failed" off the deny-trick result). See the toolUse race guard.
       const askId = nid("ask");
       sched(() => {
         if (stopped) return;
-        handle({ type: "tool.use", id: askId, name: "AskUserQuestion", status: "running", input: {} });
         handle({ type: "question.request", requestId: askId, questions: [
           { question: "Which test framework should the fixtures use?", header: "Framework", multiSelect: false,
             options: [ { label: "xUnit", description: "Already referenced by the test project." }, { label: "NUnit", description: "Adds a new dependency." } ] },
         ] });
       }, delay + 690);
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: askId, name: "AskUserQuestion", status: "running", input: { questions: [{ question: "Which test framework should the fixtures use?" }] } }); }, delay + 740);
 
       // Bash command permission card — gets the "Always" button (command/MCP only)
       const bashId = nid("perm");
