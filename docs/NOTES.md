@@ -151,6 +151,40 @@ found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout
   in the **system browser** (`Process.Start`, `UseShellExecute=true`; http/https only) instead of in a
   bare WebView2 popup.
 
+## Tasks banner (2026-06-24)
+- **What:** A third banner below the header (`#tasks-banner`, class `notice-banner tasks-banner`)
+  that aggregates the CLI's **`Task*` tool calls** into a live, collapsible checklist (☐ pending /
+  ◐ in_progress / ☑ completed + a done/total count) so a long multi-step turn can be followed at a
+  glance without scrolling the individual tool cards. The cards still render as normal in the
+  transcript — the banner is an additive summary.
+- **Pure web-side — no new host↔web messages.** Driven entirely by `app.js` off the existing
+  `tool.use` / `tool.result` stream and the `transcript.load` history (`role:"tool"` records).
+  Nothing changed in the Bridge/Core.
+- **Tracking (`app.js`):** `trackTaskTool(name, id, input)` dispatches `TaskCreate`→`taskOnCreate`,
+  `TaskUpdate`→`taskOnUpdate`. State lives in `state.tasks` (`[{id, subject, activeForm, status}]`).
+  - **Id mapping:** `TaskCreate` input has **no** id, so a task gets a **provisional sequential id**
+    (`taskSeq`, matching the CLI's 1-based numbering); on its `tool.result` (`reconcileTaskId`) the
+    real id is parsed from the summary text **`Task #N created…`** and overwrites the provisional one
+    (so deletions/resumes can't desync the `taskId` mapping). History has no result text → the
+    sequential id stands (correct in the common, no-deletion case).
+  - `TaskUpdate` (`input.taskId` + `status`/`subject`/`activeForm`) updates the matching row; an
+    update for an unseen task (truncated history) **synthesizes** a row; `status:"deleted"` removes it.
+  - In_progress rows show `activeForm` (falls back to `subject`); others show `subject`.
+- **Lifecycle — one list per turn (2026-06-24):** A task list belongs to **one turn**. When a turn
+  ends (`turnResult` sets `taskBatchClosed=true`), the **next `TaskCreate` clears the previous,
+  worked-through list and starts a fresh one** instead of appending — so each follow-up prompt shows
+  *its own* list, not an ever-growing pile. Mere `TaskUpdate`s (no new create) keep updating the
+  current list, and additional `TaskCreate`s **within the same turn** still append. `resetTasks()`
+  (from `applySessionInit` / `loadTranscript`) clears everything for a new/loaded chat. ✕
+  (`#tasks-close`) dismisses **for the session** (`state.tasksDismissed`); a **new `TaskCreate`**
+  re-shows it (status updates do **not** un-dismiss). Head row toggles `.collapsed` to fold just the list.
+- **History = no banner (2026-06-24):** The tasks banner is a **live-turn aid only**. Reopening a
+  chat (`transcript.load`) does **NOT** rebuild it — `renderHistoricMessage` deliberately skips
+  `trackTaskTool` for historic `tool` records, and `loadTranscript`'s `resetTasks()` leaves the banner
+  empty. (Live tracking runs solely from `toolUse` / `toolResult`.)
+- **Mock:** `WebUI/index.html` (browser isolation) simulates a 3-task `TaskCreate` burst + a
+  `TaskUpdate` walk (in_progress → completed) so the banner can be verified without VS.
+
 ## Open items / Roadmap (from plan §A8 + findings)
 1. **MCP permission bridge + inline diff review** — **Phase 1 implemented** (standard chat card,
    allow/deny), still to be verified in real VS. **Phase 2/3 open** (extended editor inline
@@ -602,24 +636,31 @@ compact_boundary evaluation) — details in the respective sections below.
   exists as a standalone server mode (own sessions, no live mirror into the
   tool window); integration deliberately deferred.
 
-## Drag-and-drop of files (2026-06-05)
+## Drag-and-drop of files (2026-06-05, rewritten 2026-06-24)
 - **Goal:** Drag files/folders from Windows Explorer onto the chat panel → they get added as
   attachment chips (the CLI reads them via `@<path>`).
-- **Why host-side:** HTML5 drag-drop delivers `File` objects **without** a file path
-  (Chromium/security). But the CLI contract needs the path. So, as with `clipboard.paste`,
-  via the host: `ClaudeChatWindowControl` sets **`_webView.AllowExternalDrop = false`** (otherwise
-  Chromium consumes the drop) + `AllowDrop=true`, and handles **`DragOver`** (copy effect
-  on `DataFormats.FileDrop`) + **`Drop`** → `e.Data.GetData(DataFormats.FileDrop)` = real
-  `string[]` paths → **`WebViewBridge.AddFileAttachments(paths)`**.
-  - **Bugfix 2026-06-16:** Previously attached to `PreviewDragOver`/`PreviewDrop` → drag-and-drop did
-    **nothing**. The WPF WebView2 control forwards OS drops (with `AllowExternalDrop=false`) as
-    **bubbling** routed events, **not** as tunneling `Preview*` → the handlers never fired.
-    Switched to `DragOver`/`Drop`.
+- **Why not the DOM:** HTML5 drag-drop delivers `File` objects **without** a filesystem path
+  (Chromium sandbox), but the CLI contract needs the real path. So the path must be recovered host-side.
+- **Approach = navigation interception (the one that actually works in this runtime):**
+  `ClaudeChatWindowControl` sets **`_webView.AllowExternalDrop = true`** so Chromium **accepts** the
+  drop, and the page has **no JS drop handler** → Chromium's default action for a dropped file is to
+  **navigate to its `file://` URL**. We intercept that:
+  - **`CoreWebView2.NavigationStarting`** → if `e.Uri` is `file:` → **`e.Cancel = true`** (never let the
+    SPA navigate away) + `AttachDroppedFileUri` → `new Uri(uri).LocalPath` (decodes `%20` etc.) →
+    `WebViewBridge.AddFileAttachments`.
+  - **`CoreWebView2.NewWindowRequested`** (already used for `target=_blank` → system browser) also
+    handles `file:` URLs (a multi-file drop can open extra files as new windows) → same attach path.
+  - Both events fire on the **UI thread** (`ThrowIfNotOnUIThread`); folders work too (a dropped dir
+    navigates to `file:///dir` → `AddFileAttachments` accepts dirs).
+- **⚠️ Dead end — do NOT go back to it:** `AllowExternalDrop = false` + WPF routed drag events
+  (`DragOver`/`Drop`, tunneling **or** bubbling). The "forward OS drops to WPF" behaviour is **not in
+  the `AllowExternalDrop` spec** and **does not happen** in the current WebView2 runtime — `false` just
+  makes Chromium **reject** the drop (the **no-drop cursor** everywhere). Two prior fixes betting on
+  WPF routes (2026-06-16 bubbling-only; 2026-06-24 both routes) both failed for this reason.
 - **`AddFileAttachments` (public):** filters to existing files/dirs, builds `attach.added`
   ({name,path}); shared with the `+` picker (`HandleAttachFiles`). With remote control active
   it is locked (composer/attachments are locked anyway then). No UI contract needed — the existing
-  chip flow. (Drop anywhere on the panel; no separate overlay — the copy cursor + the appearing
-  chips are the feedback.)
+  chip flow. (Drop anywhere on the panel; the appearing chips are the feedback.)
 
 ## Editor context menu → prompt (2026-06-16)
 - **Two commands in the code-editor right-click menu** (`.vsct`: own group `EditorCtxGroup` in
@@ -933,6 +974,17 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   card read-only with the marked answers.
 - **Tool-card replacement:** The CLI sends the `tool_use` **before** the hook → briefly a generic
   tool card, which the `question.request` (as in the permission flow) removes via `data-tool-id`.
+  - **Race fix (2026-06-24):** "tool_use before the hook" is NOT guaranteed at the UI — the hook
+    arrives over the **HTTP MCP server** while `tool_use` arrives over **ndjson stdout**; the two are
+    independent and `question.request` can reach the WebView **first**. Then the late `tool.use` built
+    a **duplicate** tool card that `questionRequest` could no longer remove — and because the answer is
+    returned as an MCP **deny** (answer as the message), the CLI's `tool_result` is **`is_error:true`**,
+    so that orphaned card rendered as **"failed"** even though the answer was accepted (exact symptom the
+    user hit). Fix: a **race guard** at the top of `toolUse` — if a `.q-card`/`.perm-card` with the same
+    `data-request-id` already exists, skip building the tool card (the interactive card already
+    represents the call). Covers both orderings and hardens the permission race too. History was already
+    correct (`RecordQuestionMessage` replaces the `tool` record by id). Mock now fires `question.request`
+    **before** the racing `tool.use` and emits the errored `tool.result` to reproduce/verify.
 - **CSS:** `.q-card`/`.q-option`/`.q-other-input`/`.q-actions` (+ `.answered` read-only style) in
   `app.css` (replaces the old `.ask-*`). The mock posts `tool.use`+`question.request` in the demo turn.
 - **Modes:** works in **"Ask", "Auto-accept" AND "Plan"** — the hook is wired for all modes except

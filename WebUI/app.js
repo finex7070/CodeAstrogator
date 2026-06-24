@@ -41,6 +41,8 @@
     attachments: [],         // {id, name}
     activeAssistant: null,   // {id, textNode, accText, el}
     pendingPermissions: new Set(), // requestIds of open permission/question cards (parallel tool use)
+    tasks: [],               // task tracker: [{id, subject, activeForm, status}] from Task* tool calls
+    tasksDismissed: false,   // user closed the tasks banner (re-shown when a NEW task is created)
   };
 
   const MODELS = [
@@ -137,6 +139,118 @@
   const updateClose = $("update-close");
   if (updateClose && updateBanner) {
     updateClose.addEventListener("click", () => { updateBanner.hidden = true; });
+  }
+
+  // ── tasks banner ───────────────────────────────────────────────────────
+  // Tracks the CLI's Task* tool calls (TaskCreate adds, TaskUpdate changes status / deletes) into
+  // state.tasks and mirrors them into a collapsible checklist banner. Tasks persist for the whole
+  // chat (the CLI numbers them per session) and are cleared on session.init / transcript.load.
+  const tasksBanner = $("tasks-banner");
+  const tasksHead = $("tasks-head");
+  const tasksList = $("tasks-list");
+  const tasksCount = $("tasks-count");
+  const tasksClose = $("tasks-close");
+  if (tasksHead) {
+    tasksHead.addEventListener("click", () => { if (tasksBanner) tasksBanner.classList.toggle("collapsed"); });
+  }
+  if (tasksClose && tasksBanner) {
+    tasksClose.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't also toggle the collapse on the head
+      state.tasksDismissed = true;
+      tasksBanner.hidden = true;
+    });
+  }
+  // tool_use id → task, so a TaskCreate's result can reconcile the provisional id with the real one.
+  const taskByCreateToolId = Object.create(null);
+  let taskSeq = 0;
+  // A task list belongs to ONE turn: when a turn ends (turnResult), the next TaskCreate starts a
+  // fresh list (the previous, worked-through tasks are cleared) instead of appending — so each
+  // follow-up prompt shows its own list, not an ever-growing pile.
+  let taskBatchClosed = false;
+
+  function resetTasks() {
+    state.tasks = [];
+    for (const k in taskByCreateToolId) delete taskByCreateToolId[k];
+    taskSeq = 0;
+    taskBatchClosed = false;
+    state.tasksDismissed = false;
+    renderTasksBanner();
+  }
+  // Live tool.use OR a historic {id, toolName, input} record — both shapes carry id + input.
+  function trackTaskTool(name, id, input) {
+    if (name === "TaskCreate") taskOnCreate(id, input || {});
+    else if (name === "TaskUpdate") taskOnUpdate(input || {});
+  }
+  function taskOnCreate(toolId, input) {
+    if (taskBatchClosed) {
+      // first TaskCreate of a new turn → replace the previous turn's (finished) list
+      state.tasks = [];
+      for (const k in taskByCreateToolId) delete taskByCreateToolId[k];
+      taskBatchClosed = false;
+    }
+    taskSeq++;
+    // Provisional sequential id (matches the CLI's 1-based numbering); reconciled from the result
+    // text ("Task #N created…") when that arrives, so deletions/resumes can't desync the mapping.
+    const task = {
+      id: String(taskSeq),
+      subject: input.subject || input.activeForm || "Task",
+      activeForm: input.activeForm || "",
+      status: "pending",
+    };
+    state.tasks.push(task);
+    if (toolId != null) taskByCreateToolId[toolId] = task;
+    state.tasksDismissed = false; // a new task batch re-shows the banner even if it was dismissed
+    renderTasksBanner();
+  }
+  function reconcileTaskId(toolId, summary) {
+    const task = toolId != null ? taskByCreateToolId[toolId] : null;
+    if (!task) return;
+    const m = /#(\d+)/.exec(summary || "");
+    if (m) task.id = m[1];
+    delete taskByCreateToolId[toolId];
+    renderTasksBanner();
+  }
+  function taskOnUpdate(input) {
+    if (input.taskId == null) return;
+    const id = String(input.taskId);
+    let task = state.tasks.filter((t) => t.id === id).pop();
+    if (!task) {
+      // an update for a task we never saw created (truncated history) → synthesize a row
+      task = { id: id, subject: input.subject || ("Task #" + id), activeForm: input.activeForm || "", status: "pending" };
+      state.tasks.push(task);
+    }
+    if (input.subject) task.subject = input.subject;
+    if (input.activeForm) task.activeForm = input.activeForm;
+    if (input.status === "deleted") {
+      state.tasks = state.tasks.filter((t) => t !== task);
+    } else if (input.status) {
+      task.status = input.status;
+    }
+    renderTasksBanner();
+  }
+  function taskMark(status) {
+    return status === "completed" ? "☑" : status === "in_progress" ? "◐" : "☐";
+  }
+  function renderTasksBanner() {
+    if (!tasksBanner) return;
+    const tasks = state.tasks;
+    if (!tasks.length || state.tasksDismissed) { tasksBanner.hidden = true; return; }
+    const done = tasks.filter((t) => t.status === "completed").length;
+    if (tasksCount) tasksCount.textContent = done + "/" + tasks.length;
+    if (tasksList) {
+      tasksList.innerHTML = "";
+      tasks.forEach((t) => {
+        const st = t.status || "pending";
+        const row = el("div", "task-item " + st);
+        row.appendChild(el("span", "task-mark", taskMark(st)));
+        const label = st === "in_progress" && t.activeForm ? t.activeForm : t.subject;
+        const text = el("span", "task-text", label);
+        text.title = label;
+        row.appendChild(text);
+        tasksList.appendChild(row);
+      });
+    }
+    tasksBanner.hidden = false;
   }
 
   // GitHub URLs, both CORS-fetchable from the WebUI. The repo ("owner/repo") + notice branch come
@@ -531,6 +645,7 @@
     state.messages = [];
     state.activeAssistant = null;
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
+    resetTasks(); // new session → clear the tasks banner
     transcriptInner.innerHTML = "";
     renderEmptyOrSignin();
     updateTitle();
@@ -554,6 +669,7 @@
     state.messages = [];
     state.activeAssistant = null;
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
+    resetTasks(); // rebuilt below from the loaded tool messages
     transcriptInner.innerHTML = "";
     updateTitle();
     const msgs = m.messages || [];
@@ -1034,10 +1150,24 @@
   function toolUse(m) {
     if (m.name === "TodoWrite") return todoCard(m);
     if (m.name === "ExitPlanMode" || m.name === "exit_plan_mode") return planCard(m);
+    // Mirror Task* calls into the tasks banner (still rendered as a normal tool card below).
+    trackTaskTool(m.name, m.id, m.input);
     // AskUserQuestion: render a normal tool card here; when the permission hook fires
     // (question.request) it replaces this card with the interactive question card — same
     // tool_use_id, same pattern as the permission flow. (Bypass mode has no hook → the
     // tool card just resolves to the CLI's "did not answer".)
+    //
+    // Race guard: the permission/question hook (HTTP MCP server) and this tool.use (ndjson stdout)
+    // are independent channels and can arrive in EITHER order. When the question/permission card
+    // lands first, building a tool card here would leave a duplicate that the hook can't remove —
+    // and for AskUserQuestion the answer is delivered as an MCP *deny* (with the answer as the
+    // message), so the CLI's tool_result is is_error → that orphaned card rendered as "failed"
+    // even though the answer was accepted. If an interactive card for this id already exists, it
+    // already represents the call → skip the tool card. (The forward order is handled by
+    // permissionRequest/questionRequest removing the tool card.)
+    if (m.id != null && transcriptInner.querySelector(
+        '.q-card[data-request-id="' + cssEscape(m.id) + '"], .perm-card[data-request-id="' + cssEscape(m.id) + '"]'))
+      return;
 
     const isAgent = m.name === "Task" || m.name === "Agent"; // decision #14
     const card = el("div", "tool-card" + collapsedInit() + (isAgent ? " agent-card" : ""));
@@ -1112,6 +1242,7 @@
   }
 
   function toolResult(m) {
+    reconcileTaskId(m.id, m.summary); // assign a TaskCreate its real "#N" id (no-op for other tools)
     const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     if (!card) return;
     const status = card.querySelector(".tool-status");
@@ -1615,6 +1746,7 @@
   function turnResult(m) {
     if (m.contextTokens != null) state.contextTokens = m.contextTokens; // kept for /compact note
     if (m.limits) state.limits = m.limits;
+    taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     updateStatusbar();
     // turn separator + readable elapsed time (cost/token counts intentionally dropped)
     appendNode(el("hr", "turn-divider"));
@@ -1675,6 +1807,9 @@
         break;
       }
       case "tool": {
+        // NOTE: intentionally NOT calling trackTaskTool here — the tasks banner is a live-turn aid,
+        // not part of a reopened (historic) chat. loadTranscript() resets the banner and we leave it
+        // empty for history.
         const card = el("div", "tool-card" + collapsedInit());
         const head = el("div", "tool-head");
         head.appendChild(toolIcon(msg.toolName));
@@ -3180,6 +3315,12 @@
           sendIn("permission.result", { requestId: msg.requestId, status: "applied" }, 1100);
           return;
         case "permission.decision": return onDecision(msg);
+        case "question.answer":
+          // Reproduce the host: the answer is delivered to the CLI as an MCP *deny* (answer text as
+          // the message), so the tool_result comes back is_error → an errored tool.result. With the
+          // race guard there is no tool card for this id, so this is a harmless no-op (no "failed"
+          // card); without it the racing tool.use card below would render as failed.
+          return sendIn("tool.result", { id: msg.requestId, status: "error", summary: "The user answered:\n- Framework: (see answer)" }, 40);
         case "permission.approveAlways":
           sendIn("system.note", { id: nid("note"), text: "(mock) Added auto-approve pattern" }, 40);
           return onDecision({ requestId: msg.requestId, behavior: "allow" });
@@ -3404,17 +3545,34 @@
       }, delay + 600);
       sched(() => { if (stopped) return; handle({ type: "tool.result", id: todoId, status: "ok", summary: "" }); }, delay + 680);
 
+      // Task* tools → tasks banner. Create three, then walk #1 in_progress → completed.
+      const taskSubjects = ["Parse NDJSON stream", "Map events to UI messages", "Write fixture tests"];
+      taskSubjects.forEach((subject, i) => {
+        const tcId = nid("tc");
+        sched(() => {
+          if (stopped) return;
+          handle({ type: "tool.use", id: tcId, name: "TaskCreate", status: "running", input: { subject: subject, description: subject } });
+          handle({ type: "tool.result", id: tcId, status: "ok", summary: "Task #" + (i + 1) + " created successfully: " + subject });
+        }, delay + 700 + i * 40);
+      });
+      const tuId1 = nid("tu");
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: tuId1, name: "TaskUpdate", status: "running", input: { taskId: "1", status: "in_progress", activeForm: "Parsing NDJSON stream" } }); handle({ type: "tool.result", id: tuId1, status: "ok", summary: "Updated task #1 status" }); }, delay + 900);
+      const tuId2 = nid("tu");
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: tuId2, name: "TaskUpdate", status: "running", input: { taskId: "1", status: "completed" } }); handle({ type: "tool.result", id: tuId2, status: "ok", summary: "Updated task #1 status" }); }, delay + 1100);
+
       // AskUserQuestion → routed through the permission hook → interactive question card.
-      // tool.use first (CLI emits it before the prompt), then question.request replaces it.
+      // Reproduces the real-world RACE: the HTTP permission hook (question.request) can land BEFORE
+      // the ndjson tool.use. The late tool.use must NOT spawn a duplicate card (which would then
+      // render "failed" off the deny-trick result). See the toolUse race guard.
       const askId = nid("ask");
       sched(() => {
         if (stopped) return;
-        handle({ type: "tool.use", id: askId, name: "AskUserQuestion", status: "running", input: {} });
         handle({ type: "question.request", requestId: askId, questions: [
           { question: "Which test framework should the fixtures use?", header: "Framework", multiSelect: false,
             options: [ { label: "xUnit", description: "Already referenced by the test project." }, { label: "NUnit", description: "Adds a new dependency." } ] },
         ] });
       }, delay + 690);
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: askId, name: "AskUserQuestion", status: "running", input: { questions: [{ question: "Which test framework should the fixtures use?" }] } }); }, delay + 740);
 
       // Bash command permission card — gets the "Always" button (command/MCP only)
       const bashId = nid("perm");

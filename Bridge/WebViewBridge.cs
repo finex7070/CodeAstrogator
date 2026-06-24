@@ -719,7 +719,11 @@ namespace CodeAstrogator.Bridge
                 // timed-out/abandoned permission or question card doesn't stay open and interactive.
                 if (ResolvePending(key, "deny", reason) != null)
                 {
+                    // Close() is thread-safe — it marshals to the UI thread itself (this can run on a
+                    // CLI background thread). The VSTHRD010 analyzer can't see that, hence the suppression.
+#pragma warning disable VSTHRD010
                     _editReview.Close(key); // tear down any open editor-review adornments
+#pragma warning restore VSTHRD010
                     Post(new JObject { ["type"] = "permission.expire", ["requestId"] = key });
                 }
             }
@@ -1742,7 +1746,11 @@ namespace CodeAstrogator.Bridge
                         && _pendingPermissions.ContainsKey(result.ToolUseId))
                     {
                         ResolvePending(result.ToolUseId, "deny", "Timed out — no answer");
+                        // Close() is thread-safe — it marshals to the UI thread itself (this runs on a
+                        // CLI background thread). The VSTHRD010 analyzer can't see that, hence the suppression.
+#pragma warning disable VSTHRD010
                         _editReview.Close(result.ToolUseId); // tear down any open editor-review adornments
+#pragma warning restore VSTHRD010
                         Post(new JObject { ["type"] = "permission.expire", ["requestId"] = result.ToolUseId });
                         // background thread → can't call PostStatusAfterDecision (UI-thread only); Post
                         // marshals, so compute the same state inline (working unless others are open).
@@ -1824,7 +1832,11 @@ namespace CodeAstrogator.Bridge
         {
             // A turn can end while a tools/call is still blocked (CLI crash/error/normal end);
             // settle any open permission so the card doesn't orphan and the handler task frees.
+            // Its only UI work (EditReviewController.Close / Post) self-marshals, so it is safe on this
+            // background callback; VSTHRD010 propagates the inner Close affinity here, hence suppression.
+#pragma warning disable VSTHRD010
             DenyAllPendingPermissions("Turn ended");
+#pragma warning restore VSTHRD010
             lock (_history) _recordedPermissions.Clear(); // tool.result correlation is per-turn
             if (error != null)
             {
