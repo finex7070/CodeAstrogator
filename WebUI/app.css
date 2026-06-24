@@ -203,6 +203,51 @@ button { font-family: inherit; }
 .update-banner { border-top: 1px solid var(--border); }
 .update-banner .notice-icon { color: var(--ok, var(--accent)); }
 
+/* Tasks banner — a collapsible checklist of the CLI's Task* calls. Stacks a clickable head row
+   over the task list (overrides the notice-banner's horizontal flex). */
+.tasks-banner {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+.tasks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.tasks-head:hover { background: var(--accent-faint); }
+.tasks-head .notice-icon { margin-top: 0; color: var(--accent); }
+.tasks-title { font-size: 11.5px; font-weight: 600; color: var(--text); }
+.tasks-count {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.tasks-chevron { flex: 0 0 auto; color: var(--text-faint); transition: transform 0.15s ease; }
+.tasks-banner.collapsed .tasks-chevron { transform: rotate(-90deg); }
+.tasks-close { margin-left: 2px; }
+.tasks-list {
+  padding: 2px 10px 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+.tasks-banner.collapsed .tasks-list { display: none; }
+.task-item { display: flex; gap: 8px; font-size: 12px; line-height: 1.7; color: var(--text); }
+.task-mark { flex: 0 0 auto; color: var(--text-dim); }
+.task-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-item.completed .task-text { color: var(--text-dim); text-decoration: line-through; }
+.task-item.in_progress .task-mark { color: var(--accent); }
+.task-item.in_progress .task-text { color: var(--text); font-weight: 600; }
+
 .title-wrap {
   flex: 1 1 auto;
   min-width: 0;
@@ -1044,6 +1089,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 /* History panel */
 .history-panel { min-width: 260px; max-width: 340px; padding: 6px; }
 .history-empty { padding: 16px; color: var(--text-dim); text-align: center; }
+.history-hint { padding: 6px 10px 8px; color: var(--text-dim); font-size: 11px; line-height: 1.4; }
 .history-item {
   display: block;
   width: 100%;
@@ -1057,6 +1103,8 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .history-item:hover { background: var(--accent-faint); }
 .history-item.active { background: var(--accent-faint); border-left: 2px solid var(--accent); }
+.history-item.disabled { opacity: 0.5; cursor: default; }
+.history-item.disabled:hover { background: transparent; }
 .hi-top { display: flex; align-items: baseline; gap: 8px; }
 .hi-title { font-weight: 600; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hi-time { color: var(--text-faint); font-size: 11px; flex: 0 0 auto; }
@@ -1097,11 +1145,49 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .mm-pop { min-width: 240px; max-width: 300px; padding: 8px; }
 /* five effort segments need tighter type than the 3-way appearance control */
 .seg-effort .seg-btn { font-size: 11px; padding: 0 2px; }
+
+/* ───────── "Max" effort — celebratory looping effect ─────────
+   Max is the top effort level, so the selected Max segment AND the bottom
+   model·mode pill get a flowing purple gradient + a pulsing glow that loops
+   for as long as Max stays selected. Works in both themes (white text + a
+   dark drop-shadow keeps it legible over the lighter gradient stops). */
+@keyframes max-flow { from { background-position: 0% 50%; } to { background-position: 200% 50%; } }
+@keyframes max-glow {
+  0%, 100% { box-shadow: 0 0 0 1px var(--accent),       0 0 5px 0 rgba(179,136,255,0.45); }
+  50%      { box-shadow: 0 0 0 1px var(--accent-hover), 0 0 16px 3px rgba(179,136,255,0.85); }
+}
+@keyframes max-glow-inset {
+  0%, 100% { box-shadow: inset 0 0 6px 0 rgba(255,255,255,0.20); }
+  50%      { box-shadow: inset 0 0 13px 1px rgba(255,255,255,0.50); }
+}
+/* shared "premium" look for both targets */
+.seg-btn.seg-effort-max.active,
+.modelmode-btn.is-max {
+  color: #fff;
+  background-image: linear-gradient(110deg, var(--accent) 0%, #9b6cff 25%, #d4a5ff 50%, #9b6cff 75%, var(--accent) 100%);
+  background-size: 200% 100%;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.35), 0 0 8px rgba(255,255,255,0.45);
+}
+/* the Max segment lives inside an overflow:hidden track → use an inset glow (an outer halo would be clipped) */
+.seg-btn.seg-effort-max.active { animation: max-flow 2.6s linear infinite, max-glow-inset 1.8s ease-in-out infinite; }
+/* the bottom pill is free-standing → full outer halo */
+.modelmode-btn.is-max {
+  border-color: transparent;
+  animation: max-flow 2.6s linear infinite, max-glow 2.2s ease-in-out infinite;
+}
+.modelmode-btn.is-max:hover { color: #fff; border-color: transparent; }
+.modelmode-btn.is-max svg { color: #fff; opacity: 0.9; }
+@media (prefers-reduced-motion: reduce) {
+  /* keep the special gradient + a steady glow, but stop the looping motion */
+  .seg-btn.seg-effort-max.active { animation: none; box-shadow: inset 0 0 10px 0 rgba(255,255,255,0.35); }
+  .modelmode-btn.is-max { animation: none; box-shadow: 0 0 0 1px var(--accent), 0 0 10px 1px rgba(179,136,255,0.6); }
+}
 .mm-hint { font-size: 10.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.4; }
 .appearance-title-2 { margin-top: 12px; }
 .appearance-divider { height: 1px; background: var(--border); margin: 12px -10px 4px; }
 .appearance-options-link { color: var(--text-dim); }
 .appearance-options-link:hover { color: var(--text); }
+.appearance-version { font-size: 10.5px; color: var(--text-dim); text-align: center; margin-top: 6px; opacity: 0.8; }
 
 /* Accent-color swatches */
 .accent-swatches { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -1384,6 +1470,39 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .toggle-row.on .toggle-switch { background: var(--accent); }
 .toggle-row.on .toggle-switch::after { transform: translateX(16px); background: #fff; }
+
+/* ───────── "Ultracode" — multi-agent orchestration effect ─────────
+   Distinct from Max's purple: a flowing multi-hue spectrum (cyan→indigo→
+   purple→pink) suggesting many agents at once. Shows on the Ultracode toggle's
+   switch, and on the bottom model·mode pill while Ultracode is on — where it
+   WINS over Max (updateModelModeLabel only sets .is-max when Ultracode is off).
+   Reuses @keyframes max-flow for the gradient scroll. */
+@keyframes ultra-glow {
+  0%, 100% { box-shadow: 0 0 0 1px #7b5fff, 0 0 6px 0 rgba(124,95,255,0.50),  0 0 11px 2px rgba(34,211,238,0.30); }
+  50%      { box-shadow: 0 0 0 1px #c264ff, 0 0 18px 4px rgba(194,100,255,0.80), 0 0 22px 5px rgba(34,211,238,0.45); }
+}
+.modelmode-btn.is-ultra {
+  color: #fff;
+  border-color: transparent;
+  background-image: linear-gradient(110deg, #22d3ee 0%, #6366f1 25%, #c264ff 50%, #ec4899 70%, #6366f1 85%, #22d3ee 100%);
+  background-size: 220% 100%;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.40), 0 0 8px rgba(255,255,255,0.40);
+  animation: max-flow 2.2s linear infinite, ultra-glow 2s ease-in-out infinite;
+}
+.modelmode-btn.is-ultra:hover { color: #fff; border-color: transparent; }
+.modelmode-btn.is-ultra svg { color: #fff; opacity: 0.9; }
+/* the toggle's switch becomes the animated spectrum + a tight glow (kept small so the
+   popover's overflow:auto doesn't clip a wide halo) */
+.ultra-row.on .toggle-switch {
+  background-image: linear-gradient(110deg, #22d3ee, #6366f1, #c264ff, #ec4899, #6366f1, #22d3ee);
+  background-size: 220% 100%;
+  box-shadow: 0 0 6px 1px rgba(124,95,255,0.55);
+  animation: max-flow 2.2s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .modelmode-btn.is-ultra { animation: none; box-shadow: 0 0 0 1px #7b5fff, 0 0 10px 1px rgba(124,95,255,0.6); }
+  .ultra-row.on .toggle-switch { animation: none; }
+}
 /* dimmed + non-interactive when the toggle only applies in another mode */
 .toggle-row.disabled { opacity: 0.45; pointer-events: none; }
 .mm-hint.disabled { opacity: 0.55; }
@@ -1461,22 +1580,8 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   color: var(--text);
 }
 .remote-title svg { color: var(--accent); }
-.remote-status { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
-.remote-status.error { color: var(--error); word-break: break-word; }
-.remote-qr {
-  width: 180px;
-  height: 180px;
-  image-rendering: pixelated;
-  border-radius: 6px;
-  background: #fff;
-}
-.remote-url {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  word-break: break-all;
-  user-select: text;
-}
+.remote-status { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; word-break: break-word; }
+.remote-status.error { color: var(--error); }
 .remote-btn {
   border: 1px solid var(--border);
   background: transparent;
@@ -1493,6 +1598,3 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 #btn-remote.active { color: var(--accent); }
 /* attachment chips render dynamically — lock them via the root class */
 .remote-locked .attachments button { pointer-events: none; opacity: 0.6; }
-@container app (max-height: 320px) {
-  .remote-qr { width: 110px; height: 110px; }
-}
