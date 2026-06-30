@@ -36,6 +36,11 @@ namespace CodeAstrogator.Core
         private CancellationTokenSource? _turnCts;
         private int _busy; // 0 = idle, 1 = turn running
 
+        // The result-event error text of the current turn (e.g. "API Error: …",
+        // "Credit balance is too low"). The CLI reports many failures here on stdout
+        // while stderr stays empty, so we fold it into the turn's error message.
+        private string? _lastResultError;
+
         public ClaudeSessionService(IClaudeProcessHost processHost)
         {
             _processHost = processHost;
@@ -121,6 +126,7 @@ namespace CodeAstrogator.Core
                 // Pin the mode for this turn: the process below keeps it for its whole lifetime,
                 // even if the UI changes Settings.PermissionMode mid-turn (see LaunchedPermissionMode).
                 LaunchedPermissionMode = Settings.PermissionMode;
+                _lastResultError = null;
 
                 ClaudeTurnExit exit;
                 var retriedWithoutResume = false;
@@ -194,9 +200,13 @@ namespace CodeAstrogator.Core
                 string? error = null;
                 if (!exit.WasCancelled && exit.ExitCode != 0)
                 {
-                    error = $"claude exited with code {exit.ExitCode}";
-                    if (!string.IsNullOrWhiteSpace(exit.StdErrTail))
-                        error += ":\n" + exit.StdErrTail;
+                    // Prefer the CLI's own error text (result event / stderr) over the bare exit code.
+                    var detail = !string.IsNullOrWhiteSpace(_lastResultError)
+                        ? _lastResultError!.Trim()
+                        : exit.StdErrTail?.Trim();
+                    error = string.IsNullOrWhiteSpace(detail)
+                        ? $"claude exited with code {exit.ExitCode} (no error output)"
+                        : $"claude exited with code {exit.ExitCode}:\n{detail}";
                 }
 
                 TurnCompleted?.Invoke(exit, error);
@@ -218,6 +228,10 @@ namespace CodeAstrogator.Core
                     if (result.NumTurns > 0 && !string.IsNullOrEmpty(result.SessionId))
                         SessionId = result.SessionId;
                     TotalTokens += result.InputTokens + result.OutputTokens;
+                    // Remember the error text so the turn's failure message can carry it
+                    // (the CLI puts API/auth/quota failures here, often with empty stderr).
+                    if (result.IsError && !string.IsNullOrWhiteSpace(result.ResultText))
+                        _lastResultError = result.ResultText;
                     break;
             }
         }

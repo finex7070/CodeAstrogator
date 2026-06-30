@@ -157,6 +157,44 @@ namespace CodeAstrogator.Tests
             Assert.Equal(-32601, o["error"]!.Value<int>("code"));
         }
 
+        // ── SSE streaming of a parked tools/call (keep-alives until the user decides) ──
+
+        [Fact]
+        public async Task ToolsCallSse_EmitsKeepAlivesWhileWaiting_ThenResult()
+        {
+            var gate = new TaskCompletionSource<PermissionDecision>();
+            var b = new McpPermissionBridge
+            {
+                KeepAliveIntervalMs = 10, // shrink so several ticks fire during the test wait
+                // the bridge intentionally parks on this UI round-trip task (the whole point of the test)
+#pragma warning disable VSTHRD003
+                OnPermissionRequested = (req, ct) => gate.Task,
+#pragma warning restore VSTHRD003
+            };
+            var call = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"permission_prompt\",\"arguments\":{\"tool_name\":\"Write\",\"input\":{\"file_path\":\"f.txt\"},\"tool_use_id\":\"t1\"}}}";
+            using (var ms = new System.IO.MemoryStream())
+            {
+                var write = b.WriteToolsCallSseAsync(ms, call, CancellationToken.None);
+                await Task.Delay(60); // user is "thinking" — keep-alives should be flowing
+                Assert.False(write.IsCompleted);
+                gate.SetResult(new PermissionDecision { Behavior = "allow" });
+                await write;
+
+                var text = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                Assert.Contains("Content-Type: text/event-stream", text); // streamed, not buffered JSON
+                Assert.Contains(": keep-alive", text);                    // at least one keep-alive before deciding
+                Assert.Contains("event: message", text);                 // the final SSE result event
+                // the decision rides inside the JSON-RPC envelope's text field (escaped JSON)
+                Assert.Contains("allow", text);
+
+                // the SSE data line must be a valid JSON-RPC tool result carrying the allow decision
+                var dataLine = System.Array.Find(text.Split('\n'), l => l.StartsWith("data: "));
+                Assert.NotNull(dataLine);
+                var inner = InnerDecision(JObject.Parse(dataLine!.Substring("data: ".Length)));
+                Assert.Equal("allow", inner.Value<string>("behavior"));
+            }
+        }
+
         // ── keep-alive HTTP read (two pipelined requests must both parse) ──────────
 
         [Fact]

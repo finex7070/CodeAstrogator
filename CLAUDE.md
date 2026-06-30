@@ -83,6 +83,14 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   in `--mcp-config` **hat Vorrang** vor der Env-Var `MCP_TOOL_TIMEOUT` (umgekehrt zu 2.1.16x). Der
   User-„Prompt timeout" wird daher ins **Config-`timeout`** geschrieben (`McpPermissionBridge.ToolTimeoutMs`,
   via `UpdateToolTimeout` neu geschrieben); Env-Var bleibt nur Fallback. Beide in **ms**.
+- **MCP-Transport-Timeout (Fix 2026-06-30 — eigentliche Ursache für „Prompt läuft nach ~5 min ab + retry"):**
+  Das Config-`timeout` ist nur ein **Application-Layer**-Limit; der HTTP-Client der CLI (Node/undici) erzwingt
+  zusätzlich ein **Transport-Timeout** (~5 min Header/Body-Inaktivität), das `timeout` NICHT aufhebt. Da der
+  Server die `tools/call`-Antwort bislang ohne ein einziges Byte offen hielt, brach der Client nach ~5 min ab
+  und **wiederholte** den Call. **Lösung:** `tools/call` wird als **SSE gestreamt** (`WriteToolsCallSseAsync`) —
+  Header sofort, alle 25 s ein `: keep-alive`, dann das Ergebnis als `data:`-Event → der Inaktivitäts-Timer
+  läuft nie ab. Betrifft Permission-Prompts **und** AskUserQuestion (gleicher `tools/call`-Pfad). Beim
+  CLI-Update gegentesten, ob die CLI das SSE-gelieferte Tool-Result akzeptiert.
 - Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
   `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
   des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.
