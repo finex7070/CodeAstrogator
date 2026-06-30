@@ -4,6 +4,17 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.2] – 2026-06-30
+
+### Added
+- **The turn footer now shows tokens and cost, not just the elapsed time.** The dim divider line below each completed turn now reads e.g. **`9s · 340 tok · $0.012`** — the time taken, the number of tokens Claude *generated* in that turn (its output across all steps), and the turn's cost. (The token figure is the work produced this turn; how full the context window is stays on the separate Ctx meter.) Each value is omitted when it's zero, so trivial local turns stay clean.
+
+### Fixed
+- **Auto-approve wildcards (`*`) now match regardless of quoting.** When you approve a command "from now on", quoted arguments are turned into a `*` so the pattern stays reusable (e.g. `git commit -m "first"` → `git commit -m *`). Previously the quotes were *kept* in the pattern (`git commit -m "*"`), so it only matched commands that used the exact same quote style — a later `git commit -m 'other'` (single quotes) or an unquoted value silently failed to match, which is why the wildcard sometimes seemed not to work. The quotes are now dropped, so the pattern matches whether the next invocation uses double quotes, single quotes or none. (This is safe: a command is still only ever silently re-approved when *every* one of its sub-commands matches a pattern, and the wildcard can never stretch across a command separator.)
+- **The "Always" button now detects (splits) commands far more reliably.** When you approve a command "from now on", it's broken into its individual sub-commands so each becomes its own reusable auto-approve pattern (and a command is only ever silently re-approved when *every* one of its parts is already trusted). That splitter was tripped up by quoting and shell syntax. It now correctly handles: **escaped characters** — PowerShell backtick (`` ` ``) and bash `\"` — so an escaped quote or separator no longer corrupts the split (e.g. `echo "a\" ; rm -rf /"` is now kept as a single command instead of leaking ` rm -rf /` out as its own suggested pattern); **doubled quotes** (`""` / `''`, PowerShell's literal-quote escape); and **nested syntax** — separators inside `(…)`, `$(…)`, `@(…)` and `{ … }` script blocks no longer split, so e.g. `foreach ($i in $x) { a; b }` stays whole. Windows paths like `WebUI\app.js` are untouched. The result: the patterns pre-filled into the "Always" popover are clean and accurate instead of garbled half-commands.
+
+---
+
 ## [0.5.1] – 2026-06-21
 
 ### Added
