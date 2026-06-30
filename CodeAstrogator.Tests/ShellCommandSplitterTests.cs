@@ -94,11 +94,121 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
-        public void Wildcardize_ReplacesQuotedArgumentValues()
+        public void ExtractCommands_BackslashEscapedQuote_KeepsSeparatorInsideString()
         {
-            Assert.Equal("Out-File -FilePath \"*\" -Encoding utf8",
+            // bash: the \" is an escaped quote, so the ; and rm stay INSIDE the string and must
+            // not be split off as a separate (dangerous) suggested command.
+            Assert.Equal(
+                new[] { "echo \"a\\\" ; rm -rf /\"" },
+                ShellCommandSplitter.ExtractCommands("echo \"a\\\" ; rm -rf /\"").ToArray());
+        }
+
+        [Fact]
+        public void ExtractCommands_PowerShellBacktick_EscapesSeparator()
+        {
+            // PowerShell: a backtick escapes the following ; so it is one command, not two.
+            Assert.Equal(
+                new[] { "echo `; ls" },
+                ShellCommandSplitter.ExtractCommands("echo `; ls").ToArray());
+        }
+
+        [Fact]
+        public void ExtractCommands_DoesNotSplitInsideScriptBlock()
+        {
+            // The ; lives inside { … }; the whole foreach is one statement.
+            Assert.Equal(
+                new[] { "foreach ($i in 1..3) { Write-Host $i; npm test }" },
+                ShellCommandSplitter.ExtractCommands("foreach ($i in 1..3) { Write-Host $i; npm test }").ToArray());
+        }
+
+        [Fact]
+        public void ExtractCommands_DoesNotSplitInsideSubexpression()
+        {
+            // The ; lives inside $( … ); the whole call is one command.
+            Assert.Equal(
+                new[] { "Write-Host $(git rev-parse HEAD; echo done)" },
+                ShellCommandSplitter.ExtractCommands("Write-Host $(git rev-parse HEAD; echo done)").ToArray());
+        }
+
+        [Fact]
+        public void ExtractCommands_DoubledQuote_KeepsSeparatorInsideString()
+        {
+            // PowerShell: "" is an escaped literal quote, so the ; stays inside the string.
+            Assert.Equal(
+                new[] { "Write-Host \"a ; \"\"q\"\" b\"" },
+                ShellCommandSplitter.ExtractCommands("Write-Host \"a ; \"\"q\"\" b\"").ToArray());
+        }
+
+        [Fact]
+        public void Wildcardize_ReplacesQuotedArgumentsWithBareWildcard()
+        {
+            // Quotes are dropped (not kept as "*") so the pattern is quote-agnostic.
+            Assert.Equal("Out-File -FilePath * -Encoding utf8",
                 ShellCommandSplitter.Wildcardize("Out-File -FilePath \"lorem.txt\" -Encoding utf8"));
-            Assert.Equal("git commit -m \"*\"", ShellCommandSplitter.Wildcardize("git commit -m \"fix the bug\""));
+            Assert.Equal("git commit -m *", ShellCommandSplitter.Wildcardize("git commit -m \"fix the bug\""));
+            Assert.Equal("git commit -m *", ShellCommandSplitter.Wildcardize("git commit -m 'fix the bug'"));
+        }
+
+        [Fact]
+        public void Wildcardize_CollapsesAdjacentWildcards()
+        {
+            Assert.Equal("echo *", ShellCommandSplitter.Wildcardize("echo \"a\" \"b\""));        // adjacent → "* *" collapses to "*"
+            Assert.Equal("cp * -t *", ShellCommandSplitter.Wildcardize("cp \"a\" -t \"dir\"")); // non-adjacent → both kept
+        }
+
+        // ── MatchesGlob ──────────────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData("git status", "*")]                       // bare * matches anything
+        [InlineData("git status", "git *")]                   // trailing wildcard
+        [InlineData("smiley.py", "*.py")]                      // leading wildcard
+        [InlineData("npm run build", "npm * build")]          // middle wildcard
+        [InlineData("GIT STATUS", "git status")]              // case-insensitive
+        [InlineData("git\nlog", "git*log")]                   // * spans newlines (Singleline)
+        public void MatchesGlob_Matches(string value, string pattern) =>
+            Assert.True(ShellCommandSplitter.MatchesGlob(value, pattern));
+
+        [Theory]
+        [InlineData("git push", "git status")]
+        [InlineData("rm -rf /", "git *")]
+        [InlineData("git commit --amend", "git commit -m *")] // -m required, no match
+        public void MatchesGlob_DoesNotMatch(string value, string pattern) =>
+            Assert.False(ShellCommandSplitter.MatchesGlob(value, pattern));
+
+        [Fact]
+        public void MatchesGlob_WildcardizedPattern_IsQuoteAgnostic()
+        {
+            // The exact regression: a wildcardized pattern must match the command regardless of the
+            // quote style (or absence of quotes) the next invocation happens to use.
+            var pattern = ShellCommandSplitter.Wildcardize("git commit -m \"first msg\""); // → git commit -m *
+            Assert.True(ShellCommandSplitter.MatchesGlob("git commit -m \"another msg\"", pattern));
+            Assert.True(ShellCommandSplitter.MatchesGlob("git commit -m 'another msg'", pattern));
+            Assert.True(ShellCommandSplitter.MatchesGlob("git commit -m hello", pattern));
+        }
+
+        // ── IsCommandCovered ─────────────────────────────────────────────────────
+
+        [Fact]
+        public void IsCommandCovered_RequiresEverySubCommand()
+        {
+            var patterns = new[] { "npm run build" };
+            Assert.True(ShellCommandSplitter.IsCommandCovered("npm run build", patterns));
+            // second &&-stage not covered → the whole chain is NOT approved
+            Assert.False(ShellCommandSplitter.IsCommandCovered("npm run build && rm -rf dist", patterns));
+        }
+
+        [Fact]
+        public void IsCommandCovered_WildcardPatternCoversChain()
+        {
+            Assert.True(ShellCommandSplitter.IsCommandCovered("npm run build && npm test", new[] { "npm *" }));
+            Assert.True(ShellCommandSplitter.IsCommandCovered("anything; here too", new[] { "*" }));
+        }
+
+        [Fact]
+        public void IsCommandCovered_BlankPatterns_NeverMatch()
+        {
+            Assert.False(ShellCommandSplitter.IsCommandCovered("git status", new[] { "", "   " }));
+            Assert.False(ShellCommandSplitter.IsCommandCovered("git status", new string[0]));
         }
     }
 }

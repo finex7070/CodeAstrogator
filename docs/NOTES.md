@@ -285,6 +285,17 @@ compact_boundary evaluation) — details in the respective sections below.
   `slash.commands` (host→web), `clipboard.paste` (web→host),
   `remote.start`/`remote.stop` (web→host) + `remote.state` (host→web),
   `contextTokens` in `session.init`/`turn.result`/`usage.update`.
+- **Turn footer (2026-06-30):** the divider line below each turn now renders
+  **`durationMs · turnOutputTokens tok · costUsd`** (was time-only). `turnOutputTokens`
+  = `TurnResultEvent.OutputTokens` = `result.usage.output_tokens`, the **aggregate output
+  generated across the whole turn** ("work produced") — deliberately NOT `contextTokens`
+  (last-message size, which still feeds the Ctx meter). Each part is dropped when 0/absent
+  (`app.js` `turnResult`); cost via `formatCost` ($0.012 sub-dollar → 3 dp, ≥$1 → 2 dp,
+  `<$0.001` for tiny). **Cost is shown in every auth mode** (user decision 2026-06-30); note
+  that in subscription mode `total_cost_usd` is the *estimated* API-equivalent, not a real
+  charge — gating it to API-key / over-limit would be easy to add later (auth proxy:
+  `ClaudeUsageClient.ReadPlanLabel`/`oauthAccount`; over-limit has no clean signal today,
+  only session/weekly % from `/usage`).
 
 ## `+` menu & @-mentions (2026-06-03)
 - *Add file…* → file picker (`attach.files` → `attach.added` chips).
@@ -724,18 +735,40 @@ compact_boundary evaluation) — details in the respective sections below.
   selection is empty. (Until v1.2.4 the field was a multiline TextBox.)
 - **Match key / matching (reworked):** MCP tools (`mcp__…`) match on the **tool name**.
   Shell commands are split via **`ShellCommandSplitter.ExtractCommands`** into their **real sub-commands**
-  (see below); the call is auto-approved only if **EVERY** sub-command is covered by a pattern
-  (`commands.All(sub => patterns.Any(p => MatchesGlob(sub,p)))`) — prevents an `&` chain from
-  slipping through just because one part matches. `MatchesGlob` = anchored, `*`→`.*`, case-insensitive.
-  Edit/Write → no pattern approval (diff card). `AutoApproveKey` remains only for the
-  `canApproveAlways` check (≠ null).
+  (see below); the call is auto-approved only if **EVERY** sub-command is covered by a pattern.
+  Since 2026-06-30 the matching is **one source of truth in Core**: `WebViewBridge.IsAutoApprovedByPattern`
+  delegates the command case to **`ShellCommandSplitter.IsCommandCovered(cmd, patterns)`**
+  (= `ExtractCommands` + `commands.All(sub => patterns.Any(p => MatchesGlob(sub,p)))`) and the MCP case to
+  **`ShellCommandSplitter.MatchesGlob`** (the bridge's own private `MatchesGlob` was removed). Splitting an
+  `&`-chain and requiring **all** parts prevents one part slipping the whole chain through. `MatchesGlob`
+  = anchored, `*`→`.*`, case-insensitive, `Singleline` (so `*` spans newlines). Both helpers are now
+  **unit-tested** (`ShellCommandSplitterTests`). Edit/Write → no pattern approval (diff card).
+  `AutoApproveKey` remains only for the `canApproveAlways` check (≠ null).
 - **`ShellCommandSplitter.ExtractCommands`** (quote- **and** here-string-aware `@'…'@`/`@"…"@`): splits
   on newlines, `;`, `&&`, `||`, whitespace `&` **and pipeline stages `|`**; **discards
   variable assignments** (`$x = …`, `VAR=…`, `AssignmentRx`) and bare variables (`$lorem`,
   `BareVariableRx`). So `$lorem = @'…'@ ; $lorem | Out-File -FilePath "x"` correctly yields
-  `Out-File -FilePath "x"` instead of the assignment. **`Wildcardize`** replaces quote contents with `*`
-  (`Out-File -FilePath "*"`) → reusable patterns. (The old `Split` stays for tests, but is no longer
-  used in production.)
+  `Out-File -FilePath "x"` instead of the assignment. **`Wildcardize`** replaces each quoted argument
+  — **including the surrounding quotes** — with a bare `*` (`Out-File -FilePath "x"` → `Out-File -FilePath *`),
+  collapsing runs `* *`→`*`. **Quote-agnostic (2026-06-30):** the old form kept the quotes (`"*"`),
+  so a stored pattern only matched the *same* quote style — a command using single quotes / no quotes
+  silently failed to match and the `*` "didn't work". Dropping the quotes makes the pattern match
+  regardless of quoting. Safe because matching is per-split-sub-command, so a wildcard's `.*` can never
+  span a real command separator. (The old `Split` stays for tests, but is no longer used in production.)
+- **Splitter hardening (2026-06-30):** `SplitSegments` (the production splitter behind
+  `ExtractCommands`) is now robust for both shells the extension drives. (1) **Escapes:** PowerShell
+  backtick `` ` `` (unquoted + inside `"…"`) and bash backslash `\"` (inside `"…"`) escape the next
+  char, so an escaped quote no longer flips the parser's quote state and an escaped separator no
+  longer splits — e.g. `echo "a\" ; rm -rf /"` stays **one** command (previously the `\"` closed the
+  string and ` ; rm -rf /` leaked out as a separate suggested command). A bare `\` stays literal so
+  Windows paths (`WebUI\app.js`) are untouched — PowerShell has no `\` escape. (2) **Doubled quotes:**
+  `""`/`''` are PowerShell's literal-quote escape and are kept inside the string. (3) **Nesting:** a
+  `depth` counter for `(…)`/`$(…)`/`@(…)` and `{ … }` means separators inside a subexpression or
+  script block don't split (`foreach ($i in $x) { a; b }` stays whole). Why it mattered: a buggy split
+  pre-filled the "Always" popover with garbled/half-commands and could surface a dangerous fragment as
+  its own suggestion. **Rejected alternative:** a real parser (`System.Management.Automation.Language.Parser`)
+  parses only PowerShell, not the `Bash` tool's commands, and drags a version-fragile GAC assembly into
+  the net472 VSIX; no maintained .NET bash parser exists — so the lightweight char scanner stays, hardened.
 - **Hook:** `HandlePermissionRequestedAsync` checks `IsAutoApprovedByPattern` at the very top → on a hit
   **silently `allow`** (no card; null `updatedInput` → the MCP bridge echoes the input the CLI
   demands). Runs on the bridge background thread; the `GetOptions()` read is uncritical there.

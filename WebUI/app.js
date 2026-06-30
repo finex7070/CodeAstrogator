@@ -1748,10 +1748,21 @@
     if (m.limits) state.limits = m.limits;
     taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     updateStatusbar();
-    // turn separator + readable elapsed time (cost/token counts intentionally dropped)
+    // turn separator + footer: elapsed time · tokens generated this turn · cost
     appendNode(el("hr", "turn-divider"));
-    if (m.durationMs != null)
-      appendNode(el("div", "sys-note turn-footer", formatDuration(m.durationMs)));
+    const parts = [];
+    if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
+    if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
+    if (m.costUsd) parts.push(formatCost(m.costUsd));
+    if (parts.length)
+      appendNode(el("div", "sys-note turn-footer", parts.join(" · ")));
+  }
+
+  // USD → compact label: $0.012 (sub-dollar → 3 decimals), $1.23 (≥ $1 → 2), <$0.001 for tiny
+  function formatCost(usd) {
+    const n = Number(usd) || 0;
+    if (n > 0 && n < 0.001) return "<$0.001";
+    return "$" + n.toFixed(n < 1 ? 3 : 2);
   }
 
   // ms → human-readable elapsed, e.g. 9300 → "9s", 130000 → "2m 10s", 3725000 → "1h 2m"
@@ -3456,7 +3467,7 @@
         sendIn("status", { state: "working", text: "Compacting context…" }, 0);
         sendIn("system.note", { id: nid("n"), text: "Context compacted · " + formatNum(pre) + " → " + formatNum(post) + " tokens" }, 1400);
         sendIn("usage.update", { contextTokens: post }, 1450);
-        sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.198, tokens: { input: 0, output: 0, total: 0 }, contextTokens: post, durationMs: 1500, limits: state.limits }, 1500);
+        sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.198, tokens: { input: 0, output: 0, total: 0 }, turnOutputTokens: 0, contextTokens: post, durationMs: 1500, limits: state.limits }, 1500);
         sendIn("status", { state: "ready" }, 1550);
         return;
       }
@@ -3467,7 +3478,7 @@
       sendIn("assistant.start", { id }, 150);
       sendIn("assistant.delta", { id, text: "Result of `" + command + "` (mock): command executed." }, 220);
       sendIn("assistant.end", { id }, 300);
-      sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.001, tokens: { input: 40, output: 12, total: state.tokens + 52 }, contextTokens: state.contextTokens + 52, durationMs: 800, limits: state.limits }, 360);
+      sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.001, tokens: { input: 40, output: 12, total: state.tokens + 52 }, turnOutputTokens: 12, contextTokens: state.contextTokens + 52, durationMs: 800, limits: state.limits }, 360);
       sendIn("status", { state: "ready" }, 400);
     }
 
@@ -3647,6 +3658,7 @@
           sessionId: state.sessionId,
           costUsd: 0.0123,
           tokens: { input: 1200, output: 340, total: 1540 },
+          turnOutputTokens: 340,
           contextTokens: 26540, // ≈ 13% of the 200k window
           durationMs: 4200,
           limits: mockLimits(15, 35),
