@@ -841,30 +841,16 @@ namespace CodeAstrogator.Bridge
 
             // MCP tools match on the tool name.
             if (!string.IsNullOrEmpty(toolName) && toolName.StartsWith("mcp__", StringComparison.Ordinal))
-                return patterns.Any(p => MatchesGlob(toolName, p));
+                return patterns.Any(p => ShellCommandSplitter.MatchesGlob(toolName, p));
 
             var cmd = input?.Value<string>("command") ?? input?.Value<string>("cmd") ?? input?.Value<string>("script");
             if (string.IsNullOrWhiteSpace(cmd))
                 return false;
 
-            // Auto-approve only when EVERY meaningful sub-command (variable assignments ignored)
-            // is covered by an approved pattern — so a command is never silently approved because
-            // just one of several &-joined parts happens to match.
-            var commands = ShellCommandSplitter.ExtractCommands(cmd!);
-            if (commands.Count == 0)
-                commands = new List<string> { cmd!.Trim() };
-            return commands.All(sub => patterns.Any(p => MatchesGlob(sub, p)));
-        }
-
-        /// <summary>Glob match (full string, <c>*</c> = any run), case-insensitive.</summary>
-        private static bool MatchesGlob(string value, string pattern)
-        {
-            try
-            {
-                var rx = "^" + Regex.Escape(pattern).Replace("\\*", ".*") + "$";
-                return Regex.IsMatch(value, rx, RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            }
-            catch { return false; }
+            // Auto-approve only when EVERY meaningful sub-command is covered by an approved pattern
+            // (see ShellCommandSplitter.IsCommandCovered) — never silently approve a chain just
+            // because one of several &-joined parts matches.
+            return ShellCommandSplitter.IsCommandCovered(cmd!, patterns);
         }
 
         /// <summary>Appends a pattern to the saved list (skips duplicates) and persists. UI thread.</summary>
@@ -1807,6 +1793,10 @@ namespace CodeAstrogator.Bridge
                             ["total"] = footerInput + footerOutput,
                         },
                         ["durationMs"] = turn.DurationMs,
+                        // tokens GENERATED this turn (aggregate output over all round-trips) — the
+                        // turn-footer's "work produced" figure. Distinct from the context-size
+                        // tokens above (last message), which feed the Ctx meter.
+                        ["turnOutputTokens"] = turn.OutputTokens,
                         ["contextTokens"] = _history.Current.ContextTokens,
                         // last known utilization; RefreshUsage() right after turn end updates it
                         ["limits"] = BuildLimits(),

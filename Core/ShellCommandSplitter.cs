@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -99,17 +100,64 @@ namespace CodeAstrogator.Core
             return result;
         }
 
-        /// <summary>Turns a command into a reusable glob pattern by replacing quoted argument
-        /// values with <c>*</c> (e.g. <c>Out-File -FilePath "x.txt"</c> → <c>Out-File -FilePath "*"</c>).</summary>
+        /// <summary>Turns a command into a reusable glob pattern by replacing each quoted argument
+        /// (<b>including the surrounding quotes</b>) with a bare <c>*</c> — e.g.
+        /// <c>Out-File -FilePath "x.txt"</c> → <c>Out-File -FilePath *</c>. Dropping the quotes makes
+        /// the pattern quote-agnostic: it then matches the same command whether the next invocation
+        /// uses double quotes, single quotes or no quotes at all (the literal quote chars used to have
+        /// to match exactly, which is why <c>*</c> often appeared not to work). Runs of resulting
+        /// wildcards are collapsed so <c>* *</c> can't bloat. Matching is always per sub-command, so
+        /// a wildcard can never span a real command separator.</summary>
         public static string Wildcardize(string command)
         {
             if (string.IsNullOrEmpty(command)) return command;
-            var s = Regex.Replace(command, "\"[^\"]*\"", "\"*\"");
-            s = Regex.Replace(s, "'[^']*'", "'*'");
+            var s = Regex.Replace(command, "\"[^\"]*\"", "*");
+            s = Regex.Replace(s, "'[^']*'", "*");
+            s = Regex.Replace(s, @"\*(\s+\*)+", "*"); // collapse "* *" → "*"
             return s;
         }
 
-        // Splits on top-level statement/pipeline separators, treating quotes + here-strings as atomic.
+        /// <summary>Glob match over the <b>whole</b> string: <c>*</c> = any run (incl. none),
+        /// everything else literal, case-insensitive, newlines included. The single source of truth
+        /// for auto-approve pattern matching (host + tests).</summary>
+        public static bool MatchesGlob(string value, string pattern)
+        {
+            if (value == null || pattern == null) return false;
+            try
+            {
+                var rx = "^" + Regex.Escape(pattern).Replace("\\*", ".*") + "$";
+                return Regex.IsMatch(value, rx, RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>True when <b>every</b> meaningful sub-command of <paramref name="command"/>
+        /// (variable assignments dropped, see <see cref="ExtractCommands"/>) is covered by at least
+        /// one of <paramref name="patterns"/>. "All sub-commands" — never approve a chain just because
+        /// one &amp;&amp;/pipe stage happens to match. Blank patterns are ignored.</summary>
+        public static bool IsCommandCovered(string command, IEnumerable<string> patterns)
+        {
+            var pats = (patterns ?? Enumerable.Empty<string>())
+                .Select(p => (p ?? "").Trim())
+                .Where(p => p.Length > 0)
+                .ToList();
+            if (pats.Count == 0) return false;
+
+            var commands = ExtractCommands(command);
+            if (commands.Count == 0)
+                commands = new List<string> { (command ?? "").Trim() };
+            return commands.All(sub => pats.Any(p => MatchesGlob(sub, p)));
+        }
+
+        // Splits on top-level statement/pipeline separators, treating quotes + here-strings as
+        // atomic. Hardened for the two shells this extension drives (PowerShell + bash):
+        //   • Escapes: PowerShell backtick (`) and bash backslash (\") are honoured so an escaped
+        //     quote or operator never flips the parser's state. (Bare backslash stays literal so
+        //     Windows paths like WebUI\app.js are untouched — PowerShell has no \ escape.)
+        //   • Doubled quotes ("" / '') inside a string are the PowerShell escape for a literal
+        //     quote and are kept inside the string instead of closing it.
+        //   • Nesting: separators inside (...), $(...), @(...) and { ... } are NOT split — they
+        //     belong to one statement (e.g. foreach ($i in $x) { a; b } stays whole).
         private static List<string> SplitSegments(string command)
         {
             var parts = new List<string>();
@@ -118,6 +166,7 @@ namespace CodeAstrogator.Core
             var buf = new StringBuilder();
             const int Normal = 0, HereSingle = 1, HereDouble = 2; // plus '\'' / '"' for quotes
             int state = Normal;
+            int depth = 0; // nesting of () and {} while in Normal state
 
             void Flush()
             {
@@ -133,11 +182,31 @@ namespace CodeAstrogator.Core
 
                 if (state == HereSingle) { buf.Append(c); if (c == '\'' && next == '@') { buf.Append('@'); i++; state = Normal; } continue; }
                 if (state == HereDouble) { buf.Append(c); if (c == '"' && next == '@') { buf.Append('@'); i++; state = Normal; } continue; }
-                if (state == '\'' || state == '"') { buf.Append(c); if (c == state) state = Normal; continue; }
+
+                // Inside a single-quoted string: literal except a doubled '' (PowerShell escape).
+                if (state == '\'')
+                {
+                    buf.Append(c);
+                    if (c == '\'') { if (next == '\'') { buf.Append(next); i++; } else state = Normal; }
+                    continue;
+                }
+                // Inside a double-quoted string: backtick/backslash escape the next char, a doubled
+                // "" is a literal quote, a lone " closes the string.
+                if (state == '"')
+                {
+                    if ((c == '`' || c == '\\') && next != '\0') { buf.Append(c); buf.Append(next); i++; continue; }
+                    buf.Append(c);
+                    if (c == '"') { if (next == '"') { buf.Append(next); i++; } else state = Normal; }
+                    continue;
+                }
 
                 // Normal state
+                if (c == '`' && next != '\0') { buf.Append(c); buf.Append(next); i++; continue; } // PowerShell escape
                 if (c == '@' && (next == '\'' || next == '"')) { state = next == '\'' ? HereSingle : HereDouble; buf.Append(c); buf.Append(next); i++; continue; }
                 if (c == '\'' || c == '"') { state = c; buf.Append(c); continue; }
+                if (c == '(' || c == '{') { depth++; buf.Append(c); continue; }
+                if (c == ')' || c == '}') { if (depth > 0) depth--; buf.Append(c); continue; }
+                if (depth > 0) { buf.Append(c); continue; } // separators inside (...) / {...} don't split
                 if (c == '\n' || c == '\r') { Flush(); continue; }
                 if ((c == '&' || c == '|') && next == c) { Flush(); i++; continue; }       // && ||
                 if (c == ';' || c == '|') { Flush(); continue; }                            // ; or pipeline stage
