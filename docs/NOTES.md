@@ -821,7 +821,7 @@ compact_boundary evaluation) — details in the respective sections below.
 > **Phase 0-B + 2 + 3 (inline edit review in the editor) IMPLEMENTED** (2026-06-19) — code complete,
 > builds, the pure diff/reconstruction core is unit-tested; the **WPF adornment rendering still needs
 > manual VS verification** (see the "Inline edit review in the editor" subsection below). Plan file:
-> `docs/currentplan.md`.
+> `docs/permission-hook-inline-diff-review-plan.md`.
 
 **Spike 0-A — empirically confirmed against CLI 2.1.162 (important, some research assumptions were wrong):**
 - HTTP transport works; `GET /mcp` (SSE attempt) may be **405** (the CLI continues POST-only).
