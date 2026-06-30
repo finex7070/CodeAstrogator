@@ -1445,12 +1445,18 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   font-size: 12.5px;
 }
 .radio-row:hover, .toggle-row:hover { background: var(--accent-faint); }
+/* a mode row stacks its label + description; the dot aligns with the label's first line */
+.radio-row { align-items: flex-start; }
+.radio-text { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.radio-label { line-height: 1.3; }
+.radio-text .mm-hint { margin-top: 2px; }
 .radio-dot {
   width: 14px; height: 14px;
   border-radius: 50%;
   border: 1.5px solid var(--text-faint);
   flex: 0 0 auto;
   position: relative;
+  margin-top: 2px; /* nudge down so the dot centres on the label line, not the whole stack */
 }
 .radio-row.selected .radio-dot { border-color: var(--accent); }
 .radio-row.selected .radio-dot::after {
@@ -1506,8 +1512,16 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 /* dimmed + non-interactive when the toggle only applies in another mode */
 .toggle-row.disabled { opacity: 0.45; pointer-events: none; }
 .mm-hint.disabled { opacity: 0.55; }
-/* a mode's sub-toggle, nested directly beneath its Permission radio (indented + accent rail) */
-.mm-subtoggle { margin-left: 15px; padding-left: 7px; border-left: 2px solid var(--accent-faint); }
+/* a mode's sub-toggle, nested INSIDE its Permission mode's text column: an accent rail runs
+   down the left of the mode text and the toggle is indented under it, so it clearly belongs
+   to the mode above it. */
+.mm-subtoggle { margin: 6px 0 2px; padding: 2px 4px 2px 10px; border-left: 2px solid var(--accent); border-radius: 0 6px 6px 0; cursor: pointer; }
+/* the whole block is the click target → highlight all of it on hover (not just the toggle row) */
+.mm-subtoggle:hover { background: var(--accent-faint); }
+.mm-subtoggle:hover .toggle-row { background: transparent; }
+/* the sub-toggle's hint belongs to its toggle: hug it tightly and align under the toggle label */
+.mm-subtoggle .toggle-row { padding: 4px 8px; }
+.mm-subtoggle .mm-hint { margin-top: 0; padding-left: 8px; }
 
 /* Autocomplete (slash) anchored to composer */
 .autocomplete { min-width: 200px; }

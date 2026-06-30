@@ -57,6 +57,15 @@ namespace CodeAstrogator.Core
         /// </summary>
         public int ToolTimeoutMs { get; set; } = DefaultToolTimeoutMs;
 
+        /// <summary>
+        /// Interval (ms) between SSE keep-alive comments emitted while a <c>tools/call</c> is parked
+        /// waiting for the user. Must stay comfortably under the CLI's transport-level HTTP timeout
+        /// (Node/undici defaults to ≈5 min of header/body inactivity, independent of the MCP
+        /// <c>timeout</c> field) so a long human decision is never aborted+retried. Internal so tests
+        /// can shrink it.
+        /// </summary>
+        internal int KeepAliveIntervalMs { get; set; } = 25_000;
+
         private readonly string _authToken = Guid.NewGuid().ToString("n");
         private readonly System.Collections.Concurrent.ConcurrentDictionary<TcpClient, byte> _clients
             = new System.Collections.Concurrent.ConcurrentDictionary<TcpClient, byte>();
@@ -138,6 +147,16 @@ namespace CodeAstrogator.Core
                             break;
                         }
 
+                        // tools/call can block for many minutes (a human decision). Stream it as SSE
+                        // with periodic keep-alives so the CLI's transport timeout (~5 min) can't abort
+                        // and retry it — only the MCP `timeout` field then bounds the wait. One response
+                        // per SSE stream → close the connection afterwards.
+                        if (TryGetMethod(req.Body) == "tools/call")
+                        {
+                            await WriteToolsCallSseAsync(stream, req.Body, ct).ConfigureAwait(false);
+                            break;
+                        }
+
                         var (status, body, sessionHeader) = await DispatchAsync(req.Body, ct).ConfigureAwait(false);
                         var extra = sessionHeader ? new[] { ("Mcp-Session-Id", SessionId) } : null;
                         await HttpWriteAsync(stream, status, body, extra, ct).ConfigureAwait(false);
@@ -216,6 +235,49 @@ namespace CodeAstrogator.Core
                 ["id"] = id?.DeepClone(),
                 ["error"] = new JObject { ["code"] = -32601, ["message"] = "Method not found: " + method },
             }.ToString(Formatting.None), false);
+        }
+
+        /// <summary>Peeks the JSON-RPC <c>method</c> without committing to a full parse path
+        /// (returns null on malformed input — the streaming branch then falls through to DispatchAsync,
+        /// which produces the proper 400).</summary>
+        private static string? TryGetMethod(string body)
+        {
+            try { return JObject.Parse(body).Value<string>("method"); }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Streams a <c>tools/call</c> response as Server-Sent Events: writes the SSE response
+        /// headers immediately, then a keep-alive comment every <see cref="KeepAliveIntervalMs"/> ms
+        /// while the user decides, then the JSON-RPC result as one <c>data:</c> event. The immediate
+        /// headers + periodic bytes stop the CLI's transport-level HTTP timeout (Node/undici defaults
+        /// to ≈5 min of header/body inactivity, independent of the MCP <c>timeout</c> field) from
+        /// aborting and retrying a long human decision — only the configured prompt timeout then
+        /// bounds the wait. The streamable-HTTP client advertises <c>text/event-stream</c>, so the
+        /// response may legitimately be delivered this way.
+        /// </summary>
+        internal async Task WriteToolsCallSseAsync(Stream stream, string requestBody, CancellationToken ct)
+        {
+            var header = Encoding.ASCII.GetBytes(
+                "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: text/event-stream\r\n" +
+                "Cache-Control: no-cache\r\n" +
+                "Connection: close\r\n\r\n");
+            await stream.WriteAsync(header, 0, header.Length, ct).ConfigureAwait(false);
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+
+            var dispatch = DispatchAsync(requestBody, ct);
+            var ping = Encoding.ASCII.GetBytes(": keep-alive\n\n");
+            while (await Task.WhenAny(dispatch, Task.Delay(KeepAliveIntervalMs, ct)).ConfigureAwait(false) != dispatch)
+            {
+                await stream.WriteAsync(ping, 0, ping.Length, ct).ConfigureAwait(false);
+                await stream.FlushAsync(ct).ConfigureAwait(false);
+            }
+
+            var (_, body, _) = await dispatch.ConfigureAwait(false);
+            var data = Encoding.UTF8.GetBytes("event: message\ndata: " + (body ?? "") + "\n\n");
+            await stream.WriteAsync(data, 0, data.Length, ct).ConfigureAwait(false);
+            await stream.FlushAsync(ct).ConfigureAwait(false);
         }
 
         internal static JObject BuildInitializeResult(JToken? id, string protocolVersion) => new JObject
