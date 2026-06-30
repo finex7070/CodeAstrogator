@@ -285,6 +285,17 @@ compact_boundary evaluation) — details in the respective sections below.
   `slash.commands` (host→web), `clipboard.paste` (web→host),
   `remote.start`/`remote.stop` (web→host) + `remote.state` (host→web),
   `contextTokens` in `session.init`/`turn.result`/`usage.update`.
+- **Turn footer (2026-06-30):** the divider line below each turn now renders
+  **`durationMs · turnOutputTokens tok · costUsd`** (was time-only). `turnOutputTokens`
+  = `TurnResultEvent.OutputTokens` = `result.usage.output_tokens`, the **aggregate output
+  generated across the whole turn** ("work produced") — deliberately NOT `contextTokens`
+  (last-message size, which still feeds the Ctx meter). Each part is dropped when 0/absent
+  (`app.js` `turnResult`); cost via `formatCost` ($0.012 sub-dollar → 3 dp, ≥$1 → 2 dp,
+  `<$0.001` for tiny). **Cost is shown in every auth mode** (user decision 2026-06-30); note
+  that in subscription mode `total_cost_usd` is the *estimated* API-equivalent, not a real
+  charge — gating it to API-key / over-limit would be easy to add later (auth proxy:
+  `ClaudeUsageClient.ReadPlanLabel`/`oauthAccount`; over-limit has no clean signal today,
+  only session/weekly % from `/usage`).
 
 ## `+` menu & @-mentions (2026-06-03)
 - *Add file…* → file picker (`attach.files` → `attach.added` chips).
@@ -361,7 +372,7 @@ compact_boundary evaluation) — details in the respective sections below.
 | Thinking | transient "✻ Thinking…" line (without token counter; the Print CLI redacts the text — empty `thinking_delta`s); disappears on thinking.end. Once text arrives per item (future CLI), upgrade to a collapsible card (Detailed: open) |
 | Task/Agent tool | tool card with accent edge + description |
 | TodoWrite | checklist card (☐/◐/☑, open, collapsible) |
-| ExitPlanMode | plan card (Markdown, accent border) |
+| ExitPlanMode | plan card (Markdown, accent border). **When a permission prompt follows** (plan mode → the MCP hook fires), the perm-card renders the plan as Markdown too and the standalone `.plan-card` is dropped, so the plan shows **once** (not Markdown card + raw-JSON approval card). Dedup handles both arrival orders: `permissionRequest` removes any `.tool-card`/`.plan-card` with the same id; `planCard` skips if a `.perm-card` for the id already exists. |
 | Long tool outputs (>1200 chars) | "Show more" collapse in the card (parser limit 10,000 chars) |
 | Tool input streaming, stderr warnings | deliberately not shown |
 
@@ -372,6 +383,14 @@ compact_boundary evaluation) — details in the respective sections below.
   `--effort low|medium|high|xhigh|max`; passed through per turn
   (default **high**, configurable in Tools → Options).
   "ultracode" is deliberately **not** a level (prompt keyword for multi-agent, not an effort level).
+- **Turn-failure messages (v0.5.2):** a non-zero exit is no longer reported as the bare
+  `claude exited with code N`. Many CLI failures (API errors, low credit balance, prompt-too-long,
+  invalid model) arrive on **stdout** as a `result` event with `is_error:true` + a human `result`
+  text while **stderr stays empty** — that text was previously discarded (the bridge only renders
+  `result.result` when `!is_error`). `ClaudeSessionService` now caches the error `result` text per
+  turn (`_lastResultError`, reset at turn start, set in `Bookkeep`) and folds it into the
+  `TurnCompleted` error: `claude exited with code N:\n<detail>` where detail = result-error text,
+  else the stderr tail, else `(no error output)`. The 40-line `StdErrTail` capture is unchanged.
   - **"Max" looping effect (v0.5.1):** the **max** segment always carries a `seg-effort-max` marker
     class, and `updateModelModeLabel()` toggles `is-max` on `#btn-modelmode` when `state.effort === "max"`
     (the effort click handler now calls `updateModelModeLabel()` so the pill flips immediately). CSS
@@ -625,6 +644,12 @@ compact_boundary evaluation) — details in the respective sections below.
   first item visible). Fix: `.popover` now has `max-height: min(70vh,460px)` + `overflow-y:auto`
   (one rule covers menu **and** autocomplete; short popovers never reach the cap). The
   `slash_commands` format itself is unchanged (still a JSON string array; parser ok).
+  - **`grow` option (v0.5.2):** `openPopover(..., { grow: true })` lets a tall popover use the full
+    space in its preferred direction (up to the window edge) instead of the static cap.
+    `positionPopover(anchor, popEl, opts)` (signature changed to a single `opts` object — all callers
+    updated) sets `maxHeight` to the available space above/below the anchor **before measuring**, then
+    positions as usual (still flips when the preferred side is too small). The **model·mode popover**
+    uses it (`side:"top"`) so it fills upward; other popovers keep the CSS cap.
 - **`/help` host-side:** The headless CLI rejects `/help` ("isn't available in this
   environment") — the host instead answers with a synthetic help block
   (like `/login`), incl. a hint about the terminal + `claude --resume <id>` for
@@ -724,18 +749,40 @@ compact_boundary evaluation) — details in the respective sections below.
   selection is empty. (Until v1.2.4 the field was a multiline TextBox.)
 - **Match key / matching (reworked):** MCP tools (`mcp__…`) match on the **tool name**.
   Shell commands are split via **`ShellCommandSplitter.ExtractCommands`** into their **real sub-commands**
-  (see below); the call is auto-approved only if **EVERY** sub-command is covered by a pattern
-  (`commands.All(sub => patterns.Any(p => MatchesGlob(sub,p)))`) — prevents an `&` chain from
-  slipping through just because one part matches. `MatchesGlob` = anchored, `*`→`.*`, case-insensitive.
-  Edit/Write → no pattern approval (diff card). `AutoApproveKey` remains only for the
-  `canApproveAlways` check (≠ null).
+  (see below); the call is auto-approved only if **EVERY** sub-command is covered by a pattern.
+  Since 2026-06-30 the matching is **one source of truth in Core**: `WebViewBridge.IsAutoApprovedByPattern`
+  delegates the command case to **`ShellCommandSplitter.IsCommandCovered(cmd, patterns)`**
+  (= `ExtractCommands` + `commands.All(sub => patterns.Any(p => MatchesGlob(sub,p)))`) and the MCP case to
+  **`ShellCommandSplitter.MatchesGlob`** (the bridge's own private `MatchesGlob` was removed). Splitting an
+  `&`-chain and requiring **all** parts prevents one part slipping the whole chain through. `MatchesGlob`
+  = anchored, `*`→`.*`, case-insensitive, `Singleline` (so `*` spans newlines). Both helpers are now
+  **unit-tested** (`ShellCommandSplitterTests`). Edit/Write → no pattern approval (diff card).
+  `AutoApproveKey` remains only for the `canApproveAlways` check (≠ null).
 - **`ShellCommandSplitter.ExtractCommands`** (quote- **and** here-string-aware `@'…'@`/`@"…"@`): splits
   on newlines, `;`, `&&`, `||`, whitespace `&` **and pipeline stages `|`**; **discards
   variable assignments** (`$x = …`, `VAR=…`, `AssignmentRx`) and bare variables (`$lorem`,
   `BareVariableRx`). So `$lorem = @'…'@ ; $lorem | Out-File -FilePath "x"` correctly yields
-  `Out-File -FilePath "x"` instead of the assignment. **`Wildcardize`** replaces quote contents with `*`
-  (`Out-File -FilePath "*"`) → reusable patterns. (The old `Split` stays for tests, but is no longer
-  used in production.)
+  `Out-File -FilePath "x"` instead of the assignment. **`Wildcardize`** replaces each quoted argument
+  — **including the surrounding quotes** — with a bare `*` (`Out-File -FilePath "x"` → `Out-File -FilePath *`),
+  collapsing runs `* *`→`*`. **Quote-agnostic (2026-06-30):** the old form kept the quotes (`"*"`),
+  so a stored pattern only matched the *same* quote style — a command using single quotes / no quotes
+  silently failed to match and the `*` "didn't work". Dropping the quotes makes the pattern match
+  regardless of quoting. Safe because matching is per-split-sub-command, so a wildcard's `.*` can never
+  span a real command separator. (The old `Split` stays for tests, but is no longer used in production.)
+- **Splitter hardening (2026-06-30):** `SplitSegments` (the production splitter behind
+  `ExtractCommands`) is now robust for both shells the extension drives. (1) **Escapes:** PowerShell
+  backtick `` ` `` (unquoted + inside `"…"`) and bash backslash `\"` (inside `"…"`) escape the next
+  char, so an escaped quote no longer flips the parser's quote state and an escaped separator no
+  longer splits — e.g. `echo "a\" ; rm -rf /"` stays **one** command (previously the `\"` closed the
+  string and ` ; rm -rf /` leaked out as a separate suggested command). A bare `\` stays literal so
+  Windows paths (`WebUI\app.js`) are untouched — PowerShell has no `\` escape. (2) **Doubled quotes:**
+  `""`/`''` are PowerShell's literal-quote escape and are kept inside the string. (3) **Nesting:** a
+  `depth` counter for `(…)`/`$(…)`/`@(…)` and `{ … }` means separators inside a subexpression or
+  script block don't split (`foreach ($i in $x) { a; b }` stays whole). Why it mattered: a buggy split
+  pre-filled the "Always" popover with garbled/half-commands and could surface a dangerous fragment as
+  its own suggestion. **Rejected alternative:** a real parser (`System.Management.Automation.Language.Parser`)
+  parses only PowerShell, not the `Bash` tool's commands, and drags a version-fragile GAC assembly into
+  the net472 VSIX; no maintained .NET bash parser exists — so the lightweight char scanner stays, hardened.
 - **Hook:** `HandlePermissionRequestedAsync` checks `IsAutoApprovedByPattern` at the very top → on a hit
   **silently `allow`** (no card; null `updatedInput` → the MCP bridge echoes the input the CLI
   demands). Runs on the bridge background thread; the `GetOptions()` read is uncritical there.
@@ -880,9 +927,13 @@ is a **preview before the allow** — the CLI writes only on "Accept" (possibly 
 
 ### Inline edit review in the editor (Phase 0-B + 2 + 3, 2026-06-19)
 Opt-in "Review edits in the editor" (toggle in the **Permission section of the model/mode popover** →
-`AstrogatorOptions.ReviewEditsInEditor`, default off). Each mode's sub-toggle is **nested directly beneath its
-radio and shown only while that mode is selected** (`mm-subtoggle` wrappers, `syncSubToggles` show/hides by
-`display`): "Review edits in the editor" sits under **Ask**, "Auto-accept commands" under **Auto-accept edits**.
+`AstrogatorOptions.ReviewEditsInEditor`, default off). Each **mode radio** carries a one-line description
+(`.radio-text` column = label + `.mm-hint`, dot top-aligned via `align-items:flex-start`). Each mode's sub-toggle
+is **nested INSIDE that mode's text column** (`text.appendChild(subToggles[mode])`, not a sibling row) and shown
+only while that mode is selected (`mm-subtoggle` wrappers, `syncSubToggles` show/hides by `display`): "Review edits
+in the editor" under **Ask**, "Auto-accept commands" under **Auto-accept edits**. The `mm-subtoggle` has a full
+`--accent` rail down its left and indents the toggle under it, so it reads as a child of the mode (the toggle's
+own click `stopPropagation`s so it doesn't re-select the mode).
 When **on** and a file-edit prompt (Edit/Write/MultiEdit) fires **in a mode that actually prompts** (Ask/Plan — not
 acceptEdits/bypass, where the CLI auto-applies edits), the chat shows a **file
 card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline diff card; the diff is reviewed
@@ -1013,6 +1064,20 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
     `SessionSettings.McpToolTimeoutMs` (env fallback). **Per-turn host:** takes effect next turn (the file is
     re-read each turn). **Persistent host:** only after a process restart (config + env are fixed at process
     start). **Re-test on CLI update** (the deliverer + env var names are version-dependent — see above).
+  - **Transport-level timeout (fix 2026-06-30 — the *real* "expires after ~5 min" cause):** the MCP
+    `timeout` field is an **application-layer** limit; the CLI's HTTP client (Node/undici) ALSO enforces a
+    **transport timeout** (~5 min of header/body inactivity — undici `headersTimeout`/`bodyTimeout` ≈ 300 s)
+    that the `timeout` field does **not** lift. Our old server held the `tools/call` HTTP response open with
+    **zero bytes** until the user decided → at ~5 min the client aborted **and retried** the call (a fresh
+    permission/AskUserQuestion prompt), regardless of a 60 min `timeout`. **Both** permission prompts and
+    AskUserQuestion ride the same `tools/call` path, so both were affected. **Fix:** `tools/call` is now
+    streamed as **SSE** — `WriteToolsCallSseAsync` writes the `text/event-stream` headers immediately, emits a
+    `: keep-alive` comment every `KeepAliveIntervalMs` (25 s, « 5 min) while the user decides, then the
+    JSON-RPC result as one `data:` event and closes the connection (`Connection: close`). The periodic bytes
+    reset the client's inactivity timer, so only the MCP `timeout` field bounds the wait. The client advertises
+    `text/event-stream` (it opens a GET SSE stream — we still 405 that), so an SSE POST response is legitimate.
+    Other methods (initialize/tools/list/notifications) stay plain `application/json`. **Re-verify on CLI
+    update** that the CLI accepts the SSE-delivered tool result.
 - **Timeout/abort cleanup (fix 2026-06-16):** If the CLI ends an open prompt itself (MCP tool
   timeout) **or** the turn ends while a card is still
   open, the card was previously still clickable **and** the "Working" indicator (rocket) did not come back

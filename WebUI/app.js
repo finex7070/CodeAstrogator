@@ -1229,6 +1229,10 @@
   /** ExitPlanMode rendered as a full plan card with markdown (decision #18).
       Approval runs through the regular permission card once the MCP bridge lands. */
   function planCard(m) {
+    // Reverse-order race: if the permission card for this plan already landed (it renders the
+    // plan markdown itself), don't add a duplicate plan-card beside it.
+    if (m.id != null && transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(m.id) + '"]'))
+      return;
     const card = el("div", "plan-card");
     card.dataset.toolId = m.id;
     const head = el("div", "perm-head");
@@ -1341,8 +1345,11 @@
   // -------------------------------------------------------------------------
   function permissionRequest(m) {
     // the tool.use card was already shown (CLI emits it before the permission prompt) —
-    // the permission card represents the same call, so drop the redundant tool card
-    const existingTool = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.requestId) + '"]');
+    // the permission card represents the same call, so drop the redundant tool card.
+    // ExitPlanMode renders as a .plan-card (not .tool-card); catch both so the markdown
+    // plan isn't left behind as a duplicate beside the permission card.
+    const existingTool = transcriptInner.querySelector(
+      '.tool-card[data-tool-id="' + cssEscape(m.requestId) + '"], .plan-card[data-tool-id="' + cssEscape(m.requestId) + '"]');
     if (existingTool) existingTool.remove();
     // guard against a second permission.request for the same tool_use_id. This happens when the
     // user switches the permission mode mid-turn: the host pre-renders an auto-approved card while
@@ -1373,6 +1380,12 @@
       body.appendChild(el("div", "perm-editreview", label));
     } else if (m.diff && (m.diff.oldText != null || m.diff.newText != null)) {
       body.appendChild(buildDiff(m.diff.oldText || "", m.diff.newText || "", m.diff.startLine || 1));
+    } else if ((m.toolName === "ExitPlanMode" || m.toolName === "exit_plan_mode") && m.input && m.input.plan) {
+      // ExitPlanMode: render the plan as markdown (same as planCard) rather than raw JSON,
+      // so the approval card shows the readable plan — no separate plan-card duplicate.
+      const planBody = el("div", "plan-body md");
+      planBody.appendChild(renderMarkdown(m.input.plan));
+      body.appendChild(planBody);
     } else {
       const j = el("div", "perm-json");
       const pre = el("pre");
@@ -1748,10 +1761,21 @@
     if (m.limits) state.limits = m.limits;
     taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     updateStatusbar();
-    // turn separator + readable elapsed time (cost/token counts intentionally dropped)
+    // turn separator + footer: elapsed time · tokens generated this turn · cost
     appendNode(el("hr", "turn-divider"));
-    if (m.durationMs != null)
-      appendNode(el("div", "sys-note turn-footer", formatDuration(m.durationMs)));
+    const parts = [];
+    if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
+    if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
+    if (m.costUsd) parts.push(formatCost(m.costUsd));
+    if (parts.length)
+      appendNode(el("div", "sys-note turn-footer", parts.join(" · ")));
+  }
+
+  // USD → compact label: $0.012 (sub-dollar → 3 decimals), $1.23 (≥ $1 → 2), <$0.001 for tiny
+  function formatCost(usd) {
+    const n = Number(usd) || 0;
+    if (n > 0 && n < 0.001) return "<$0.001";
+    return "$" + n.toFixed(n < 1 ? 3 : 2);
   }
 
   // ms → human-readable elapsed, e.g. 9300 → "9s", 130000 → "2m 10s", 3725000 → "1h 2m"
@@ -2395,17 +2419,31 @@
     // optionally match another element's width (e.g. size the popover to the card)
     if (opts.matchWidthEl) contentEl.style.width = opts.matchWidthEl.getBoundingClientRect().width + "px";
     if (anchor) anchor.setAttribute("aria-expanded", "true");
-    const reposition = () => positionPopover(anchor, contentEl, opts.align || "start", opts.side || "bottom", opts.hAnchorEl);
+    const reposition = () => positionPopover(anchor, contentEl, opts);
     reposition();
     openOverlay = { el: contentEl, anchor, reposition };
   }
 
-  function positionPopover(anchor, popEl, align, side, hAnchor) {
+  function positionPopover(anchor, popEl, opts) {
+    const align = opts.align || "start";
+    const side = opts.side || "bottom";
+    const hAnchor = opts.hAnchorEl;
     const margin = 6;
     const ar = anchor.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    // grow: let the popover use the available space in its preferred direction (up to the
+    // window edge), so a tall menu fills the room above/below the anchor instead of being
+    // pinned to the static CSS cap. Set BEFORE measuring so the height reflects the cap.
+    if (opts.grow) {
+      const spaceAbove = ar.top - margin * 2;
+      const spaceBelow = vh - ar.bottom - margin * 2;
+      const avail = side === "top"
+        ? (spaceAbove >= 160 ? spaceAbove : spaceBelow)
+        : (spaceBelow >= 160 ? spaceBelow : spaceAbove);
+      popEl.style.maxHeight = Math.max(160, Math.min(avail, vh - margin * 2)) + "px";
+    }
     const hr = (hAnchor || anchor).getBoundingClientRect(); // horizontal anchor (may differ, e.g. the card)
     const pr = popEl.getBoundingClientRect();
-    const vw = window.innerWidth, vh = window.innerHeight;
     let top, left;
     // vertical: prefer below, flip above if not enough room
     if (side === "top") {
@@ -2889,7 +2927,7 @@
       slashAutoEl.appendChild(b);
     });
     slashAutocompleteOpen = true;
-    positionPopover($("btn-slash"), slashAutoEl, "start", "top");
+    positionPopover($("btn-slash"), slashAutoEl, { align: "start", side: "top" });
   }
 
   function closeSlashAutocomplete() {
@@ -3001,7 +3039,7 @@
       atAutoEl.appendChild(b);
     });
     atAutoOpen = true;
-    positionPopover(composer, atAutoEl, "start", "top");
+    positionPopover(composer, atAutoEl, { align: "start", side: "top" });
   }
 
   function closeAtAutocomplete() {
@@ -3142,13 +3180,15 @@
       const row = el("div", "toggle-row" + (state[stateKey] ? " on" : ""));
       row.appendChild(el("span", "label", label));
       row.appendChild(el("span", "toggle-switch"));
-      row.addEventListener("click", () => {
+      wrap.appendChild(row);
+      wrap.appendChild(el("div", "mm-hint", hint));
+      // the WHOLE sub-toggle block (label, switch AND its hint) toggles, not just the switch
+      wrap.addEventListener("click", (e) => {
+        e.stopPropagation(); // don't bubble to the mode radio it's nested inside
         state[stateKey] = !state[stateKey];
         row.classList.toggle("on", state[stateKey]);
         post(msgType, { enabled: state[stateKey] });
       });
-      wrap.appendChild(row);
-      wrap.appendChild(el("div", "mm-hint", hint));
       return wrap;
     }
     // mode → its nested sub-toggle element (modes without one stay bare)
@@ -3160,15 +3200,21 @@
     };
 
     const perms = [
-      ["ask", "Ask before edits"],
-      ["acceptEdits", "Auto-accept edits"],
-      ["plan", "Plan"],
-      ["bypass", "Bypass"],
+      ["ask", "Ask before edits", "Claude asks for your approval before each file edit and command."],
+      ["acceptEdits", "Auto-accept edits", "File edits apply automatically; commands and questions still ask."],
+      ["plan", "Plan", "Claude only researches and proposes a plan — no edits or commands until you approve it."],
+      ["bypass", "Bypass", "Everything runs without asking. Use only in a trusted workspace."],
     ];
-    perms.forEach(([mode, label]) => {
+    perms.forEach(([mode, label, desc]) => {
       const row = el("div", "radio-row" + (state.permissionMode === mode ? " selected" : ""));
       row.appendChild(el("span", "radio-dot"));
-      row.appendChild(el("span", null, label));
+      const text = el("div", "radio-text");
+      text.appendChild(el("span", "radio-label", label));
+      text.appendChild(el("div", "mm-hint", desc));
+      // nest the mode's sub-toggle INSIDE its text column so it reads as a child of the
+      // mode (indented under the label, shown only while that mode is selected)
+      if (subToggles[mode]) text.appendChild(subToggles[mode]);
+      row.appendChild(text);
       row.addEventListener("click", () => {
         state.permissionMode = mode;
         s4.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("selected"));
@@ -3178,7 +3224,6 @@
         syncSubToggles();
       });
       s4.appendChild(row);
-      if (subToggles[mode]) s4.appendChild(subToggles[mode]); // nested directly under its mode
     });
 
     // show only the selected mode's sub-toggle
@@ -3190,7 +3235,7 @@
 
     pop.appendChild(s4);
 
-    openPopover(this, pop, { align: "end", side: "top" });
+    openPopover(this, pop, { align: "end", side: "top", grow: true });
   });
 
   // -------------------------------------------------------------------------
@@ -3456,7 +3501,7 @@
         sendIn("status", { state: "working", text: "Compacting context…" }, 0);
         sendIn("system.note", { id: nid("n"), text: "Context compacted · " + formatNum(pre) + " → " + formatNum(post) + " tokens" }, 1400);
         sendIn("usage.update", { contextTokens: post }, 1450);
-        sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.198, tokens: { input: 0, output: 0, total: 0 }, contextTokens: post, durationMs: 1500, limits: state.limits }, 1500);
+        sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.198, tokens: { input: 0, output: 0, total: 0 }, turnOutputTokens: 0, contextTokens: post, durationMs: 1500, limits: state.limits }, 1500);
         sendIn("status", { state: "ready" }, 1550);
         return;
       }
@@ -3467,7 +3512,7 @@
       sendIn("assistant.start", { id }, 150);
       sendIn("assistant.delta", { id, text: "Result of `" + command + "` (mock): command executed." }, 220);
       sendIn("assistant.end", { id }, 300);
-      sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.001, tokens: { input: 40, output: 12, total: state.tokens + 52 }, contextTokens: state.contextTokens + 52, durationMs: 800, limits: state.limits }, 360);
+      sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.001, tokens: { input: 40, output: 12, total: state.tokens + 52 }, turnOutputTokens: 12, contextTokens: state.contextTokens + 52, durationMs: 800, limits: state.limits }, 360);
       sendIn("status", { state: "ready" }, 400);
     }
 
@@ -3647,6 +3692,7 @@
           sessionId: state.sessionId,
           costUsd: 0.0123,
           tokens: { input: 1200, output: 340, total: 1540 },
+          turnOutputTokens: 340,
           contextTokens: 26540, // ≈ 13% of the 200k window
           durationMs: 4200,
           limits: mockLimits(15, 35),
