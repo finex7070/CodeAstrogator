@@ -514,6 +514,7 @@
       case "mode.update": return applyModeUpdate(m);
       case "question.request": return questionRequest(m);
       case "turn.result": return turnResult(m);
+      case "agent.result": return agentResult(m);
       case "usage.update": return usageUpdate(m);
       case "system.note": return systemNote(m);
       case "thinking.start": return thinkingStart(m.id);
@@ -1518,6 +1519,18 @@
       : status === "expired" ? "expired" : "";
   }
 
+  // "approved" is the transient executing state (the edit/command was allowed and is now running,
+  // before the "applied"/"failed" result). Show a spinner at the far right of the card head during
+  // it — like the running tool cards — and drop it once the result arrives.
+  function setPermSpinner(card, on) {
+    if (!card) return;
+    const head = card.querySelector(".perm-head");
+    if (!head) return;
+    const sp = head.querySelector(".perm-spinner");
+    if (on && !sp) head.appendChild(el("span", "spinner perm-spinner"));
+    else if (!on && sp) sp.remove();
+  }
+
   function setPermCardState(requestId, status) {
     const card = transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(requestId) + '"]');
     if (!card || card.classList.contains("decided")) return null;
@@ -1525,6 +1538,7 @@
     card.classList.remove("expanded"); // collapse the diff + hide the buttons
     const st = card.querySelector(".perm-status");
     if (st) st.textContent = permLabel(status);
+    setPermSpinner(card, status === "approved"); // spinner while the approved action executes
     return card;
   }
 
@@ -1547,6 +1561,7 @@
     card.classList.add("decided", m.status, permStatusClass(m.status));
     const st = card.querySelector(".perm-status");
     if (st) st.textContent = permLabel(m.status);
+    setPermSpinner(card, false); // execution finished → drop the spinner
   }
 
   // host→web mode.update: the permission/plan mode changed host-side (e.g. approving an
@@ -1769,6 +1784,22 @@
     if (m.costUsd) parts.push(formatCost(m.costUsd));
     if (parts.length)
       appendNode(el("div", "sys-note turn-footer", parts.join(" · ")));
+  }
+
+  // A subagent (Task tool) finished: its own time · tokens · cost, shown as a subordinate
+  // "Agent" footer (accent rail, no turn divider) so it reads as work nested inside the turn
+  // rather than a second turn end. The turn's own footer (turnResult) still marks the real end,
+  // and its totals include this subagent's usage.
+  function agentResult(m) {
+    const parts = [];
+    if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
+    if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
+    if (m.costUsd) parts.push(formatCost(m.costUsd));
+    if (!parts.length) return;
+    const row = el("div", "sys-note agent-footer");
+    row.appendChild(el("span", "agent-footer-label", m.isError ? "Agent failed" : "Agent finished"));
+    row.appendChild(el("span", "agent-footer-meta", parts.join(" · ")));
+    appendNode(row);
   }
 
   // USD → compact label: $0.012 (sub-dollar → 3 decimals), $1.23 (≥ $1 → 2), <$0.001 for tiny
@@ -2294,13 +2325,10 @@
     }
   });
 
-  // Ctrl+Esc toggles composer focus (global)
+  // Escape closes any open overlay/popover. (There used to be a Ctrl+Esc "toggle composer
+  // focus" shortcut, but Ctrl+Esc is reserved by Windows for the Start menu, so it was removed.)
   document.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.key === "Escape") {
-      e.preventDefault();
-      if (document.activeElement === input) input.blur();
-      else input.focus();
-    } else if (e.key === "Escape") {
+    if (e.key === "Escape") {
       closeAllOverlays();
     }
   });
@@ -3687,6 +3715,14 @@
       sched(() => { if (stopped) return; handle({ type: "assistant.end", id: aId2 }); }, delay + 60);
       sched(() => {
         if (stopped) return;
+        // a subagent finished mid-turn → subordinate agent footer (subset of the turn total)
+        handle({
+          type: "agent.result",
+          parentToolUseId: "toolu_mock_agent",
+          costUsd: 0.0071,
+          turnOutputTokens: 190,
+          durationMs: 2600,
+        });
         handle({
           type: "turn.result",
           sessionId: state.sessionId,

@@ -276,6 +276,7 @@ namespace CodeAstrogator.Core
                 ContextInputTokens = _lastContextInput,
                 ContextOutputTokens = _lastContextOutput,
                 ResultText = obj.Value<string>("result"),
+                ParentToolUseId = obj.Value<string>("parent_tool_use_id"),
             });
         }
 

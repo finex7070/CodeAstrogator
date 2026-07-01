@@ -296,6 +296,17 @@ compact_boundary evaluation) — details in the respective sections below.
   charge — gating it to API-key / over-limit would be easy to add later (auth proxy:
   `ClaudeUsageClient.ReadPlanLabel`/`oauthAccount`; over-limit has no clean signal today,
   only session/weekly % from `/usage`).
+- **Subagent (Task tool) results (0.5.3):** the CLI emits a `result` event per subagent, tagged
+  with **`parent_tool_use_id`** (in addition to the main turn's final `result`, which has none).
+  Previously each `result` rendered an identical turn footer, so a prompt that ran a subagent
+  showed **two** `time · tok · $` footers (the subagent's, then the turn total that includes it) —
+  which read as a confusing duplicate. Now `NdjsonParser` fills `TurnResultEvent.ParentToolUseId`;
+  the bridge routes a tagged result to a distinct **`agent.result`** message (no turn-end
+  bookkeeping — no context-size/session-id update, no `/usage` refresh) and `app.js` `agentResult`
+  renders a subordinate **`.agent-footer`** ("Agent finished · …", accent rail, no turn divider)
+  instead of a second `turn-footer`. The main result still renders the real turn footer, whose
+  totals already include the subagent. **Protocol-dependent — re-verify `parent_tool_use_id` on
+  subagent `result` events when the CLI updates.**
 
 ## `+` menu & @-mentions (2026-06-03)
 - *Add file…* → file picker (`attach.files` → `attach.added` chips).
@@ -414,10 +425,13 @@ compact_boundary evaluation) — details in the respective sections below.
   `Current session: N%` → S meter, `Current week (all models): N%` → W meter (the per-model
   lines like "(Sonnet only)" are ignored); `resets <Mon> <Day>, <h>pm` → reset tooltip
   (as local wall-clock time, year from "now" incl. year-boundary rollover). Fetched on `ready`
-  (window open), after each turn end, **and periodically every 5 min while idle** (v0.4.1:
-  `WebViewBridge._usageTimer`, `System.Threading.Timer`, `UsageRefreshIntervalMs`; the tick skips
-  when `_session.IsBusy` — a running turn refreshes on its own end — and is disposed with the
-  bridge; `RefreshUsage` is thread-agnostic, `Post` is teardown-guarded). Errors (API-key mode
+  (window open), after each turn end, **and periodically every minute** (v0.4.1:
+  `WebViewBridge._usageTimer`, `System.Threading.Timer`, `UsageRefreshIntervalMs`; disposed with the
+  bridge; `RefreshUsage` is thread-agnostic, `Post` is teardown-guarded). **Since 0.5.3 the tick fires
+  even while a turn is running** (previously it skipped on `_session.IsBusy`, so a long turn showed
+  stale limits the whole time) — the `/usage` fetch is its own short-lived `claude -p /usage` process,
+  independent of the turn's process, and an `_usageRefreshInFlight` reentrancy guard (Interlocked)
+  ensures the once-a-minute timer never stacks two fetches. Errors (API-key mode
   without limits, offline, 30 s timeout) → meters stay put. Plan badge still from
   `~/.claude.json` → `oauthAccount.organizationType`
   (claude_team → "Team Plan" …). Note: the report wording is undocumented — on a
@@ -691,12 +705,15 @@ compact_boundary evaluation) — details in the respective sections below.
 - **Two commands in the code-editor right-click menu** (`.vsct`: own group `EditorCtxGroup` in
   `IDM_VS_CTXT_CODEWIN`; buttons `cmdidAddFileToPrompt` 0x0101, `cmdidAddSelectionToPrompt` 0x0102 —
   both `DynamicVisibility`+`DefaultInvisible`):
-  - **"Add file to Claude prompt"** → active file as an @-reference chip (`bridge.AddFileAttachments`).
+  - **"Add file to prompt"** → active file as an @-reference chip (`bridge.AddFileAttachments`).
     `BeforeQueryStatus` shows it when `ActiveDocument != null`.
-  - **"Add selection to Claude prompt"** → the selected range as a code block (label `name:Lfrom-Lto`)
-    into the composer (`bridge.AddSelectionToPrompt` → host→web **`composer.append {text}`** →
-    `appendToComposer` appends, focuses, caret to the end). `BeforeQueryStatus` only on a non-empty
-    selection (`TextSelection.IsEmpty`).
+  - **"Add selection to prompt"** → the selected range as an @-reference **attachment chip**
+    (label `name:from-to`, path carries a `#L<from>[-<to>]` suffix), exactly like the active-file
+    selection chip (`bridge.AddSelectionToPrompt` → host→web **`attach.added`** → existing chip flow).
+    The CLI reads the referenced lines itself when the turn is sent; the prompt.send handler splits the
+    `#L` suffix back off the path (`SplitLineSuffix`) so it lands outside the quotes of a spaced path.
+    `BeforeQueryStatus` only on a non-empty selection (`TextSelection.IsEmpty`). *(Was a fenced code
+    block appended via `composer.append` before 2026-07-01.)*
 - **Handler** (`CodeAstrogatorPackage`): `OleMenuCommand` with `BeforeQueryStatus`; opens the
   tool window via `ShowAndGetBridgeAsync` and fetches the bridge via
   `ClaudeChatWindow.GetBridgeAsync()` → `ClaudeChatWindowControl.BridgeReady` (TCS, set as soon as the
@@ -879,6 +896,10 @@ is a **preview before the allow** — the CLI writes only on "Accept" (possibly 
   **Approved/Rejected** (decision) → after execution **Applied (green) / Failed (red)**, as soon as
   the edit's `tool.result` arrives (`UpgradePermissionResult` correlates via the
   `tool_use_id` = `requestId`; new host→web message **`permission.result {requestId, status}`**).
+  **While "Approved" (the transient executing state, before applied/failed) a spinner shows at the
+  far right of the card head** (`setPermSpinner`, `.perm-spinner` reusing `.spinner`; added in
+  `setPermCardState` when status==="approved", removed in `applyPermissionResult`) — same running
+  affordance as the Bash/tool cards. Covers chat-approve, edit-review finalize and auto-approved.
   - **No double card (the permission card REPLACES the tool card):** The CLI sends the `tool_use`
     **before** the permission prompt, so the tool card is shown first. On `permission.request`
     the UI removes the tool card of the same `tool_use_id` (`querySelector('.tool-card[data-tool-id]')`
@@ -1157,6 +1178,12 @@ then spike 0-B, then phases 2/3 with intermediate verification.
 - **Menu command + tool-window tab:** a shared **ImageMoniker** instead of two mechanisms.
   `Resources\CodeAstrogator.imagemanifest` defines Guid `854bf90d-…07c7` / ID `1` (`AstrogatorLogo`)
   with 16/20/24/32 sources via **pack URI** (`/CodeAstrogator;component/Resources/icon-NN.png`).
+  - **`AllowColorInversion="false"` on the `<Image>` (0.5.3, important!):** VS defaults this to *true* and
+    applies dark-theme colour inversion/adaptation to moniker images. On this full-colour logo that
+    washed the blue suit out to a muddy green in the menu/command icons (looked "off" vs the raw PNG;
+    a cache refresh did **not** help because it's a render-time transform, and it hit *every* use of
+    the moniker — menus, the View→Other Windows entry, the tool-window tab). `false` = render as
+    authored. Set this on any new full-colour moniker.
   - `.vsct`: `guidCodeAstrogatorIcons` symbol + `<Icon guid="guidCodeAstrogatorIcons" id="AstrogatorLogo"/>` +
     `<CommandFlag>IconIsMoniker</CommandFlag>` on the show-window button.
   - `ClaudeChatWindow`: `BitmapImageMoniker = new ImageMoniker { Guid = …07c7, Id = 1 }`.

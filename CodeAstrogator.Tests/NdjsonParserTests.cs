@@ -147,6 +147,23 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void Result_CarriesParentToolUseId_ForSubagentResults()
+        {
+            var parser = new NdjsonParser();
+            // a subagent (Task tool) result is tagged with parent_tool_use_id …
+            var sub = parser.ParseLine("{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"s\"," +
+                "\"num_turns\":1,\"parent_tool_use_id\":\"toolu_abc\",\"total_cost_usd\":0.5," +
+                "\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}").OfType<TurnResultEvent>().Single();
+            Assert.Equal("toolu_abc", sub.ParentToolUseId);
+
+            // … while the main turn result has none.
+            var main = parser.ParseLine("{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"s\"," +
+                "\"num_turns\":1,\"total_cost_usd\":1.0,\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}")
+                .OfType<TurnResultEvent>().Single();
+            Assert.Null(main.ParentToolUseId);
+        }
+
+        [Fact]
         public void DeltaWithoutContentBlockStart_StillEmitsAssistantStart()
         {
             var parser = new NdjsonParser();

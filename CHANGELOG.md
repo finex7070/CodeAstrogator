@@ -4,6 +4,21 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.3] – 2026-07-01
+
+### Changed
+- **Approved edits/commands now show a spinner while they run.** After you approve a permission prompt, the card shows "✓ Approved" until the action finishes, then flips to "✓ Applied". During that gap the action is actually executing, but nothing indicated it was still working. A small spinner now appears at the far right of the card while it runs (matching the Bash/command tool cards) and disappears once the result ("Applied"/"Failed") arrives.
+- **The composer placeholder now hints at Shift+Enter, and the Ctrl+Esc shortcut was removed.** The empty message box used to read *"ctrl esc to focus or unfocus Claude"* — but Windows reserves Ctrl+Esc for the Start menu, so that shortcut couldn't work anyway. The placeholder now reads **"Chart a course for Claude…  ·  Shift+Enter for a new line"**, and the (non-functional) Ctrl+Esc focus toggle has been dropped.
+- **"Add selection to prompt" now adds a compact attachment chip instead of pasting a code block.** Right-clicking an editor selection and choosing *Add selection to prompt* used to dump a fenced code block (the file name, then the raw selected lines) straight into the composer text. It now adds a small `@`-reference chip labelled with the file name and line range (e.g. `CLAUDE.md:14-17`) to the composer's attachment strip — the same place and style as attached files and the active-file chip — leaving what you type untouched. Claude reads exactly those lines from the file when the turn is sent.
+- **The two editor right-click commands are now named "Add file to prompt" and "Add selection to prompt".** Dropped the redundant "Claude" from the labels (they already live under the Code Astrogator icon).
+- **A subagent's result is now shown as its own labelled line, not a confusing second turn footer.** When a prompt runs an extra agent (the Task tool), the CLI reports that agent's own time/tokens/cost separately from the turn total — so you'd see *two* `time · tokens · cost` footers stacked at the bottom, the second one looking like a duplicate turn end. The subagent's figures now render as a distinct, indented **"Agent finished · …"** line with an accent rail (no turn divider), making clear it's work nested inside the turn; the turn's own footer below it still shows the total (which already includes the subagent).
+- **The plan-limit meters now refresh every minute, including while a prompt is running.** The session/weekly usage meters in the status bar used to update only when the window opened, after each turn ended, and every 5 minutes while idle — so during a long-running turn they stayed frozen at their pre-turn values. They now refresh once a minute regardless of whether a turn is in flight (the `/usage` query is a separate lightweight process, so it doesn't interfere with the running turn), giving you a live view of how much of your limit a long turn is consuming.
+
+### Fixed
+- **The extension icon no longer looks washed-out/greenish in the menus.** The Code Astrogator icon (in the editor right-click menu, under View → Other Windows, and on the tool-window tab) rendered with a muddy green tint instead of its blue astronaut colours on dark themes. Visual Studio was applying its automatic dark-theme colour inversion to the icon; it's now marked to render exactly as authored.
+
+---
+
 ## [0.5.2] – 2026-06-30
 
 ### Added
