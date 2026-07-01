@@ -40,8 +40,9 @@ namespace CodeAstrogator.Bridge
         private bool _sessionStartAnnounced;  // "Session started" note, once per session (decision #9)
         private UsageSnapshot? _lastUsage;    // session/weekly plan utilization (from `claude -p /usage`)
         private string? _planLabel;           // "Team Plan" etc. from ~/.claude.json
-        private System.Threading.Timer? _usageTimer; // periodic idle refresh of the usage meters
-        private const int UsageRefreshIntervalMs = 5 * 60 * 1000; // every 5 min while idle
+        private System.Threading.Timer? _usageTimer; // periodic refresh of the usage meters
+        private int _usageRefreshInFlight;    // 0/1 reentrancy guard: never run two /usage fetches at once
+        private const int UsageRefreshIntervalMs = 60 * 1000; // every minute (also while a turn runs)
         private JArray? _slashCommands;       // CLI-reported slash commands (system/init)
         private RemoteTerminalLauncher? _remoteTerminal; // interactive `claude --remote-control` session (VS terminal)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
@@ -112,17 +113,20 @@ namespace CodeAstrogator.Bridge
             VSColorTheme.ThemeChanged += OnVsThemeChanged;
             _package.OptionsChanged += OnOptionsChanged;
 
-            // Keep the usage meters fresh while the window sits idle: the meters are otherwise
-            // only updated on window open (ready) and after each turn. First tick after one
-            // interval (the ready handler does the on-open fetch). The timer fires on a thread-pool
-            // thread; RefreshUsage is thread-agnostic and Post() is guarded against teardown.
+            // Keep the usage meters fresh with a once-a-minute refresh — including while a turn is
+            // running, since the meters are otherwise only updated on window open (ready) and at turn
+            // end, so a long turn would show stale limits the whole time. The /usage fetch is its own
+            // short-lived `claude -p /usage` process (see RefreshUsage), independent of the turn's
+            // process, and a reentrancy guard prevents overlap. First tick after one interval (the
+            // ready handler does the on-open fetch). The timer fires on a thread-pool thread;
+            // RefreshUsage is thread-agnostic and Post() is guarded against teardown.
             _usageTimer = new System.Threading.Timer(OnUsageTimerTick, null, UsageRefreshIntervalMs, UsageRefreshIntervalMs);
         }
 
         private void OnUsageTimerTick(object state)
         {
-            if (_disposed || _session.IsBusy)
-                return; // a turn is running → RefreshUsage runs on turn end anyway; don't pile on
+            if (_disposed)
+                return;
             RefreshUsage();
         }
 
@@ -357,7 +361,10 @@ namespace CodeAstrogator.Bridge
                     var path = a is JObject o ? o.Value<string>("path") ?? o.Value<string>("name") : a.Value<string>();
                     if (string.IsNullOrEmpty(path))
                         continue;
-                    references.Add((path!, ""));
+                    // A selection chip carries its line range as a `#L<start>[-<end>]` suffix on the
+                    // path; split it back out so it stays outside the quotes of a spaced path.
+                    var (refPath, refSuffix) = SplitLineSuffix(path!);
+                    references.Add((refPath, refSuffix));
                     var name = (a as JObject)?.Value<string>("name");
                     display.Add(new JObject
                     {
@@ -1384,7 +1391,7 @@ namespace CodeAstrogator.Bridge
 
             return
                 "**Code Astrogator — Help**\n\n" +
-                "- **Enter** sends, **Shift+Enter** inserts a newline, **Ctrl+Esc** focuses/unfocuses the composer.\n" +
+                "- **Enter** sends, **Shift+Enter** inserts a newline.\n" +
                 "- **@** mentions workspace files and folders; the **+** menu attaches files; **Ctrl+V** pastes copied files/images as attachments.\n" +
                 "- The **Model · Mode** button picks model, effort, permission mode and Ultracode; the gear sets appearance and verbosity.\n" +
                 "- The **/** menu lists the slash commands the CLI supports in this panel (reported by the CLI itself).\n" +
@@ -1437,21 +1444,41 @@ namespace CodeAstrogator.Bridge
         }
 
         /// <summary>
-        /// Appends an editor selection to the composer as a fenced code block labelled with the
-        /// file name + line range (from the editor right-click "Add selection to Claude prompt").
-        /// Queued until the WebUI is ready so it survives the tool window just having opened.
+        /// Adds an editor selection to the composer as an @-reference attachment chip labelled
+        /// with the file name + line range (from the editor right-click "Add selection to Claude
+        /// prompt"). The chip carries the range as a <c>#L&lt;start&gt;[-&lt;end&gt;]</c> suffix on
+        /// its path; the CLI reads those lines itself when the turn is sent — same mechanism as the
+        /// active-file selection chip. Queued until the WebUI is ready so it survives the tool
+        /// window just having opened.
         /// </summary>
-        public void AddSelectionToPrompt(string? path, int startLine, int endLine, string text)
+        public void AddSelectionToPrompt(string? path, int startLine, int endLine)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (RemoteSessionActive || string.IsNullOrEmpty(text))
-                return; // composer locked during remote control / nothing selected
+            if (RemoteSessionActive)
+                return; // composer (and attachments) are locked during remote control
 
             var name = string.IsNullOrEmpty(path) ? "selection" : System.IO.Path.GetFileName(path);
-            var label = endLine > startLine ? $"{name}:{startLine}-{endLine}" : $"{name}:{startLine}";
-            var body = text.Replace("\r\n", "\n").TrimEnd('\n');
-            var block = "`" + label + "`\n```\n" + body + "\n```";
-            PostOrQueue(new JObject { ["type"] = "composer.append", ["text"] = block });
+            var range = endLine > startLine ? $"{startLine}-{endLine}" : $"{startLine}";
+            var chipName = $"{name}:{range}";
+            var chipPath = string.IsNullOrEmpty(path) ? chipName : path + "#L" + range;
+            PostOrQueue(new JObject
+            {
+                ["type"] = "attach.added",
+                ["attachments"] = new JArray { new JObject { ["name"] = chipName, ["path"] = chipPath } },
+            });
+        }
+
+        /// <summary>
+        /// Splits a trailing <c>#L&lt;start&gt;[-&lt;end&gt;]</c> line suffix (added by the editor
+        /// "Add selection to Claude prompt" chip) off a path, so it can be emitted outside the
+        /// quotes of a spaced path. Paths without such a suffix are returned unchanged.
+        /// </summary>
+        private static (string path, string suffix) SplitLineSuffix(string path)
+        {
+            var i = path.LastIndexOf("#L", StringComparison.Ordinal);
+            if (i > 0 && i + 2 < path.Length && char.IsDigit(path[i + 2]))
+                return (path.Substring(0, i), path.Substring(i));
+            return (path, "");
         }
 
         /// <summary>
@@ -1753,6 +1780,23 @@ namespace CodeAstrogator.Bridge
                     UpgradePermissionResult(result.ToolUseId, result.IsError); // approved card → applied/failed
                     break;
 
+                case TurnResultEvent turn when !string.IsNullOrEmpty(turn.ParentToolUseId):
+                    // A subagent (Task tool) finished — the CLI emits its own `result` tagged with
+                    // parent_tool_use_id. This is NOT the turn's end: render it as a subordinate
+                    // agent footer (its own time/tokens/cost, a subset of the turn total) instead of
+                    // a second turn footer, and skip all turn-end bookkeeping (context size, session
+                    // id, /usage refresh — those belong to the main result that follows).
+                    Post(new JObject
+                    {
+                        ["type"] = "agent.result",
+                        ["parentToolUseId"] = turn.ParentToolUseId,
+                        ["costUsd"] = turn.CostUsd,
+                        ["durationMs"] = turn.DurationMs,
+                        ["turnOutputTokens"] = turn.OutputTokens,
+                        ["isError"] = turn.IsError,
+                    });
+                    break;
+
                 case TurnResultEvent turn:
                     _history.Current.UpdatedAtUtc = DateTime.UtcNow;
                     if (turn.NumTurns > 0 && !string.IsNullOrEmpty(turn.SessionId))
@@ -1875,9 +1919,17 @@ namespace CodeAstrogator.Bridge
         /// </summary>
         private void RefreshUsage()
         {
+            // Reentrancy guard: the once-a-minute timer must never stack a second /usage
+            // process on top of one that is still running (e.g. a slow/30s-timeout fetch).
+            if (System.Threading.Interlocked.CompareExchange(ref _usageRefreshInFlight, 1, 0) != 0)
+                return;
             // Thread-agnostic: the async body switches to the UI thread to read options,
             // then off it to run the CLI. Callers may be on the UI or a background thread.
-            _package.JoinableTaskFactory.RunAsync(RefreshUsageAsync).Task.Forget();
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try { await RefreshUsageAsync(); }
+                finally { System.Threading.Interlocked.Exchange(ref _usageRefreshInFlight, 0); }
+            }).Task.Forget();
         }
 
         private async System.Threading.Tasks.Task RefreshUsageAsync()

@@ -684,6 +684,8 @@ button:focus { outline: none; }
 /* result badge + re-expand chevron in the head */
 .perm-status { margin-left: auto; font-size: 11px; font-weight: 600; font-family: var(--font-ui); white-space: nowrap; }
 .perm-card.approved .perm-status { color: var(--ok); }
+/* spinner shown while an approved edit/command executes (approved → applied/failed) */
+.perm-spinner { flex: 0 0 auto; width: 12px; height: 12px; }
 .perm-card.rejected .perm-status { color: var(--error); }
 .perm-card.expired .perm-status { color: var(--warn); }
 .perm-chevron { display: none; color: var(--text-faint); font-size: 10px; transition: transform 120ms; }
@@ -1226,6 +1228,18 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   user-select: text;
 }
 .turn-footer { padding-top: 2px; padding-bottom: 8px; }
+/* subagent (Task tool) result — a subordinate footer nested inside the turn, set off with an
+   accent rail so it doesn't read as a second turn end. No preceding turn-divider. */
+.agent-footer {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-left: 22px;
+  padding: 2px 0 6px 8px;
+  border-left: 2px solid var(--accent);
+}
+.agent-footer-label { color: var(--accent); font-weight: 600; }
+.agent-footer-meta { color: var(--text-faint); }
 /* turn separator — thin horizontal rule between turns */
 .turn-divider {
   border: 0;

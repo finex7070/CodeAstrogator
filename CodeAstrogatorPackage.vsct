@@ -30,7 +30,7 @@
         <CommandFlag>DynamicVisibility</CommandFlag>
         <CommandFlag>DefaultInvisible</CommandFlag>
         <Strings>
-          <ButtonText>Add file to Claude prompt</ButtonText>
+          <ButtonText>Add file to prompt</ButtonText>
         </Strings>
       </Button>
 
@@ -42,7 +42,7 @@
         <CommandFlag>DynamicVisibility</CommandFlag>
         <CommandFlag>DefaultInvisible</CommandFlag>
         <Strings>
-          <ButtonText>Add selection to Claude prompt</ButtonText>
+          <ButtonText>Add selection to prompt</ButtonText>
         </Strings>
       </Button>
     </Buttons>

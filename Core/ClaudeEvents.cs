@@ -119,6 +119,11 @@ namespace CodeAstrogator.Core
         public long ContextInputTokens { get; set; }
         public long ContextOutputTokens { get; set; }
         public string? ResultText { get; set; }
+
+        /// <summary>Set when this result belongs to a subagent (Task tool) rather than the main
+        /// turn — the CLI tags subagent results with <c>parent_tool_use_id</c>. Such results are
+        /// rendered as a subordinate agent footer, not as a (duplicate-looking) turn end.</summary>
+        public string? ParentToolUseId { get; set; }
     }
 
     /// <summary>The CLI is retrying an API call (informational).</summary>
