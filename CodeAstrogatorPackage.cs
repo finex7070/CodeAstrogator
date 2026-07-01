@@ -130,7 +130,7 @@ namespace CodeAstrogator
                     bottom--;
                 var path = doc.FullName;
                 var bridge = await ShowAndGetBridgeAsync();
-                bridge?.AddSelectionToPrompt(path, top, bottom < top ? top : bottom, text);
+                bridge?.AddSelectionToPrompt(path, top, bottom < top ? top : bottom);
             }).Task.Forget();
         }
 

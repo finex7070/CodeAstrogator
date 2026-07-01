@@ -5,7 +5,11 @@
     <ID Name="AstrogatorLogo" Value="1" />
   </Symbols>
   <Images>
-    <Image Guid="$(CodeAstrogatorIcons)" ID="$(AstrogatorLogo)">
+    <!-- AllowColorInversion="false": this is a full-colour logo, not a themeable monochrome glyph.
+         Without it VS applies its dark-theme colour inversion/adaptation, which washes the blue
+         suit out to a muddy green on dark themes (the menu/command icons looked "off" vs the raw
+         PNG). false = render the icon exactly as authored. -->
+    <Image Guid="$(CodeAstrogatorIcons)" ID="$(AstrogatorLogo)" AllowColorInversion="false">
       <Source Uri="/CodeAstrogator;component/Resources/icon-16.png"><Size Value="16" /></Source>
       <Source Uri="/CodeAstrogator;component/Resources/icon-20.png"><Size Value="20" /></Source>
       <Source Uri="/CodeAstrogator;component/Resources/icon-24.png"><Size Value="24" /></Source>

@@ -107,7 +107,7 @@ VSIX / AsyncPackage  (VSSDK, in-process)          ← Lifecycle, ToolWindow reg.
 1. **No** `localStorage`/`sessionStorage` and **no** network calls from the WebView. State lives in-memory; persistence exclusively via the host.
 2. **Theme-aware:** All colors via CSS variables. The host injects the resolved colors at startup and on every theme change via the `theme` message; the UI, however, ships complete **dark and light defaults** (see §6) so that it renders correctly even without a host (for isolated testing in the browser). Details on Dark/Light/Auto in §8.
 3. **Fully responsive & resizable:** The user can change the tool window in **width and height** at any time (dock, drag narrow, float, make very short). The layout adapts **fluidly and without layout breakage** — no fixed heights that break it. Binding rules in §7.
-4. **Keyboard first:** Enter = send, Shift+Enter = line break, `Ctrl+Esc` = focus in/out of composer (placeholder hints at it). All buttons focusable, visible focus ring.
+4. **Keyboard first:** Enter = send, Shift+Enter = line break (the placeholder hints at it). All buttons focusable, visible focus ring. *(A `Ctrl+Esc` focus-toggle was dropped — Windows reserves that chord for the Start menu.)*
 5. **Streaming-capable:** Assistant text is appended token by token via `assistant.delta`; the UI must not re-layout on every delta (append to the existing text node, auto-scroll only when the user is at the bottom edge).
 6. **Isolated testing:** When no host is present (`window.chrome?.webview` undefined), a **mock adapter** runs that simulates the host messages (empty state, one sample turn with streaming, a tool card and a permission/diff card). This way the UI is independently verifiable in the browser.
 7. **Theme mode:** Dark / Light / **Auto** (follows the IDE theme). The source of truth is the host (see §8); the UI always renders the theme resolved by the host and can change the mode via `theme.setMode`.
@@ -218,7 +218,7 @@ Popovers (`+`, `/`, `Model·Mode`) and the history panel open as **overlapping, 
 - **Auto-scroll:** only when the user is within ~40 px of the bottom edge; otherwise show a "Jump to latest" pill.
 
 ### 5.3 Composer
-- **Textarea:** multiline, auto-grow from 1 line up to max ~40 % of the panel height, then scroll internally. Placeholder: `ctrl esc to focus or unfocus Claude`.
+- **Textarea:** multiline, auto-grow from 1 line up to max ~40 % of the panel height, then scroll internally. Placeholder: `Chart a course for Claude…   ·   Shift+Enter for a new line`.
 - **Keyboard:** Enter = `prompt.send` (when not empty and not `working`/`waiting-permission`); Shift+Enter = line break.
 - **Attachments bar** (optional, above the textarea): chips for attached files/context with a remove X.
 - **No mic icon** (no voice input).
@@ -375,7 +375,7 @@ The tool window is freely resizable (width **and** height, docked or floating). 
 - [ ] Transcript renders user/assistant/tool/permission/error; streaming appends fluidly; the auto-scroll rule applies.
 - [ ] Code blocks with Copy + Insert button.
 - [ ] Permission/diff card with inline diff and Approve/Reject → correct `permission.decision`.
-- [ ] Composer multiline, auto-grow, Enter/Shift+Enter, Ctrl+Esc focus.
+- [ ] Composer multiline, auto-grow, Enter/Shift+Enter.
 - [ ] Toolbar order `+ / … Model·Mode  ⬆`; all popovers/menus work; Send↔Stop toggles.
 - [ ] Status bar shows status, session tokens, session % and weekly % (meters) + plan badge.
 - [ ] **Responsive:** does not break at any width/height; container breakpoints compact/normal/wide apply; textarea `max-height` scales with the panel height via `ResizeObserver`; popovers stay within the viewport.
