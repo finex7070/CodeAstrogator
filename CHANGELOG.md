@@ -4,6 +4,16 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.4] – 2026-07-02
+
+### Added
+- **The Fable 5 model is now selectable** in the Model · Mode picker (between Opus 4.7 and Sonnet 4.6). Picking it runs the session on `claude-fable-5`; the choice sticks across new chats and restarts like the other models.
+
+### Fixed
+- **The plan-limit meters no longer drop to 0% when a `/usage` report comes back incomplete.** The meters are fed by running the CLI's `/usage` command, but that command intermittently returns only its "What's contributing to your limits usage?" section and **omits the three `Current session` / `Current week` percentage lines** entirely (an async server-side fetch that quietly times out). Previously such a response could blank out or zero the meters until the next good fetch. Now each `/usage` result is merged into a **per-window last-known-good**: only the windows that actually came back overwrite the displayed value (a genuine "0% used" is still honoured — it's now distinguished from "not reported"), and a completely empty report leaves the meters untouched. A single quick retry is attempted when the whole block is missing. If a window keeps failing to report for more than 5 minutes the extension keeps showing its last value but **dims that meter** and notes in its tooltip when it was last updated (e.g. *"Session usage: 65% · resets 8pm · updated 14:32 (may be out of date)"*) instead of silently showing a stale or wrong number.
+
+---
+
 ## [0.5.3] – 2026-07-01
 
 ### Changed
