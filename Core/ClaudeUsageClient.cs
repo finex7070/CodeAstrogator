@@ -10,13 +10,24 @@ using Newtonsoft.Json.Linq;
 
 namespace CodeAstrogator.Core
 {
-    /// <summary>Session (5h) / weekly (7d) plan utilization as shown by the CLI's /usage.</summary>
+    /// <summary>
+    /// Session (5h) / weekly (7d) plan utilization as shown by the CLI's /usage.
+    /// The percentages are <b>nullable on purpose</b>: <c>/usage</c> sporadically omits the
+    /// whole "Current …" block (a server-side fetch that timed out) or an individual window,
+    /// so "not present" (null) must stay distinct from a genuine "0% used". Merge freshly
+    /// parsed values into the last-known-good with <see cref="ClaudeUsageClient.Merge"/> so a
+    /// partial report never clobbers a value we already have.
+    /// </summary>
     public sealed class UsageSnapshot
     {
-        public int SessionPct { get; set; }
-        public int WeeklyPct { get; set; }
+        public int? SessionPct { get; set; }
+        public int? WeeklyPct { get; set; }
         public DateTimeOffset? SessionResetsAt { get; set; }
         public DateTimeOffset? WeeklyResetsAt { get; set; }
+        /// <summary>When the session window was last successfully parsed (set by <see cref="ClaudeUsageClient.Merge"/>).</summary>
+        public DateTimeOffset? SessionFetchedAt { get; set; }
+        /// <summary>When the weekly window was last successfully parsed (set by <see cref="ClaudeUsageClient.Merge"/>).</summary>
+        public DateTimeOffset? WeeklyFetchedAt { get; set; }
     }
 
     /// <summary>
@@ -191,6 +202,45 @@ namespace CodeAstrogator.Core
             }
 
             return snapshot;
+        }
+
+        /// <summary>
+        /// Merges a freshly parsed snapshot into the last-known-good, <b>per window</b>. Because
+        /// <c>/usage</c> intermittently drops the whole percentage block (or a single window), a
+        /// fresh report with a missing field must never overwrite a value we already have. Only
+        /// windows present in <paramref name="fresh"/> (non-null percentage) are updated — together
+        /// with their reset time and a <paramref name="fetchedAt"/> stamp; absent windows keep their
+        /// prior value and stamp. Returns <paramref name="previous"/> unchanged when
+        /// <paramref name="fresh"/> is null (a total miss / process failure).
+        /// </summary>
+        public static UsageSnapshot? Merge(UsageSnapshot? previous, UsageSnapshot? fresh, DateTimeOffset fetchedAt)
+        {
+            if (fresh == null)
+                return previous;
+
+            var merged = new UsageSnapshot
+            {
+                SessionPct = previous?.SessionPct,
+                WeeklyPct = previous?.WeeklyPct,
+                SessionResetsAt = previous?.SessionResetsAt,
+                WeeklyResetsAt = previous?.WeeklyResetsAt,
+                SessionFetchedAt = previous?.SessionFetchedAt,
+                WeeklyFetchedAt = previous?.WeeklyFetchedAt,
+            };
+
+            if (fresh.SessionPct != null)
+            {
+                merged.SessionPct = fresh.SessionPct;
+                merged.SessionResetsAt = fresh.SessionResetsAt;
+                merged.SessionFetchedAt = fetchedAt;
+            }
+            if (fresh.WeeklyPct != null)
+            {
+                merged.WeeklyPct = fresh.WeeklyPct;
+                merged.WeeklyResetsAt = fresh.WeeklyResetsAt;
+                merged.WeeklyFetchedAt = fetchedAt;
+            }
+            return merged;
         }
 
         /// <summary>

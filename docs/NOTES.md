@@ -436,6 +436,24 @@ compact_boundary evaluation) — details in the respective sections below.
   `~/.claude.json` → `oauthAccount.organizationType`
   (claude_team → "Team Plan" …). Note: the report wording is undocumented — on a
   CLI update re-test the parser (regex in `ClaudeUsageClient.ParseUsageText`).
+- **`/usage` is unreliable → per-window last-known-good (2026-07-02).** Verified the CLI
+  sometimes returns only the "What's contributing" section and **drops all three `Current …`
+  percentage lines** (an async server fetch that silently times out), and `/usage` in `-p`
+  isn't even guaranteed to be treated as the slash command (it can run a real billed turn and
+  answer conversationally). So the consumer must never trust a single report. `UsageSnapshot`
+  percentages are now **nullable** (`int?`) — "not present" (null) is distinct from a genuine
+  "0% used" — and `ClaudeUsageClient.Merge(previous, fresh, fetchedAt)` folds each fresh report
+  into a **per-window last-known-good**: only windows present in `fresh` (non-null pct) overwrite
+  the cache (with their reset time + a fetch stamp); absent windows keep their prior value/stamp.
+  A fully-empty report (`fresh == null`) leaves the cache untouched. `RefreshUsageAsync` does one
+  **3 s retry** when the whole block is missing before falling back to the cache. Each window
+  carries a `SessionFetchedAt`/`WeeklyFetchedAt`; the host sends them (`sessionFetchedAt`/
+  `weeklyFetchedAt`, ISO) in `usage.update` + `session.init.limits`, and the UI dims a meter +
+  adds "updated HH:mm (may be out of date)" to its tooltip once its window is stale (> 5 min,
+  `USAGE_STALE_MS`). **The statusLine-hook approach was ruled out** for this VSIX — it never fires
+  for headless `-p` turns (see the memory note / `usage-polling-plan.md`); `/usage` stays the only
+  channel. Poll interval unchanged (1 min); reset times still parsed to a DateTimeOffset with
+  graceful fallback (not the raw-string approach the plan floated).
 
 ## Persistent CLI mode (Roadmap #2, 2026-06-04 — opt-in, default off)
 - **What:** Instead of one process per turn, a **long-lived** `claude -p --input-format stream-json
