@@ -16,14 +16,67 @@ namespace CodeAstrogator.Tests
 
         private static readonly DateTime Now = new DateTime(2026, 6, 10, 9, 0, 0, DateTimeKind.Local);
 
+        // Real "missing percentage block" shape — /usage sporadically drops all "Current …"
+        // lines and prints only the (local, approximate) contributing section. Screenshot case.
+        private const string NoPercentBlock =
+            "You are currently using your subscription to power your Claude Code usage\n" +
+            "\n" +
+            "What's contributing to your limits usage?\n" +
+            "Approximate, based on local sessions on this machine — does not include other devices or claude.ai.\n" +
+            "\n" +
+            "Last 24h · 43 requests · 7 sessions\n" +
+            "  35% of your usage was while 4+ sessions ran in parallel\n" +
+            "  Top MCP servers: vsbridge 64%";
+
         [Fact]
         public void ParseUsageText_ReadsBothWindows()
         {
             var snapshot = ClaudeUsageClient.ParseUsageText(SampleReport, Now);
 
             Assert.NotNull(snapshot);
-            Assert.Equal(8, snapshot!.SessionPct);
-            Assert.Equal(1, snapshot.WeeklyPct); // "all models", not the Sonnet-only 0%
+            Assert.Equal(8, snapshot!.SessionPct!.Value);
+            Assert.Equal(1, snapshot.WeeklyPct!.Value); // "all models", not the Sonnet-only 0%
+        }
+
+        [Fact]
+        public void ParseUsageText_MissingPercentBlock_ReturnsNull()
+        {
+            // No "Current …" lines at all → null (a total miss), so Merge keeps last-known-good.
+            Assert.Null(ClaudeUsageClient.ParseUsageText(NoPercentBlock, Now));
+        }
+
+        [Fact]
+        public void ParseUsageText_WeeklyMissing_LeavesWeeklyNull()
+        {
+            var report =
+                "Current session: 65% used · resets Jul 2, 8pm (Europe/Berlin)\n" +
+                "Current week (Fable): 2% used · resets Jul 8, 9pm (Europe/Berlin)"; // no "all models" line
+            var snapshot = ClaudeUsageClient.ParseUsageText(report, Now);
+
+            Assert.NotNull(snapshot);
+            Assert.Equal(65, snapshot!.SessionPct!.Value);
+            Assert.Null(snapshot.WeeklyPct); // per-model line is ignored; weekly stays "not present"
+        }
+
+        [Fact]
+        public void ParseUsageText_ZeroPercent_IsPresentNotNull()
+        {
+            var snapshot = ClaudeUsageClient.ParseUsageText("Current session: 0% used", Now);
+
+            Assert.NotNull(snapshot);
+            Assert.True(snapshot!.SessionPct.HasValue); // genuine 0% must not read as "missing"
+            Assert.Equal(0, snapshot.SessionPct!.Value);
+        }
+
+        [Fact]
+        public void ParseResetTime_ParsesMinutesVariant()
+        {
+            // The CLI renders the same reset as "9pm" or "8:59pm" between calls.
+            var reset = ClaudeUsageClient.ParseResetTime("· resets Jul 8, 8:59pm (Europe/Berlin)", Now);
+
+            Assert.NotNull(reset);
+            Assert.Equal(20, reset!.Value.Hour);
+            Assert.Equal(59, reset.Value.Minute);
         }
 
         [Fact]
@@ -52,7 +105,7 @@ namespace CodeAstrogator.Tests
         public void ParseUsageText_ClampsTo100()
         {
             var snapshot = ClaudeUsageClient.ParseUsageText("Current session: 142% used", Now);
-            Assert.Equal(100, snapshot!.SessionPct);
+            Assert.Equal(100, snapshot!.SessionPct!.Value);
         }
 
         [Fact]
@@ -65,7 +118,33 @@ namespace CodeAstrogator.Tests
             var snapshot = ClaudeUsageClient.ParseUsageResult(json, Now);
 
             Assert.NotNull(snapshot);
-            Assert.Equal(42, snapshot!.SessionPct);
+            Assert.Equal(42, snapshot!.SessionPct!.Value);
+        }
+
+        [Fact]
+        public void Merge_PartialReport_KeepsPreviousWindow()
+        {
+            var t0 = new DateTimeOffset(2026, 7, 2, 12, 0, 0, TimeSpan.Zero);
+            var t1 = new DateTimeOffset(2026, 7, 2, 12, 5, 0, TimeSpan.Zero);
+            var previous = ClaudeUsageClient.Merge(null,
+                new UsageSnapshot { SessionPct = 65, WeeklyPct = 7 }, t0);
+
+            // A later report that only carries the session window must not zero the weekly meter.
+            var merged = ClaudeUsageClient.Merge(previous,
+                new UsageSnapshot { SessionPct = 66 }, t1);
+
+            Assert.Equal(66, merged!.SessionPct!.Value);
+            Assert.Equal(7, merged.WeeklyPct!.Value);        // kept from the earlier good report
+            Assert.Equal(t1, merged.SessionFetchedAt);       // session refreshed
+            Assert.Equal(t0, merged.WeeklyFetchedAt);        // weekly stamp unchanged (stale)
+        }
+
+        [Fact]
+        public void Merge_NullFresh_ReturnsPreviousUnchanged()
+        {
+            var previous = new UsageSnapshot { SessionPct = 65, WeeklyPct = 7 };
+            var merged = ClaudeUsageClient.Merge(previous, null, DateTimeOffset.Now);
+            Assert.Same(previous, merged); // total miss / process failure never touches the cache
         }
 
         [Theory]

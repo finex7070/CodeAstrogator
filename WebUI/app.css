@@ -976,6 +976,8 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .status-meter.warn .meter-label { color: var(--warn); }
 .status-meter.crit .meter-fill { background: var(--error); }
 .status-meter.crit .meter-label { color: var(--error); }
+/* stale: /usage kept omitting this window; last-known value shown dimmed (tooltip explains) */
+.status-meter.stale { opacity: 0.5; }
 
 .plan-badge {
   display: inline-flex;
