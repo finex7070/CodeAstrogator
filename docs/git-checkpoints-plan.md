@@ -72,6 +72,11 @@ Arg-Quoting via `ClaudeCliProcessHost.Quote()` wiederverwenden. Öffentliche API
 Alle Aufrufe laufen auf Hintergrund-Thread; Git-Fehler werden gefangen und als Fehlertext
 zurückgegeben (Feature darf einen Turn nie crashen lassen).
 
+**Perf-Hinweis:** `EnsureInitializedAsync` + der **erste** `CommitAsync` können über einen großen
+Solution-Ordner mehrere Sekunden dauern (`git add -A` über den gesamten Worktree). Läuft auf
+Hintergrund-Thread; den Turn dadurch **nicht blockieren** — falls der Commit noch läuft, den Prompt
+trotzdem starten (Checkpoint ist best-effort). Folge-Commits sind schnell (nur Deltas).
+
 ### 2. Settings
 - `Options/AstrogatorOptions.cs`: neues `public bool CheckpointsEnabled { get; set; } = false;`
   (Muster wie `AutoAcceptCommands`).
@@ -82,52 +87,77 @@ zurückgegeben (Feature darf einen Turn nie crashen lassen).
   Wenn `!GitCheckpointService.IsGitAvailable()`: Checkbox deaktivieren + Hinweistext
   "Git nicht gefunden".
 - **NEU — Toggle im Zahnrad-Menü oben rechts:** Zusätzlich zum Advanced-Fenster ein
-  Schnell-Toggle direkt im Gear-Popover (Muster wie der bestehende Versions-/Ultracode-Eintrag
-  im Zahnrad-Popover, vgl. Release 0.5.1 „version in gear popover"). Klick schaltet
-  `CheckpointsEnabled` sofort um (persistiert via `AstrogatorSettingsStore`) und meldet den
-  neuen Stand an die UI (`session.init.checkpointsEnabled` bzw. ein dediziertes Update). Bei
-  fehlendem Git: Eintrag deaktiviert/ausgegraut mit Tooltip „Git nicht gefunden".
+  Schnell-Toggle direkt im Gear-Popover (`btn-settings` → `appearance-pop`, `WebUI/app.js:2824`).
+  **Achtung — es gibt dort noch KEIN Toggle-Item-Muster:** Das Gear-Popover zeigt die Version nur
+  als statisches Label (`appearance-version`), und der Ultracode-Toggle sitzt im **Model·Mode-Popover**
+  (`buildSubToggle`, `app.js:3226`), *nicht* im Zahnrad. Für den neuen Schalter also ein Toggle-Control
+  im Gear-Popover **neu einführen** — am einfachsten `buildSubToggle` adaptieren oder ein `menu-item`
+  mit Häkchen (Stil an `appearance-options-link` anlehnen). Klick postet eine neue web→host-Nachricht
+  `checkpoints.set { enabled }` (Muster wie `verbosity.set`/`theme.setMode`). Host-seitig: neuer Case
+  in `OnWebMessageReceived`, der `CheckpointsEnabled` sofort umschaltet (`_package.SaveOptions()`,
+  persistiert via `AstrogatorSettingsStore`) und den neuen Stand an die UI zurückmeldet
+  (Live-Update-Nachricht analog `SendBannerSettings`; der Initialwert reitet in `session.init` mit).
+  Bei fehlendem Git: Eintrag deaktiviert/ausgegraut mit Tooltip „Git nicht gefunden" (Git-Verfügbarkeit
+  ebenfalls in `session.init` mitsenden, z. B. `gitAvailable`).
 
 ### 3. Bridge: `Bridge/WebViewBridge.cs` (Orchestrierung)
-- **Vor dem Prompt:** In `RunPrompt` (Z. 413) — läuft bereits auf `TaskScheduler.Default` —
-  *vor* `await _session.RunTurnAsync(...)` (Z. 428): wenn `options.CheckpointsEnabled` &&
+> Zeilennummern-Stand geprüft gegen aktuellen Code; können bei künftigen Edits driften — die
+> **benannten** Methoden sind maßgeblich.
+- **Vor dem Prompt:** In `RunPrompt` (≈ Z. 420) — startet auf dem UI-Thread und wechselt via
+  `JoinableTaskFactory.RunAsync` + `await TaskScheduler.Default` auf den Hintergrund —
+  *vor* `await _session.RunTurnAsync(...)` (≈ Z. 435): wenn `options.CheckpointsEnabled` &&
   Git verfügbar && `cwd` (`GetSolutionDirectory()`) vorhanden →
   `await _checkpoints.EnsureInitializedAsync(cwd)` + `CommitAsync(cwd, label)`. Label enthält
-  Turn-Index, Zeit, Prompt-Auszug. SHA via neuer Host→Web-Nachricht `checkpoint.created`
-  senden **und** am User-Message-Objekt in der History persistieren (siehe 5).
-- **Neue web→host-Cases** in `OnWebMessageReceived` (Switch ab Z. 188):
-  `checkpoint.restore` { sha } → `HandleCheckpointRestore` (auf Hintergrund-Thread,
-  blockiert wenn ein Turn läuft / `status != ready`; bei Erfolg `checkpoint.restored` +
-  `system.note`, sonst `error`).
+  Turn-Index, Zeit, Prompt-Auszug.
+  **Message-id durchreichen (wichtig):** `RunPrompt` bekommt aktuell **nur `text`**. Die zugehörige
+  `userMsg` wird bereits vorher in `HandlePromptSend` (≈ Z. 403–412) via `RecordMessage` abgelegt.
+  Damit `checkpoint.created` und die Persistenz die *richtige* Bubble treffen, die
+  `userMsg["id"]` (GUID) in `RunPrompt` **mitgeben** (Signatur erweitern bzw. Feld capturen). Den SHA
+  dann (a) via `checkpoint.created` **inkl. dieser `messageId`** an die UI senden und (b) auf genau
+  dieser Message in der History persistieren (`userMsg["checkpointSha"] = sha`; History-Persist
+  danach anstoßen — siehe 5).
+- **Neue web→host-Cases** in `OnWebMessageReceived` (Switch ab ≈ Z. 194):
+  - `checkpoint.restore` { sha } → `HandleCheckpointRestore` (auf Hintergrund-Thread,
+    blockiert wenn ein Turn läuft / `status != ready`; bei Erfolg `checkpoint.restored` +
+    `system.note`, sonst `error`).
+  - `checkpoints.set` { enabled } → schaltet `CheckpointsEnabled` um + persistiert + Live-Update
+    an die UI (siehe Settings-Section, Gear-Toggle).
 - **NEU — Restore-Kontext für Claude:** Nach erfolgreichem Restore einen Hinweis vormerken,
-  der dem **nächsten** Turn-Prompt vorangestellt wird (Bridge hält z. B. einen
-  `_pendingRestoreNote`-String; in `RunPrompt` vor `RunTurnAsync` einmalig vorne an den
-  User-Prompt hängen und danach leeren). Text z. B.: „[System] Der Workspace wurde auf den
-  Stand vor Turn N (Checkpoint <kurz-sha>, <zeit>) zurückgesetzt; alle danach gemachten
-  Dateiänderungen wurden verworfen." → Claude arbeitet so nicht auf einem veralteten
-  Dateistand-Modell weiter.
-- **Neue host→web-Nachrichten** (via `Post`/`PostOrQueue`, Muster Z. 2195/2218):
-  - `checkpoint.created` { turnSeq, sha, shortSha, label, timestamp }
+  der dem **nächsten** Turn vorangestellt wird (Bridge hält z. B. einen `_pendingRestoreNote`-String;
+  in `RunPrompt` vor `RunTurnAsync` **an den CLI-gebundenen `text` vornanstellen** — **nicht** an das
+  angezeigte `typedText`/die User-Bubble/den Session-Titel — und danach leeren). Note auch bei
+  Turn-Fehler zuverlässig zurücksetzen. Text z. B.: „[System] Der Workspace wurde auf den Stand vor
+  Turn N (Checkpoint <kurz-sha>, <zeit>) zurückgesetzt; alle danach gemachten Dateiänderungen wurden
+  verworfen." → Claude arbeitet so nicht auf einem veralteten Dateistand-Modell weiter.
+- **Neue host→web-Nachrichten** (via `Post`/`PostOrQueue`, Muster ≈ Z. 2247/2270):
+  - `checkpoint.created` { messageId, turnSeq, sha, shortSha, label, timestamp }
   - `checkpoint.restored` { sha, ok, error? }
-  - In `session.init` ein Flag `checkpointsEnabled` mitsenden, damit die UI weiß, ob
-    Restore-Buttons gerendert werden.
+  - In `session.init` die Flags `checkpointsEnabled` **und** `gitAvailable` mitsenden, damit die UI
+    weiß, ob Restore-Buttons gerendert werden bzw. ob der Gear-Toggle aktiv ist.
 - Service-Instanz `_checkpoints` analog zu den anderen Core-Services im Bridge-Ctor anlegen.
 
 ### 4. WebUI: `WebUI/app.js` + `WebUI/index.html` + Styles
 - Neue Nachrichten im Dispatcher behandeln (Muster wie `turn.result`/`permission.result`):
-  - `checkpoint.created`: SHA am DOM-Knoten des zuletzt gerenderten **User-Prompts** ablegen
-    und einen kleinen "↩ Wiederherstellen"-Button an der User-Bubble / am `hr.turn-divider`
-    rendern (Stil an `turn-footer`/Permission-Buttons anlehnen).
+  - `checkpoint.created`: die zugehörige User-Bubble **per `messageId`** finden (das DOM-Element
+    trägt bereits die Message-`id` — id-basiert matchen, **nicht** „zuletzt gerendert", sonst Race
+    bei schnellen Turns/Reload), den SHA daran ablegen und einen kleinen "↩ Wiederherstellen"-Button
+    an der User-Bubble / am `hr.turn-divider` rendern (Stil an `turn-footer`/Permission-Buttons anlehnen).
   - Klick → kurze Inline-Bestätigung ("Dateien auf diesen Stand zurücksetzen? Chat bleibt.")
     → `post("checkpoint.restore", { sha })` (Helper `post()` wie bei `permission.decision`).
   - `checkpoint.restored`: `systemNote` "Workspace wiederhergestellt" bzw. Fehler.
 - Restore-Buttons nur rendern, wenn `session.init.checkpointsEnabled === true`.
+- **Gear-Toggle:** neues Toggle-Control im `appearance-pop` (siehe Settings-Section) — Zustand aus
+  `state.checkpointsEnabled`, deaktiviert wenn `!state.gitAvailable`; Klick → `post("checkpoints.set", { enabled })`.
 - Nach jeder JS-Änderung `node --check WebUI\app.js`.
 
 ### 5. History-Persistenz (Buttons überleben Reload): `Services/SessionHistoryStore.cs`
-- User-Message-Modell um optionales Feld `checkpointSha` erweitern; beim Speichern setzen
-  (aus `checkpoint.created`), beim `transcript.load` (`loadTranscript` in app.js) wieder als
-  Restore-Button rendern. Ohne dies verschwinden die Buttons nach Reload/Session-Wechsel.
+- **Kein Modell-Feld/Schema-Change nötig:** `Session.Messages` ist bereits `List<JObject>`
+  (`SessionHistoryStore.cs:22`) — es genügt, auf der User-Message `userMsg["checkpointSha"] = sha`
+  zu setzen (host-seitig in der Bridge, wenn `checkpoint.created` erzeugt wird; siehe 3) und die
+  History danach zu persistieren. Das Feld reist automatisch mit gespeichert/geladen.
+- Beim `transcript.load` (`loadTranscript` in app.js) das Feld auslesen und die User-Bubble wieder
+  mit Restore-Button rendern (gleicher Renderpfad wie bei `checkpoint.created`). Ohne dies
+  verschwinden die Buttons nach Reload/Session-Wechsel.
 
 ## Wiederverwendete vorhandene Bausteine
 - Prozess/Quoting: `Core/ClaudeCliProcessHost.cs` (ProcessStartInfo-Muster, `Quote()`).
@@ -144,6 +174,13 @@ zurückgegeben (Feature darf einen Turn nie crashen lassen).
 - Restore betrifft **nur Dateien**, nicht den Chat-/CLI-Verlauf (in UI klar kommunizieren).
 - Projekt ohne `.gitignore`: Default-Excludes via `info/exclude` gegen riesige Snapshots.
 - Schatten-`.git` liegt außerhalb des Projekts → echtes Repo des Users bleibt unberührt.
+- **Verschachtelte Repos/Submodule** im Worktree werden von `git add -A` als Gitlinks behandelt →
+  deren Datei-Inhalte werden **nicht** gesnapshottet/wiederhergestellt. Akzeptabel, aber in NOTES
+  dokumentieren.
+- **Nur der Solution-Ordner** ist Checkpoint-Scope: Dateien, die Claude *außerhalb* von `cwd`
+  editiert, sind nicht abgedeckt. Ein-Zeilen-Caveat in der UI/NOTES.
+- **Großer erster Snapshot** kann spürbar dauern (s. Perf-Hinweis in Section 1) — Turn nicht
+  blockieren, Checkpoint best-effort.
 
 ## Doku & Versionierung (Projektregeln, CLAUDE.md)
 - `docs/NOTES.md` (englisch): neues Schatten-Repo-Konzept, Speicherort, Restore-Semantik,

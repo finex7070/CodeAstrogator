@@ -61,6 +61,7 @@ namespace CodeAstrogator.Services
                 VerbosityString = GetString(nameof(AstrogatorOptions.VerbosityString), d.VerbosityString),
                 UsePersistentCli = GetBool(nameof(AstrogatorOptions.UsePersistentCli), d.UsePersistentCli),
                 ReviewEditsInEditor = GetBool(nameof(AstrogatorOptions.ReviewEditsInEditor), d.ReviewEditsInEditor),
+                CheckpointsEnabled = GetBool(nameof(AstrogatorOptions.CheckpointsEnabled), d.CheckpointsEnabled),
             };
         }
 
@@ -92,6 +93,7 @@ namespace CodeAstrogator.Services
             _store.SetString(Collection, nameof(AstrogatorOptions.VerbosityString), o.VerbosityString ?? "normal");
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UsePersistentCli), o.UsePersistentCli);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ReviewEditsInEditor), o.ReviewEditsInEditor);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.CheckpointsEnabled), o.CheckpointsEnabled);
         }
 
         private string GetString(string name, string fallback) =>

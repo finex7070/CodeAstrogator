@@ -92,5 +92,12 @@ namespace CodeAstrogator.Options
         /// toggled in the gear/appearance popover. Only takes effect in the modes that actually
         /// prompt for edits (Ask/Plan) — in Auto-accept/Bypass the CLI applies edits without a prompt.</summary>
         public bool ReviewEditsInEditor { get; set; } = false;
+
+        /// <summary>When on, a git checkpoint of the workspace files is committed before every prompt,
+        /// letting the user restore the file state from before any turn (Cursor-style "restore").
+        /// Uses a shadow git repo outside the project (never touches the user's own <c>.git</c>).
+        /// Opt-in; off by default. Only effective when git is installed. Toggled in the gear popover
+        /// (quick switch) or the settings window. See docs/NOTES.md ("Checkpoints").</summary>
+        public bool CheckpointsEnabled { get; set; } = false;
     }
 }

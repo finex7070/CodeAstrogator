@@ -4,6 +4,15 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.0] – 2026-07-02
+
+### Added
+- **Checkpoints: restore your workspace files to the state before any prompt.** A new opt-in feature commits a snapshot of your workspace files before every prompt, and adds a small **"↩ Restore"** button to each of your messages in the chat. Clicking it (after a quick confirmation) rolls the files on disk back to how they were *before* that turn — undoing whatever Claude changed since. The **chat stays exactly as it is**; only the files are restored. Restoring is forward-only, so every checkpoint remains available and you can just as easily "redo" by restoring a later one. After a restore, Claude is quietly told the files were rolled back so it doesn't keep working from a stale picture.
+  - **It never touches your own git repo.** Checkpoints live in a separate shadow repository stored outside your project (under `%LOCALAPPDATA%\CodeAstrogator\Checkpoints`), so your project's real `.git` — staging area, branches, history — is completely untouched. It works whether or not your project is a git repo at all, and it respects your project's `.gitignore` (or a sensible default exclude list of `bin/`, `obj/`, `node_modules/`, etc. when there is none).
+  - **Off by default; toggle it on in one click.** Enable it from the gear menu's new **"Checkpoints"** switch (or in *Advanced options…*). The feature requires git to be installed — if git isn't found, the toggle is disabled with a hint. Only the open solution folder is covered.
+  
+---
+  
 ## [0.5.4] – 2026-07-02
 
 ### Added

@@ -49,6 +49,12 @@ namespace CodeAstrogator.Bridge
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
         private readonly EditReviewController _editReview; // inline edit-review adornments (opt-in)
+        private readonly GitCheckpointService _checkpoints = new GitCheckpointService(); // git shadow-repo checkpoints (opt-in)
+        private static readonly bool _gitAvailable = GitCheckpointService.IsGitAvailable();
+        // After a restore, the next turn's CLI text is prefixed with this note so Claude knows the
+        // workspace was reset (the visible bubble/title are untouched). Consumed once, then cleared.
+        private string? _pendingRestoreNote;
+        private int _turnSeq; // monotonic per-session turn counter for checkpoint labels
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission> _pendingPermissions
             = new System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission>();
         // recorded (approved) permission messages by tool_use_id, so a later tool.result can
@@ -268,6 +274,12 @@ namespace CodeAstrogator.Bridge
                     _package.GetOptions().ReviewEditsInEditor = msg.Value<bool?>("enabled") ?? false;
                     _package.SaveOptions();
                     break;
+                case "checkpoints.set":
+                    HandleCheckpointsSet(msg.Value<bool?>("enabled") ?? false);
+                    break;
+                case "checkpoint.restore":
+                    HandleCheckpointRestore(msg.Value<string>("sha") ?? "");
+                    break;
                 case "editReview.open":
                     HandleEditReviewOpen(msg.Value<string>("requestId") ?? "");
                     break;
@@ -400,10 +412,17 @@ namespace CodeAstrogator.Bridge
                 text = sb.ToString();
             }
 
+            // The WebUI generates the message id and tags its live bubble with it, so a later
+            // checkpoint.created can attach the restore button to exactly that bubble (id-based,
+            // no "last rendered" race). Fall back to a fresh id if the UI didn't send one.
+            var messageId = msg.Value<string>("messageId");
+            if (string.IsNullOrEmpty(messageId))
+                messageId = Guid.NewGuid().ToString("n");
+
             var userMsg = new JObject
             {
                 ["role"] = "user",
-                ["id"] = Guid.NewGuid().ToString("n"),
+                ["id"] = messageId,
                 ["text"] = typedText, // clean text; attachments rendered as chips
                 ["ts"] = DateTime.UtcNow.ToString("o"),
             };
@@ -414,10 +433,10 @@ namespace CodeAstrogator.Bridge
                 _history.Current.Title = typedText.Length > 48 ? typedText.Substring(0, 48) + "…" : typedText;
 
             PostStatus("working");
-            RunPrompt(text);
+            RunPrompt(text, messageId!);
         }
 
-        private void RunPrompt(string text)
+        private void RunPrompt(string text, string messageId)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
@@ -426,13 +445,27 @@ namespace CodeAstrogator.Bridge
             if (string.IsNullOrEmpty(_session.Settings.Model) && !string.IsNullOrEmpty(options.DefaultModel))
                 _session.Settings.Model = options.DefaultModel;
 
+            // After a restore, prepend a one-off note to the CLI text (NOT the visible bubble/title)
+            // so Claude doesn't keep working against a stale picture of the files. Consumed here once.
+            var restoreNote = _pendingRestoreNote;
+            _pendingRestoreNote = null;
+            var cliText = string.IsNullOrEmpty(restoreNote) ? text : restoreNote + "\n\n" + text;
+
+            var checkpointsOn = options.CheckpointsEnabled && _gitAvailable && !string.IsNullOrEmpty(cwd);
+            var turnSeq = ++_turnSeq;
+            var label = BuildCheckpointLabel(turnSeq, text);
+
             _turnHadAssistantOutput = false;
             _package.JoinableTaskFactory.RunAsync(async () =>
             {
                 await TaskScheduler.Default;
+                // Checkpoint the workspace *before* the turn (Cursor model). Best-effort: any git
+                // failure is caught and must never abort the prompt.
+                if (checkpointsOn)
+                    await TryCreateCheckpointAsync(cwd!, label, messageId, turnSeq).ConfigureAwait(false);
                 try
                 {
-                    await _session.RunTurnAsync(text, options.ClaudeExecutablePath, cwd);
+                    await _session.RunTurnAsync(cliText, options.ClaudeExecutablePath, cwd);
                 }
                 catch (Exception ex)
                 {
@@ -440,6 +473,54 @@ namespace CodeAstrogator.Bridge
                     PostStatus("error");
                 }
             }).Task.Forget();
+        }
+
+        /// <summary>Commits a pre-turn checkpoint, then tells the UI (checkpoint.created) and persists
+        /// the SHA on the user message so its restore button survives a reload. Never throws.</summary>
+        private async Task TryCreateCheckpointAsync(string cwd, string label, string messageId, int turnSeq)
+        {
+            try
+            {
+                await _checkpoints.EnsureInitializedAsync(cwd).ConfigureAwait(false);
+                var info = await _checkpoints.CommitAsync(cwd, label).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(info.Sha))
+                    return;
+                // Persist the SHA on the (already recorded) user message.
+                lock (_history)
+                {
+                    foreach (var m in _history.Current.Messages)
+                        if (m.Value<string>("id") == messageId)
+                        {
+                            m["checkpointSha"] = info.Sha;
+                            break;
+                        }
+                }
+                SaveHistory();
+                Post(new JObject
+                {
+                    ["type"] = "checkpoint.created",
+                    ["messageId"] = messageId,
+                    ["turnSeq"] = turnSeq,
+                    ["sha"] = info.Sha,
+                    ["shortSha"] = info.ShortSha,
+                    ["label"] = info.Label,
+                    ["timestamp"] = info.TimestampUtc.ToString("o"),
+                });
+            }
+            catch (Exception ex)
+            {
+                // A checkpoint failure is non-fatal — note it once, keep the turn going.
+                PostSystemNote("Checkpoint skipped: " + ex.Message);
+            }
+        }
+
+        /// <summary>Compact, informative checkpoint commit label: turn index · time · prompt excerpt.</summary>
+        private static string BuildCheckpointLabel(int turnSeq, string prompt)
+        {
+            var excerpt = (prompt ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            if (excerpt.Length > 60)
+                excerpt = excerpt.Substring(0, 60) + "…";
+            return $"Turn {turnSeq} · {DateTime.Now:HH:mm:ss} · {excerpt}";
         }
 
         // ── permission flow (MCP bridge §A5) ─────────────────────────────────────
@@ -973,6 +1054,8 @@ namespace CodeAstrogator.Bridge
                 _history.StartNew();
             _session.ResetSession();
             _sessionStartAnnounced = false;
+            _turnSeq = 0;
+            _pendingRestoreNote = null;
             _activeFileSessionEnabled = ActiveFileDefaultOn; // per-session override resets to the option default
             SendSessionInit();
             SendActiveFile();
@@ -1105,6 +1188,8 @@ namespace CodeAstrogator.Bridge
             else
                 _session.ResetSession();
             _sessionStartAnnounced = true; // resumed sessions don't re-announce
+            _turnSeq = 0;
+            _pendingRestoreNote = null;
         }
 
         private void SendTranscript(SessionRecord record)
@@ -1186,15 +1271,16 @@ namespace CodeAstrogator.Bridge
                     if (_session.IsBusy)
                         return;
                     var prompt = string.IsNullOrEmpty(args) ? command : command + " " + args;
+                    var slashId = Guid.NewGuid().ToString("n");
                     RecordMessage(new JObject
                     {
                         ["role"] = "user",
-                        ["id"] = Guid.NewGuid().ToString("n"),
+                        ["id"] = slashId,
                         ["text"] = prompt,
                         ["ts"] = DateTime.UtcNow.ToString("o"),
                     });
                     PostStatus("working");
-                    RunPrompt(prompt);
+                    RunPrompt(prompt, slashId);
                     break;
             }
         }
@@ -2009,6 +2095,83 @@ namespace CodeAstrogator.Bridge
             SendActiveFile();
         }
 
+        // ── git checkpoints (opt-in) ─────────────────────────────────────────────
+
+        /// <summary>Gear-popover quick toggle: flip CheckpointsEnabled, persist, echo the new state
+        /// to the UI. Ignored (kept off) when git isn't available.</summary>
+        private void HandleCheckpointsSet(bool enabled)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var effective = enabled && _gitAvailable;
+            _package.GetOptions().CheckpointsEnabled = effective;
+            _package.SaveOptions();
+            Post(new JObject
+            {
+                ["type"] = "checkpoints.settings",
+                ["checkpointsEnabled"] = effective,
+                ["gitAvailable"] = _gitAvailable,
+            });
+        }
+
+        /// <summary>web→host checkpoint.restore: forward-only restore of the workspace files to a SHA.
+        /// Blocked while a turn runs; the chat is untouched. On success queues a restore note for the
+        /// next turn so Claude learns the files were reset.</summary>
+        private void HandleCheckpointRestore(string sha)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (string.IsNullOrEmpty(sha))
+                return;
+            if (!_gitAvailable)
+            {
+                PostError("Git is not available — cannot restore.");
+                return;
+            }
+            if (_session.IsBusy)
+            {
+                PostSystemNote("Stop the current turn first to restore a checkpoint.");
+                return;
+            }
+            var cwd = _package.GetSolutionDirectory();
+            if (string.IsNullOrEmpty(cwd))
+            {
+                PostError("No workspace is open — cannot restore.");
+                return;
+            }
+
+            // Find the human-facing turn index of the restored checkpoint (for the note), if known.
+            var shortSha = sha.Length > 7 ? sha.Substring(0, 7) : sha;
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                string? error = null;
+                try
+                {
+                    await _checkpoints.RestoreAsync(cwd!, sha).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (error == null)
+                {
+                    _pendingRestoreNote =
+                        "[System] The workspace files were restored to an earlier checkpoint ("
+                        + shortSha + ", " + DateTime.Now.ToString("HH:mm:ss")
+                        + "); any file changes made after it were discarded. Re-check the files before continuing.";
+                    Post(new JObject { ["type"] = "checkpoint.restored", ["sha"] = sha, ["ok"] = true });
+                    PostSystemNote("Workspace files restored to checkpoint " + shortSha + " (chat unchanged)");
+                }
+                else
+                {
+                    Post(new JObject { ["type"] = "checkpoint.restored", ["sha"] = sha, ["ok"] = false, ["error"] = error });
+                    PostError("Restore failed: " + error);
+                }
+            }).Task.Forget();
+        }
+
         /// <summary>True only when both the option and the per-session toggle are on.</summary>
         private bool ActiveFileEffective =>
             _package.GetOptions().AutoAddActiveFile && _activeFileSessionEnabled;
@@ -2107,6 +2270,8 @@ namespace CodeAstrogator.Bridge
                 ["permissionMode"] = _session.Settings.PermissionMode,
                 ["autoAcceptCommands"] = options.AutoAcceptCommands,
                 ["reviewEditsInEditor"] = options.ReviewEditsInEditor,
+                ["checkpointsEnabled"] = options.CheckpointsEnabled && _gitAvailable,
+                ["gitAvailable"] = _gitAvailable,
                 ["cwd"] = _package.GetSolutionDirectory() ?? "",
                 ["tokens"] = _session.TotalTokens,
                 ["contextTokens"] = _history.Current.ContextTokens,

@@ -38,6 +38,7 @@ namespace CodeAstrogator.ToolWindows
         private readonly CheckBox _updateCheck;
         private readonly TextBox _promptTimeout;
         private readonly CheckBox _persistentCli;
+        private readonly CheckBox _checkpoints;
 
         public AstrogatorSettingsWindow(CodeAstrogatorPackage package, AstrogatorOptions current)
         {
@@ -76,6 +77,12 @@ namespace CodeAstrogator.ToolWindows
             _promptTimeout.HorizontalAlignment = HorizontalAlignment.Left;
             _promptTimeout.MinWidth = 80;
             _persistentCli = MakeCheck("Use a persistent CLI session (lower latency; experimental)", new Thickness(0, 8, 0, 0));
+            _checkpoints = MakeCheck("Create a git checkpoint before each prompt (revert the workspace files anytime)", new Thickness(0, 8, 0, 0));
+            if (!Core.GitCheckpointService.IsGitAvailable())
+            {
+                _checkpoints.IsEnabled = false;
+                _checkpoints.ToolTip = "Git was not found on PATH — install git to use checkpoints.";
+            }
 
             var panel = new StackPanel { Margin = new Thickness(16) };
             panel.Children.Add(Header("Claude CLI"));
@@ -104,6 +111,7 @@ namespace CodeAstrogator.ToolWindows
                 _promptTimeout));
             panel.Children.Add(Header("Advanced"));
             panel.Children.Add(_persistentCli);
+            panel.Children.Add(_checkpoints);
 
             var reset = MakeButton("Reset to defaults", minWidth: 130);
             reset.Click += (_, __) => Load(new AstrogatorOptions());
@@ -156,6 +164,7 @@ namespace CodeAstrogator.ToolWindows
             _updateCheck.IsChecked = o.UpdateCheckEnabled;
             _promptTimeout.Text = AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes).ToString();
             _persistentCli.IsChecked = o.UsePersistentCli;
+            _checkpoints.IsChecked = o.CheckpointsEnabled && Core.GitCheckpointService.IsGitAvailable();
         }
 
         private void ApplyAndPersist()
@@ -183,6 +192,7 @@ namespace CodeAstrogator.ToolWindows
                 UpdateCheckDecided = true,
                 PromptTimeoutMinutes = ParsePromptTimeout(_promptTimeout.Text),
                 UsePersistentCli = _persistentCli.IsChecked == true,
+                CheckpointsEnabled = _checkpoints.IsChecked == true,
                 // Popover-managed state (Model·Mode + accent color) — carry it over untouched
                 DefaultModel = _current.DefaultModel,
                 DefaultEffortString = _current.DefaultEffortString,

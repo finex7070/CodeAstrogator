@@ -1225,6 +1225,55 @@ then spike 0-B, then phases 2/3 with intermediate verification.
   Note Light theme: the logo body is light — on white the dark outlines carry the
   contrast; if too pale, a light variant later.
 
+## Git checkpoints (opt-in, 2026-07-02)
+Cursor-style per-turn "restore": before every prompt the workspace **files** are committed to a
+**shadow git repo**, giving each user prompt a small "↩ Restore" button that reverts the files to
+the state *before* that turn. Opt-in (off by default), only available when `git` is on PATH.
+
+- **Shadow repo (the core idea):** a git repo whose `--git-dir` lives **outside** the project under
+  `%LOCALAPPDATA%\CodeAstrogator\Checkpoints\<sha1(solution-dir)>\.git`, but whose `--work-tree`
+  is the solution directory. Every git call is
+  `git --git-dir=<…>\.git --work-tree=<solutionDir> <cmd>`. Because git always ignores a nested
+  `.git` on `add -A`, the user's **own** project repo is never touched (verify: `git status` in the
+  project stays unchanged). The project's `.gitignore` is honoured automatically; if the project has
+  **no** `.gitignore`, default excludes (`bin/ obj/ .vs/ node_modules/ …`) are written to
+  `<git-dir>\info\exclude` so snapshots don't balloon. Init sets a **local** `user.name`/`user.email`
+  (commits work without a global git identity), `commit.gpgsign=false`, `core.autocrlf=false`; a
+  `meta.json` next to the git-dir records the original solution path.
+- **`Core/GitCheckpointService.cs`** (UI-free, unit-tested): `IsGitAvailable()` (cached),
+  `EnsureInitializedAsync`, `CommitAsync` (`add -A` + `commit --allow-empty` → **every** prompt gets a
+  restore point even if nothing changed), `RestoreAsync`, `ListAsync`. All git runs on a background
+  thread via `Process`; failures throw `GitCheckpointException`, which the bridge catches — **a
+  checkpoint failure never aborts a turn** (best-effort, surfaced as a dim system note).
+- **Restore is forward-only** (linear history, nothing lost): (1) safety-commit the current state,
+  (2) `checkout <sha> -- .`, (3) delete files added after the target
+  (`diff --diff-filter=A --name-only <sha> HEAD`), (4) `add -A` + commit "Restored to <shortSha>".
+  So all checkpoints stay reachable and "redo" = restore a *later* checkpoint. Restore is blocked
+  while a turn runs.
+- **Restore touches only files, not the chat/CLI history.** After a restore, the **next** turn's CLI
+  text is prefixed with a one-off `[System] The workspace files were restored to an earlier
+  checkpoint …` note (`_pendingRestoreNote`, consumed once in `RunPrompt` — prepended to the
+  CLI-bound `text`, **not** the visible bubble/title), so Claude doesn't keep working against a stale
+  picture of the files.
+- **Message id flows client→host** so the restore button binds to the exact bubble: the WebUI
+  generates the message id, tags its live bubble (`data-msg-id`) and sends it in `prompt.send`
+  (`messageId`); the host uses it as the user message id, echoes it in `checkpoint.created`, and
+  persists `userMsg["checkpointSha"] = <sha>` on that message so the button survives a reload
+  (id-based match, no "last rendered" race).
+- **Contract additions (Part B §3):** web→host `checkpoints.set {enabled}`,
+  `checkpoint.restore {sha}`; host→web `checkpoint.created {messageId,turnSeq,sha,shortSha,label,
+  timestamp}`, `checkpoint.restored {sha,ok,error?}`, `checkpoints.settings {checkpointsEnabled,
+  gitAvailable}`; `session.init` now also carries `checkpointsEnabled` + `gitAvailable`.
+- **UI:** restore button rendered only when `checkpointsEnabled`; a **quick toggle** sits in the gear
+  popover ("Checkpoints") in addition to the settings-window checkbox (Advanced). Both greyed out
+  with a "git not found" hint when git is unavailable.
+- **Caveats (documented, accepted):** only the **solution folder** is in scope — files Claude edits
+  *outside* `cwd` aren't covered. **Nested repos/submodules** in the work-tree are treated as gitlinks
+  by `add -A`, so their file contents are not snapshotted/restored. The first `EnsureInitialized` +
+  `CommitAsync` over a large solution can take a few seconds (`add -A` over the whole tree); we run it
+  on a background thread and **await it before the turn** so the checkpoint faithfully predates the
+  turn — follow-up commits are fast (deltas only).
+
 ## Miscellaneous
 - **Session history: persisted** as JSON per workspace under
   `%LocalAppData%\CodeAstrogator\history\<sha1(solution-dir)>.json` — loaded when opening

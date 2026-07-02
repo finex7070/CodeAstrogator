@@ -23,6 +23,8 @@
     permissionMode: "ask",
     autoAcceptCommands: false, // in acceptEdits mode, also auto-approve Bash/PowerShell/MCP
     reviewEditsInEditor: false, // review file edits inline in the code editor (per-hunk) instead of the chat diff card
+    checkpointsEnabled: false, // git checkpoint before each prompt → per-turn restore buttons
+    gitAvailable: false,       // git found on the host → checkpoint toggle is usable
     cwd: "",
     tokens: 0,
     contextTokens: 0,        // context size after the last turn (input incl. cache + output)
@@ -528,6 +530,9 @@
       case "activeFile": return applyActiveFile(m);
       case "composer.append": return appendToComposer(m.text);
       case "banner.settings": return applyBannerSettings(m);
+      case "checkpoint.created": return checkpointCreated(m);
+      case "checkpoint.restored": return checkpointRestored(m);
+      case "checkpoints.settings": return applyCheckpointSettings(m);
       case "error": return errorMessage(m.message);
     }
   }
@@ -639,6 +644,8 @@
     state.permissionMode = m.permissionMode || state.permissionMode;
     if (m.autoAcceptCommands !== undefined) state.autoAcceptCommands = !!m.autoAcceptCommands;
     if (m.reviewEditsInEditor !== undefined) state.reviewEditsInEditor = !!m.reviewEditsInEditor;
+    if (m.gitAvailable !== undefined) state.gitAvailable = !!m.gitAvailable;
+    if (m.checkpointsEnabled !== undefined) state.checkpointsEnabled = !!m.checkpointsEnabled;
     state.cwd = m.cwd || "";
     state.tokens = m.tokens || 0;
     state.contextTokens = m.contextTokens || 0;
@@ -990,12 +997,84 @@
   // -------------------------------------------------------------------------
   // User message
   // -------------------------------------------------------------------------
-  function renderUserMessage(text, attachments) {
+  function renderUserMessage(text, attachments, id) {
     const { row, body } = makeMsgRow("user", "›");
+    if (id) row.dataset.msgId = id;
     body.classList.add("md");
     body.appendChild(renderMarkdown(text));
     appendMsgAttachments(body, attachments);
     appendNode(row);
+    return row;
+  }
+
+  // -------------------------------------------------------------------------
+  // Git checkpoints (opt-in): a per-turn "↩ Restore" button on the user bubble
+  // -------------------------------------------------------------------------
+  function findUserRow(messageId) {
+    if (!messageId) return null;
+    return transcriptInner.querySelector('.msg-user[data-msg-id="' + cssEscape(messageId) + '"]');
+  }
+  // Minimal attribute-selector escape (message ids are hex/simple, but stay safe).
+  function cssEscape(s) { return String(s).replace(/["\\]/g, "\\$&"); }
+
+  // Adds (or updates) the restore control on a user bubble. Only shown when checkpoints are on.
+  function attachRestoreButton(row, sha) {
+    if (!row || !sha || !state.checkpointsEnabled) return;
+    row.dataset.checkpointSha = sha;
+    const body = row.querySelector(".msg-body");
+    if (!body) return;
+    let bar = body.querySelector(".checkpoint-bar");
+    if (!bar) {
+      bar = el("div", "checkpoint-bar");
+      body.appendChild(bar);
+    }
+    bar.innerHTML = "";
+    const btn = el("button", "checkpoint-btn", "↩ Restore");
+    btn.title = "Restore the workspace files to the state before this prompt (the chat stays).";
+    btn.addEventListener("click", () => confirmRestore(bar, sha));
+    bar.appendChild(btn);
+  }
+
+  // Inline confirmation before a restore (destructive to on-disk files, not the chat).
+  function confirmRestore(bar, sha) {
+    bar.innerHTML = "";
+    bar.appendChild(el("span", "checkpoint-confirm-text", "Restore files to this point? The chat stays."));
+    const yes = el("button", "checkpoint-btn checkpoint-btn-danger", "Restore");
+    yes.addEventListener("click", () => {
+      bar.innerHTML = "";
+      bar.appendChild(el("span", "checkpoint-confirm-text", "Restoring…"));
+      post("checkpoint.restore", { sha });
+    });
+    const no = el("button", "checkpoint-btn", "Cancel");
+    no.addEventListener("click", () => attachRestoreButtonFromDataset(bar));
+    bar.appendChild(yes);
+    bar.appendChild(no);
+  }
+
+  // Cancel path: rebuild the plain restore button from the row's stored sha.
+  function attachRestoreButtonFromDataset(bar) {
+    const row = bar.closest(".msg-user");
+    if (row && row.dataset.checkpointSha) attachRestoreButton(row, row.dataset.checkpointSha);
+    else bar.innerHTML = "";
+  }
+
+  function checkpointCreated(m) {
+    if (!state.checkpointsEnabled) return;
+    attachRestoreButton(findUserRow(m.messageId), m.sha);
+  }
+
+  function checkpointRestored(m) {
+    if (m.ok) systemNote({ text: "Workspace files restored." });
+    else errorMessage(m.error || "Restore failed.");
+  }
+
+  function applyCheckpointSettings(m) {
+    if (m.gitAvailable !== undefined) state.gitAvailable = !!m.gitAvailable;
+    if (m.checkpointsEnabled !== undefined) state.checkpointsEnabled = !!m.checkpointsEnabled;
+    // Toggling off hides existing restore bars; toggling on leaves them to appear on the next turn.
+    if (!state.checkpointsEnabled) {
+      transcriptInner.querySelectorAll(".checkpoint-bar").forEach((b) => b.remove());
+    }
   }
 
   // Renders attached-file chips below a user message (shared by live + historic).
@@ -1844,10 +1923,13 @@
     switch (msg.role) {
       case "user": {
         const { row, body } = makeMsgRow("user", "›");
+        if (msg.id) row.dataset.msgId = msg.id;
         body.classList.add("md");
         body.appendChild(renderMarkdown(msg.text || ""));
         appendMsgAttachments(body, msg.attachments);
         transcriptInner.appendChild(row);
+        // Restore button survives a reload: the SHA was persisted on the user message.
+        if (msg.checkpointSha && state.checkpointsEnabled) attachRestoreButton(row, msg.checkpointSha);
         break;
       }
       case "assistant": {
@@ -2295,9 +2377,12 @@
       if (!display.some((a) => a.path && af.path && a.path === af.path))
         display.push({ name, path: af.path });
     }
-    renderUserMessage(text, display);
+    // Generate the message id client-side so the live bubble carries it (data-msg-id); a later
+    // checkpoint.created references the same id to attach the restore button to this exact bubble.
+    const messageId = "u-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    renderUserMessage(text, display, messageId);
     scrollToBottom(); // the user just sent → always pin to bottom (even after a long prompt)
-    post("prompt.send", { text, attachments: attachments.length ? attachments : undefined });
+    post("prompt.send", { text, messageId, attachments: attachments.length ? attachments : undefined });
     input.value = "";
     state.attachments = [];
     renderAttachments();
@@ -2822,6 +2907,30 @@
     return wrap;
   }
 
+  // Gear-popover checkpoint toggle: enable/disable the per-prompt git restore points. Disabled
+  // (greyed) when git isn't installed. Posts checkpoints.set; the host echoes the new state back.
+  function buildCheckpointToggle() {
+    const wrap = el("div", "mm-subtoggle checkpoint-toggle");
+    const on = state.checkpointsEnabled && state.gitAvailable;
+    const row = el("div", "toggle-row" + (on ? " on" : "") + (state.gitAvailable ? "" : " disabled"));
+    row.appendChild(el("span", "label", "Checkpoint before each prompt"));
+    row.appendChild(el("span", "toggle-switch"));
+    wrap.appendChild(row);
+    wrap.appendChild(el("div", "mm-hint", state.gitAvailable
+      ? "Snapshots the workspace files before every prompt so you can restore them per turn. The chat is never changed."
+      : "Git was not found — install git to use checkpoints."));
+    if (!state.gitAvailable) return wrap;
+    wrap.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.checkpointsEnabled = !state.checkpointsEnabled;
+      row.classList.toggle("on", state.checkpointsEnabled);
+      post("checkpoints.set", { enabled: state.checkpointsEnabled });
+      if (!state.checkpointsEnabled)
+        transcriptInner.querySelectorAll(".checkpoint-bar").forEach((b) => b.remove());
+    });
+    return wrap;
+  }
+
   $("btn-settings").addEventListener("click", function () {
     const pop = el("div", "popover appearance-pop");
     pop.appendChild(el("div", "appearance-title", "Appearance"));
@@ -2865,6 +2974,10 @@
     // Accent color — custom brand color (persisted host-side, applied as :root overrides)
     pop.appendChild(el("div", "appearance-title appearance-title-2", "Accent color"));
     pop.appendChild(buildAccentPicker());
+
+    // Checkpoints — quick toggle for the per-prompt git restore points (opt-in feature)
+    pop.appendChild(el("div", "appearance-title appearance-title-2", "Checkpoints"));
+    pop.appendChild(buildCheckpointToggle());
 
     // Footer: opens the host-side settings window (all options) via options.open
     pop.appendChild(el("div", "appearance-divider"));
