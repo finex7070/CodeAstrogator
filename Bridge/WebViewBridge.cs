@@ -1943,12 +1943,22 @@ namespace CodeAstrogator.Bridge
 
             _planLabel ??= ClaudeUsageClient.ReadPlanLabel();
 
-            var snapshot = await ClaudeUsageClient.FetchAsync(exeOverride, cwd).ConfigureAwait(false);
-            if (snapshot == null && _planLabel == null)
-                return; // API-key mode or offline — leave the meters alone
+            var fresh = await ClaudeUsageClient.FetchAsync(exeOverride, cwd).ConfigureAwait(false);
+            // `/usage` sometimes returns only the "What's contributing" section and drops the
+            // whole percentage block; a single quick retry usually gets it (best-effort, bounded).
+            if (fresh == null || (fresh.SessionPct == null && fresh.WeeklyPct == null))
+            {
+                try { await System.Threading.Tasks.Task.Delay(3000).ConfigureAwait(false); } catch { }
+                var retry = await ClaudeUsageClient.FetchAsync(exeOverride, cwd).ConfigureAwait(false);
+                if (retry != null && (retry.SessionPct != null || retry.WeeklyPct != null))
+                    fresh = retry;
+            }
 
-            if (snapshot != null)
-                _lastUsage = snapshot;
+            if (fresh == null && _lastUsage == null && _planLabel == null)
+                return; // API-key mode or offline, nothing cached yet — leave the meters alone
+
+            // Merge per-window into the last-known-good so a partial/empty report never zeroes a meter.
+            _lastUsage = ClaudeUsageClient.Merge(_lastUsage, fresh, DateTimeOffset.Now);
 
             long contextTokens;
             lock (_history)
@@ -1962,6 +1972,8 @@ namespace CodeAstrogator.Bridge
                 ["weeklyPct"] = _lastUsage?.WeeklyPct ?? 0,
                 ["sessionResetsAt"] = _lastUsage?.SessionResetsAt?.ToString("o"),
                 ["weeklyResetsAt"] = _lastUsage?.WeeklyResetsAt?.ToString("o"),
+                ["sessionFetchedAt"] = _lastUsage?.SessionFetchedAt?.ToString("o"),
+                ["weeklyFetchedAt"] = _lastUsage?.WeeklyFetchedAt?.ToString("o"),
             };
             if (_planLabel != null)
                 msg["plan"] = _planLabel;
@@ -2170,13 +2182,15 @@ namespace CodeAstrogator.Bridge
             return _installedVersion = "";
         }
 
-        /// <summary>Limits payload incl. reset times (shown as meter tooltips in the UI).</summary>
+        /// <summary>Limits payload incl. reset times and per-window fetch stamps (meter tooltips + staleness hint).</summary>
         private JObject BuildLimits() => new JObject
         {
             ["sessionPct"] = _lastUsage?.SessionPct ?? 0,
             ["weeklyPct"] = _lastUsage?.WeeklyPct ?? 0,
             ["sessionResetsAt"] = _lastUsage?.SessionResetsAt?.ToString("o"),
             ["weeklyResetsAt"] = _lastUsage?.WeeklyResetsAt?.ToString("o"),
+            ["sessionFetchedAt"] = _lastUsage?.SessionFetchedAt?.ToString("o"),
+            ["weeklyFetchedAt"] = _lastUsage?.WeeklyFetchedAt?.ToString("o"),
         };
 
         private static bool IsEditTool(string name) =>

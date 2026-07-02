@@ -26,7 +26,7 @@
     cwd: "",
     tokens: 0,
     contextTokens: 0,        // context size after the last turn (input incl. cache + output)
-    limits: { sessionPct: 0, weeklyPct: 0 },
+    limits: { sessionPct: 0, weeklyPct: 0, sessionFetchedAt: null, weeklyFetchedAt: null },
     plan: "",
     themeMode: "auto",
     resolvedTheme: "dark",
@@ -48,6 +48,7 @@
   const MODELS = [
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-opus-4-7", label: "Opus 4.7" },
+    { id: "claude-fable-5", label: "Fable 5" },
     { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ];
@@ -782,9 +783,14 @@
     labelWeekly.textContent = "Weekly " + wp + "%";
     setMeterLevel(statusSession, sp);
     setMeterLevel(statusWeekly, wp);
-    // resets_at from the usage endpoint — shown as native tooltips on the meters
-    statusSession.title = meterTooltip("Session usage", sp, state.limits.sessionResetsAt);
-    statusWeekly.title = meterTooltip("Weekly usage", wp, state.limits.weeklyResetsAt);
+    // resets_at + last-fetch time from /usage — shown as native tooltips on the meters. A meter
+    // dims when its value is stale (the /usage report kept omitting that window for a while).
+    const sStale = isStaleUsage(state.limits.sessionFetchedAt);
+    const wStale = isStaleUsage(state.limits.weeklyFetchedAt);
+    statusSession.title = meterTooltip("Session usage", sp, state.limits.sessionResetsAt, state.limits.sessionFetchedAt, sStale);
+    statusWeekly.title = meterTooltip("Weekly usage", wp, state.limits.weeklyResetsAt, state.limits.weeklyFetchedAt, wStale);
+    statusSession.classList.toggle("stale", sStale);
+    statusWeekly.classList.toggle("stale", wStale);
     if (state.plan) {
       planLabel.textContent = state.plan;
       planBadge.hidden = false;
@@ -838,11 +844,25 @@
   function clampPct(v) { v = Number(v) || 0; return Math.max(0, Math.min(100, Math.round(v))); }
 
   /** Meter tooltip: "Session usage: 12% · resets 14:30" (reset time optional). */
-  function meterTooltip(label, pct, resetsAt) {
+  function meterTooltip(label, pct, resetsAt, fetchedAt, stale) {
     let s = label + ": " + pct + "%";
     const d = resetsAt ? new Date(resetsAt) : null;
     if (d && !isNaN(d.getTime())) s += " · resets " + formatResetTime(d);
+    const f = fetchedAt ? new Date(fetchedAt) : null;
+    if (f && !isNaN(f.getTime())) {
+      s += " · updated " + f.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      if (stale) s += " (may be out of date)";
+    }
     return s;
+  }
+
+  // A usage window is "stale" once /usage has failed to report it for a while (the block is
+  // dropped sporadically). We keep showing the last-known value but flag it. null = never fetched.
+  const USAGE_STALE_MS = 5 * 60 * 1000;
+  function isStaleUsage(fetchedAt) {
+    if (!fetchedAt) return false;
+    const t = Date.parse(fetchedAt);
+    return !isNaN(t) && (Date.now() - t) > USAGE_STALE_MS;
   }
 
   /** Local time for today, "tomorrow 14:30", weekday+date beyond that. */
@@ -1826,6 +1846,8 @@
     if (m.weeklyPct != null) state.limits.weeklyPct = m.weeklyPct;
     if (m.sessionResetsAt !== undefined) state.limits.sessionResetsAt = m.sessionResetsAt;
     if (m.weeklyResetsAt !== undefined) state.limits.weeklyResetsAt = m.weeklyResetsAt;
+    if (m.sessionFetchedAt !== undefined) state.limits.sessionFetchedAt = m.sessionFetchedAt;
+    if (m.weeklyFetchedAt !== undefined) state.limits.weeklyFetchedAt = m.weeklyFetchedAt;
     if (m.plan) state.plan = m.plan;
     updateStatusbar();
   }
@@ -3466,6 +3488,8 @@
         sessionPct, weeklyPct,
         sessionResetsAt: new Date(Date.now() + 3 * 3600000).toISOString(),
         weeklyResetsAt: new Date(Date.now() + 4 * 86400000).toISOString(),
+        sessionFetchedAt: new Date().toISOString(),
+        weeklyFetchedAt: new Date().toISOString(),
       };
     }
 

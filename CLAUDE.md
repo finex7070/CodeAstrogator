@@ -64,6 +64,21 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
 `Options/` (`AstrogatorOptions`-Snapshot), `ToolWindows/` (WebView2-Pane +
 **`AstrogatorSettingsWindow`** = gehostetes Settings-Fenster via Zahnrad → „Advanced options…").
 
+## Harte Regeln / No-Gos (Sicherheit & ToS)
+- **Den OAuth-Token aus `~/.claude/.credentials.json` abzugreifen und für eigene
+  HTTP-Requests zu verwenden ist ein absolutes No-Go.** Ebenso **keine** direkten Calls an
+  interne Endpunkte wie `GET api.anthropic.com/api/oauth/usage` oder andere `/api/oauth/*`.
+  Grund: Verstoß gegen die Anthropic Consumer-ToS (die Tokens sind exklusiv für Claude
+  Code / Claude.ai), seit Anfang 2026 serverseitig geblockt, **Account-Ban-Risiko**. Auch
+  kein Spoofing des Claude-Code-Harness (User-Agent, Client-ID etc.).
+- **Sämtliche Anthropic-Kommunikation läuft ausschließlich über das offizielle `claude`-Binary
+  als Subprozess.** Usage-/Limit-Daten kommen aus `claude -p /usage` (s. `ClaudeUsageClient`),
+  **nicht** aus dem Token. Das frühere Token-Scraping wurde in 0.3.7 bewusst entfernt — nicht
+  wieder einführen. Das Plan-Label darf weiterhin aus `~/.claude.json`
+  (`oauthAccount.organizationType`) gelesen werden (kein Secret, keine Netzwerk-Calls).
+- **Statusline-Hook als Usage-Quelle ist für dieses VSIX nicht nutzbar** (feuert nicht für
+  headless `-p`-Turns — 3× gegen CLI 2.1.178 verifiziert). Nicht erneut untersuchen.
+
 ## Stolperfallen
 - Nach UI-Änderungen VSIX neu bauen UND neu installieren (WebUI liegt in der VSIX).
 - `session.init` (host→web) leert die Transcript-Ansicht — immer VOR `transcript.load` senden.
