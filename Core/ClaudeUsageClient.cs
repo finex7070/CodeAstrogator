@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -20,21 +22,35 @@ namespace CodeAstrogator.Core
     }
 
     /// <summary>
-    /// Fetches plan-limit utilization by running the CLI's own <c>/usage</c> slash
-    /// command headlessly (<c>claude -p /usage --output-format json</c>) and parsing
-    /// the human-readable report it prints. This runs locally — no API turn, no cost
-    /// (<c>num_turns: 0</c>) — and works for whatever auth the CLI is configured with,
-    /// so we no longer scrape the OAuth token or hit the undocumented usage endpoint.
-    /// Only works in subscription mode — API-key sessions print no limits (meters stay 0).
+    /// Fetches plan-limit utilization. Primary source is the OAuth usage endpoint
+    /// (<c>GET api.anthropic.com/api/oauth/usage</c>, authorized with the subscription access token
+    /// from <c>~/.claude/.credentials.json</c>) — it returns the real session/weekly percentages and
+    /// exact reset times as structured JSON. This replaced the earlier <c>claude -p /usage</c> text
+    /// scraping after the CLI's <c>/usage</c> redesign stopped printing the limit percentages in
+    /// headless mode (it now serves an attribution breakdown; a headless pseudo-console can't recover
+    /// them because the native binary won't render its TUI into one — see docs/NOTES.md). The
+    /// <c>-p /usage</c> text parse remains as a fallback. Only meaningful in subscription mode —
+    /// API-key sessions have no OAuth token / plan limits (meters stay 0).
     /// </summary>
     public static class ClaudeUsageClient
     {
         public static string DefaultClaudeJsonPath =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
 
+        private const string OAuthUsageUrl = "https://api.anthropic.com/api/oauth/usage";
+        private static readonly HttpClient Http = new HttpClient();
+        // After a 429 the endpoint stays throttled for a while; back off so the once-a-minute
+        // refresh doesn't keep hammering it (and prolonging the throttle).
+        private static DateTime _oauthBackoffUntilUtc = DateTime.MinValue;
+        // Short cache so bursts (per-minute timer + every turn-end + window-open) don't each hit the
+        // network — the limits barely move in 30s, and it keeps us well under any endpoint throttle.
+        private static UsageSnapshot? _oauthCache;
+        private static DateTime _oauthCacheAtUtc = DateTime.MinValue;
+        private static readonly TimeSpan OAuthCacheTtl = TimeSpan.FromSeconds(30);
+
         /// <summary>
-        /// Fetches the current utilization via <c>claude -p /usage</c>; null on any
-        /// failure (CLI not found, API-key mode, offline, timeout …).
+        /// Fetches the current utilization; null on any failure (no token, API-key mode, offline,
+        /// throttled, …). Tries the structured OAuth endpoint first, then the <c>-p /usage</c> text.
         /// </summary>
         public static async Task<UsageSnapshot?> FetchAsync(
             string? executableOverride = null,
@@ -43,6 +59,13 @@ namespace CodeAstrogator.Core
         {
             try
             {
+                // Primary: structured OAuth usage endpoint (real % + ISO reset times).
+                var viaOAuth = await FetchFromOAuthEndpointAsync(ct).ConfigureAwait(false);
+                if (viaOAuth != null)
+                    return viaOAuth;
+
+                // Fallback: `claude -p /usage` text (has percentages only while the CLI serves the
+                // old report format; the redesigned format has none → null → meters hold last value).
                 var exe = ClaudeExecutableLocator.Locate(executableOverride);
                 if (string.IsNullOrEmpty(exe))
                     return null;
@@ -58,6 +81,128 @@ namespace CodeAstrogator.Core
                 return null; // usage display is best-effort; never break the chat over it
             }
         }
+
+        /// <summary>Path to the CLI's OAuth credentials file (<c>~/.claude/.credentials.json</c>).</summary>
+        internal static string CredentialsPath =>
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", ".credentials.json");
+
+        /// <summary>
+        /// Queries the OAuth usage endpoint with the subscription access token. Returns null when
+        /// there's no OAuth token (API-key mode), while backing off after a 429, or on any error.
+        /// </summary>
+        internal static async Task<UsageSnapshot?> FetchFromOAuthEndpointAsync(CancellationToken ct)
+        {
+            if (_oauthCache != null && DateTime.UtcNow - _oauthCacheAtUtc < OAuthCacheTtl)
+                return _oauthCache; // fresh enough — serve from cache, no network
+
+            if (DateTime.UtcNow < _oauthBackoffUntilUtc)
+                return null; // still cooling down after a 429
+
+            var token = ReadOAuthAccessToken();
+            if (string.IsNullOrEmpty(token))
+                return null; // API-key mode / not signed in → no plan limits to show
+
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, OAuthUsageUrl);
+                req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+                req.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
+                req.Headers.TryAddWithoutValidation("anthropic-version", "2023-06-01");
+                req.Headers.TryAddWithoutValidation("User-Agent", "CodeAstrogator");
+
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(15));
+                using var resp = await Http.SendAsync(req, cts.Token).ConfigureAwait(false);
+
+                if ((int)resp.StatusCode == 429)
+                {
+                    _oauthBackoffUntilUtc = DateTime.UtcNow.AddMinutes(5);
+                    return null;
+                }
+                if (!resp.IsSuccessStatusCode)
+                    return null;
+
+                var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var snapshot = ParseOAuthUsage(JObject.Parse(body));
+                if (snapshot != null)
+                {
+                    _oauthCache = snapshot;
+                    _oauthCacheAtUtc = DateTime.UtcNow;
+                }
+                return snapshot;
+            }
+            catch
+            {
+                return null; // offline / token expired / parse error → fall back
+            }
+        }
+
+        /// <summary>Reads the subscription OAuth access token from <c>~/.claude/.credentials.json</c>
+        /// (<c>claudeAiOauth.accessToken</c>); null if absent (API-key mode / not signed in).</summary>
+        internal static string? ReadOAuthAccessToken()
+        {
+            try
+            {
+                var path = CredentialsPath;
+                if (!File.Exists(path))
+                    return null;
+                var oauth = JObject.Parse(File.ReadAllText(path))["claudeAiOauth"] as JObject;
+                var token = oauth?.Value<string>("accessToken");
+                return string.IsNullOrWhiteSpace(token) ? null : token;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Maps the OAuth usage JSON to a snapshot: <c>five_hour</c> → session,
+        /// <c>seven_day</c> → weekly (utilization 0–100, <c>resets_at</c> as ISO-8601). Returns null
+        /// if neither window is present.</summary>
+        internal static UsageSnapshot? ParseOAuthUsage(JObject root)
+        {
+            if (root == null)
+                return null;
+
+            UsageSnapshot? snapshot = null;
+
+            if (root["five_hour"] is JObject fh && TryUtilization(fh, out var sPct))
+            {
+                snapshot ??= new UsageSnapshot();
+                snapshot.SessionPct = sPct;
+                snapshot.SessionResetsAt = ParseIso(fh.Value<string>("resets_at"));
+            }
+            if (root["seven_day"] is JObject sd && TryUtilization(sd, out var wPct))
+            {
+                snapshot ??= new UsageSnapshot();
+                snapshot.WeeklyPct = wPct;
+                snapshot.WeeklyResetsAt = ParseIso(sd.Value<string>("resets_at"));
+            }
+            return snapshot;
+        }
+
+        private static bool TryUtilization(JObject window, out int pct)
+        {
+            pct = 0;
+            var util = window["utilization"];
+            if (util == null || util.Type == JTokenType.Null)
+                return false;
+            try
+            {
+                pct = Math.Max(0, Math.Min(100, (int)Math.Round(util.Value<double>())));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static DateTimeOffset? ParseIso(string? s) =>
+            !string.IsNullOrEmpty(s)
+            && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto)
+                ? dto
+                : (DateTimeOffset?)null;
 
         /// <summary>
         /// Runs <c>claude -p /usage --output-format json</c> and returns its raw stdout.

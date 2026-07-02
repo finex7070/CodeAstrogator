@@ -416,26 +416,45 @@ compact_boundary evaluation) — details in the respective sections below.
     only when `state.effort === "max" && !state.ultracode` — i.e. **Ultracode wins over Max on the pill**.
     `.modelmode-btn.is-ultra` uses the spectrum gradient + `@keyframes ultra-glow` (cyan/violet halo). The
     `prefers-reduced-motion` block stops the motion (keeps gradient + steady glow).
-- **Session/weekly limits:** stream-json delivers no limit data. The host therefore calls
-  the **`/usage` slash command headless** (`claude -p /usage --output-format json`,
-  `ClaudeUsageClient.FetchAsync(exe, cwd, ct)`): runs **locally, no API turn, no cost**
-  (`num_turns: 0`), works with any CLI auth and replaces the former scraping of the
-  OAuth token + `GET api.anthropic.com/api/oauth/usage`. stdin is closed immediately (the
-  command takes no prompt → no 3-s "no stdin" wait). The report text is parsed:
-  `Current session: N%` → S meter, `Current week (all models): N%` → W meter (the per-model
-  lines like "(Sonnet only)" are ignored); `resets <Mon> <Day>, <h>pm` → reset tooltip
-  (as local wall-clock time, year from "now" incl. year-boundary rollover). Fetched on `ready`
-  (window open), after each turn end, **and periodically every minute** (v0.4.1:
-  `WebViewBridge._usageTimer`, `System.Threading.Timer`, `UsageRefreshIntervalMs`; disposed with the
-  bridge; `RefreshUsage` is thread-agnostic, `Post` is teardown-guarded). **Since 0.5.3 the tick fires
-  even while a turn is running** (previously it skipped on `_session.IsBusy`, so a long turn showed
-  stale limits the whole time) — the `/usage` fetch is its own short-lived `claude -p /usage` process,
-  independent of the turn's process, and an `_usageRefreshInFlight` reentrancy guard (Interlocked)
-  ensures the once-a-minute timer never stacks two fetches. Errors (API-key mode
-  without limits, offline, 30 s timeout) → meters stay put. Plan badge still from
-  `~/.claude.json` → `oauthAccount.organizationType`
-  (claude_team → "Team Plan" …). Note: the report wording is undocumented — on a
-  CLI update re-test the parser (regex in `ClaudeUsageClient.ParseUsageText`).
+- **Session/weekly limits (reworked — see "Usage meters" below).** stream-json delivers no limit
+  data, so the host fetches it via `ClaudeUsageClient.FetchAsync`. Fetched on `ready` (window open),
+  after each turn end, **and every minute** (`WebViewBridge._usageTimer`, `System.Threading.Timer`,
+  `UsageRefreshIntervalMs`; disposed with the bridge; `RefreshUsage` is thread-agnostic, `Post`
+  teardown-guarded). The tick fires even while a turn runs (a long turn would otherwise show stale
+  limits); `_usageRefreshInFlight` (Interlocked) prevents overlapping fetches. Plan badge from
+  `~/.claude.json` → `oauthAccount.organizationType` (claude_team → "Team Plan" …).
+
+## Usage meters — data source (reworked 2026-07-02)
+The CLI **redesigned `/usage`** (v2.1.x): the headless `claude -p /usage --output-format json` report
+no longer prints the **limit percentages** — it now serves an *attribution breakdown*
+("What's contributing to your limits usage / Last 24h · N requests / Top MCP servers"), with **no**
+`Current session: N%` / `Current week: N%` lines and no reset times. The rollout is **server-gated and
+time-varying** (same CLI version returns the old %-format in some windows, the new format in others),
+so the old text scraper silently stopped updating the meters whenever the new format was served.
+
+**Primary source is now the structured OAuth usage endpoint** (`GET api.anthropic.com/api/oauth/usage`,
+`ClaudeUsageClient.FetchFromOAuthEndpointAsync`) — the same endpoint an earlier version used and this
+project had moved away from. It returns clean JSON: `five_hour.utilization` (0–100) → session meter,
+`seven_day.utilization` → weekly meter, plus `resets_at` as **ISO-8601** (exact reset times — no more
+fragile "resets Jun 10, 1pm" text parsing). Authorized with the subscription access token read from
+`~/.claude/.credentials.json` → `claudeAiOauth.accessToken` (headers `Authorization: Bearer …`,
+`anthropic-beta: oauth-2025-04-20`, `anthropic-version: 2023-06-01`). API-key mode / not signed in →
+no token → returns null (meters stay 0, as before). A **30 s cache** (`_oauthCache`) absorbs the
+per-minute + per-turn + on-open bursts, and a **5-min backoff** (`_oauthBackoffUntilUtc`) kicks in on
+HTTP 429 so we never hammer the endpoint. **Fallback:** the old `claude -p /usage` text parse
+(`ParseUsageText`) still runs when the endpoint is unavailable (offline / token expired / backoff) —
+it yields percentages only while the CLI serves the old text format.
+
+- **Why not statusLine / ConPTY:** the statusLine JSON *does* carry `rate_limits.*.used_percentage`,
+  but statusLine only runs in the **interactive TUI**, never under headless `-p` (verified). A headless
+  **ConPTY** (pseudo-console) to make the CLI render the `--ax-screen-reader /usage` dialog was
+  prototyped and **abandoned**: the native single-file `claude.exe` (~239 MB) does not render its TUI
+  into a self-hosted pseudo-console (only the initial screen-clear reaches the pipe, then it drops to
+  headless mode). The stream also carries a per-turn `rate_limit_event`, but it has only
+  `resetsAt`/`rateLimitType`/`status` — **no** percentage.
+- **Caveat:** `/api/oauth/usage` is **undocumented** and reads the OAuth token from disk — re-verify on
+  CLI/auth changes. Errors (offline, token expired, 15 s timeout, 429) are swallowed → meters hold.
+  The `-p /usage` text parser (`ParseUsageText` regex) is a documented-format fallback; re-test it too.
 
 ## Persistent CLI mode (Roadmap #2, 2026-06-04 — opt-in, default off)
 - **What:** Instead of one process per turn, a **long-lived** `claude -p --input-format stream-json

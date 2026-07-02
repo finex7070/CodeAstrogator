@@ -4,6 +4,16 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.5.4] – 2026-07-02
+
+### Added
+- **The Fable 5 model is now selectable** in the Model · Mode picker (between Opus 4.7 and Sonnet 4.6). Picking it runs the session on `claude-fable-5`; the choice sticks across new chats and restarts like the other models.
+
+### Fixed
+- **The session/weekly usage meters update reliably again.** Claude Code redesigned its `/usage` output: in headless mode it no longer prints the "Current session: N% · resets …" limit lines, showing a per-category attribution breakdown ("what's contributing to your limits usage") without any percentages instead. Because that change is rolled out server-side and varies over time, the meters would intermittently freeze on their last value (whenever the new format was served) and then jump when the old format briefly returned. The limits are now read from Claude's structured usage endpoint (`GET /api/oauth/usage`, authorized with your existing subscription login) — giving the real session and weekly percentages plus exact reset times regardless of the `/usage` text format. Requests are cached (30 s) and backed off on rate-limits so the endpoint is queried gently; the old `/usage` text parsing remains as a fallback. API-key sessions (which have no plan limits) are unaffected.
+
+---
+
 ## [0.5.3] – 2026-07-01
 
 ### Changed

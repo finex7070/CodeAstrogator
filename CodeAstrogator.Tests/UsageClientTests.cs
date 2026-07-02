@@ -89,5 +89,49 @@ namespace CodeAstrogator.Tests
         {
             Assert.Equal(expected, ClaudeUsageClient.MapPlanLabel(orgType, rateTier));
         }
+
+        // ── OAuth usage endpoint parsing (the primary source) ──────────────────
+        // Real GET /api/oauth/usage response shape (trimmed).
+        private const string OAuthJson =
+            "{\"five_hour\":{\"utilization\":39.0,\"resets_at\":\"2026-07-02T18:00:00.489592+00:00\"}," +
+            "\"seven_day\":{\"utilization\":4.0,\"resets_at\":\"2026-07-08T18:59:59.489613+00:00\"}," +
+            "\"seven_day_opus\":null,\"extra_usage\":{\"is_enabled\":false}}";
+
+        [Fact]
+        public void ParseOAuthUsage_ReadsUtilizationAndResets()
+        {
+            var s = ClaudeUsageClient.ParseOAuthUsage(Newtonsoft.Json.Linq.JObject.Parse(OAuthJson));
+            Assert.NotNull(s);
+            Assert.Equal(39, s!.SessionPct);
+            Assert.Equal(4, s.WeeklyPct);
+            Assert.Equal(new DateTimeOffset(2026, 7, 2, 18, 0, 0, TimeSpan.Zero), s.SessionResetsAt!.Value.ToUniversalTime());
+            Assert.Equal(7, s.WeeklyResetsAt!.Value.ToUniversalTime().Month);
+            Assert.Equal(8, s.WeeklyResetsAt.Value.ToUniversalTime().Day);
+        }
+
+        [Fact]
+        public void ParseOAuthUsage_RoundsAndClamps()
+        {
+            var json = "{\"five_hour\":{\"utilization\":66.7},\"seven_day\":{\"utilization\":142.0}}";
+            var s = ClaudeUsageClient.ParseOAuthUsage(Newtonsoft.Json.Linq.JObject.Parse(json));
+            Assert.Equal(67, s!.SessionPct);   // rounded
+            Assert.Equal(100, s.WeeklyPct);    // clamped
+        }
+
+        [Fact]
+        public void ParseOAuthUsage_NullUtilization_IsIgnored()
+        {
+            var json = "{\"five_hour\":{\"utilization\":null},\"seven_day\":{\"utilization\":5.0}}";
+            var s = ClaudeUsageClient.ParseOAuthUsage(Newtonsoft.Json.Linq.JObject.Parse(json));
+            Assert.NotNull(s);
+            Assert.Equal(0, s!.SessionPct);
+            Assert.Equal(5, s.WeeklyPct);
+        }
+
+        [Fact]
+        public void ParseOAuthUsage_NoWindows_ReturnsNull()
+        {
+            Assert.Null(ClaudeUsageClient.ParseOAuthUsage(Newtonsoft.Json.Linq.JObject.Parse("{\"extra_usage\":{}}")));
+        }
     }
 }
