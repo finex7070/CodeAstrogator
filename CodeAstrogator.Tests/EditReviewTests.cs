@@ -236,6 +236,75 @@ namespace CodeAstrogator.Tests
             Assert.True(edits[0].Value<bool>("replace_all"));
         }
 
+        // ── Post-turn "Review edits at end of turn": whole-file Write model ────────
+        // The feature models each changed file as a Write whose old-text is the pre-turn baseline and
+        // whose content is the current on-disk state; BuildUpdatedInput reconstructs the file to write
+        // back (accept → current line, reject → baseline line).
+
+        [Fact]
+        public void TurnReview_Write_AllAccepted_ContentEqualsCurrentDisk()
+        {
+            const string baseline = "a\nb\nc";
+            const string current = "a\nB\nc\nd"; // Claude changed b→B and appended d
+            var review = EditReviewSession.Build("Write", new JObject { ["file_path"] = "f.cs", ["content"] = current }, () => baseline);
+            review.AcceptPending();
+            Assert.Equal(current, review.BuildUpdatedInput()!.Value<string>("content"));
+        }
+
+        [Fact]
+        public void TurnReview_Write_AllRejected_ReturnsNull_SoBridgeRevertsToBaseline()
+        {
+            var review = EditReviewSession.Build("Write", new JObject { ["file_path"] = "f.cs", ["content"] = "a\nB\nc" }, () => "a\nb\nc");
+            foreach (var h in review.Hunks) h.State = HunkState.Rejected;
+            // null ⇒ the host writes the baseline back (full revert of the turn's changes to this file)
+            Assert.Null(review.BuildUpdatedInput());
+        }
+
+        [Fact]
+        public void TurnReview_Write_NewFile_BaselineEmpty_AcceptKeepsContent_RejectAllReturnsNull()
+        {
+            // baseline "" models a file created during the turn (host marks it isNew).
+            var accepted = EditReviewSession.Build("Write", new JObject { ["file_path"] = "n.cs", ["content"] = "line1\nline2" }, () => "");
+            Assert.True(accepted.HasHunks);
+            accepted.AcceptPending();
+            Assert.Equal("line1\nline2", accepted.BuildUpdatedInput()!.Value<string>("content"));
+
+            var rejected = EditReviewSession.Build("Write", new JObject { ["file_path"] = "n.cs", ["content"] = "line1\nline2" }, () => "");
+            foreach (var h in rejected.Hunks) h.State = HunkState.Rejected;
+            // null + isNew ⇒ the host deletes the created file rather than leaving it emptied.
+            Assert.Null(rejected.BuildUpdatedInput());
+        }
+
+        [Fact]
+        public void TurnReview_Write_AppliedAnchor_UsesNewFileCoordinates()
+        {
+            // baseline "a\nb\nc" → current "X\nY\na\nB\nc": prepend X,Y and change b→B.
+            // Old-coord anchors differ from new-coord anchors once lines are inserted above.
+            var review = EditReviewSession.Build("Write",
+                new JObject { ["file_path"] = "f.cs", ["content"] = "X\nY\na\nB\nc" }, () => "a\nb\nc");
+            Assert.Equal(2, review.Hunks.Count);
+
+            // hunk 0 = the leading insertion (X,Y): both anchors at line 1
+            Assert.Empty(review.Hunks[0].DeletedLines);
+            Assert.Equal(new[] { "X", "Y" }, review.Hunks[0].AddedLines);
+            Assert.Equal(1, review.Hunks[0].AnchorLine);
+            Assert.Equal(1, review.Hunks[0].AppliedAnchorLine);
+
+            // hunk 1 = b→B: old-text line 2, but NEW-text line 4 (after X,Y,a). Applied mode anchors here.
+            Assert.Equal(2, review.Hunks[1].AnchorLine);
+            Assert.Equal(4, review.Hunks[1].AppliedAnchorLine);
+        }
+
+        [Fact]
+        public void TurnReview_Write_PreservesCrlfByteExact()
+        {
+            const string baseline = "a\r\nb\r\nc\r\n";
+            const string current = "a\r\nB\r\nc\r\n"; // same CRLF line endings, only b→B
+            var review = EditReviewSession.Build("Write", new JObject { ["file_path"] = "f.cs", ["content"] = current }, () => baseline);
+            review.AcceptPending();
+            Assert.Equal(current, review.BuildUpdatedInput()!.Value<string>("content")); // byte-for-byte, CRLF intact
+        }
+
         [Fact]
         public void IsReviewableTool_OnlyEditWriteMultiEdit()
         {

@@ -218,6 +218,7 @@ namespace CodeAstrogator
             to.VerbosityString = from.VerbosityString ?? "normal";
             to.UsePersistentCli = from.UsePersistentCli;
             to.ReviewEditsInEditor = from.ReviewEditsInEditor;
+            to.ReviewEditsAtTurnEnd = from.ReviewEditsAtTurnEnd;
         }
 
         private void RecordSettingsError(string message)

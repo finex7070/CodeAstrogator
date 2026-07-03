@@ -40,6 +40,7 @@ namespace CodeAstrogator.Editor
         private static readonly Brush AddFill = Frozen(Color.FromArgb(0x33, 0x3F, 0xB9, 0x50));         // green ~.20
         private static readonly Brush AddFillDim = Frozen(Color.FromArgb(0x12, 0x3F, 0xB9, 0x50));      // green faint
         private static readonly Brush AddText = Frozen(Color.FromRgb(0x3F, 0xB9, 0x50));
+        private static readonly Brush DeleteText = Frozen(Color.FromRgb(0xF8, 0x51, 0x49));       // red — removed (ghost)
         private static readonly Brush DimText = Frozen(Color.FromArgb(0x99, 0x9A, 0x9A, 0x9A));
 
         private readonly IWpfTextView _view;
@@ -49,6 +50,11 @@ namespace CodeAstrogator.Editor
         private EditReviewSession? _review;
         private Action? _onCompleted;
         private bool _completed;
+        // "applied" mode (post-turn "Review edits at end of turn"): the edit is ALREADY in the buffer, so
+        // the ADDED lines are real buffer lines highlighted green in place, and the removed OLD lines are
+        // shown as red ghost text above them. Default (false) = proposal mode: buffer holds the old text,
+        // red highlights the to-be-deleted lines, green phantoms preview the additions.
+        private bool _applied;
         // bufferLine (0-based) → count of phantom added lines reserved below / above that line
         private readonly Dictionary<int, int> _spaceBelow = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _spaceAbove = new Dictionary<int, int>();
@@ -63,6 +69,14 @@ namespace CodeAstrogator.Editor
 
         public bool HasReview => _review != null;
 
+        /// <summary>True while this view shows an "applied" review (buffer holds the new text; added lines
+        /// highlighted green in place, removed lines as red ghosts). Read by the scrollbar margin so its
+        /// marks use the new-text anchor.</summary>
+        public bool Applied => _applied;
+
+        /// <summary>The 1-based buffer line a hunk anchors to in the current mode.</summary>
+        public int EffectiveAnchor(ReviewHunk hunk) => _applied ? hunk.AppliedAnchorLine : hunk.AnchorLine;
+
         /// <summary>The review's hunks (empty when no review is attached). Read by the scrollbar
         /// overview margin to draw a mark per hunk.</summary>
         public IReadOnlyList<ReviewHunk> ReviewHunks => _review?.Hunks ?? Array.Empty<ReviewHunk>();
@@ -71,11 +85,13 @@ namespace CodeAstrogator.Editor
         /// so the scrollbar overview margin can repaint its marks.</summary>
         public event Action? ReviewChanged;
 
-        /// <summary>Attaches a review to this view and (re)draws it. Replaces any prior review.</summary>
-        public void SetReview(EditReviewSession review, Action onCompleted)
+        /// <summary>Attaches a review to this view and (re)draws it. Replaces any prior review.
+        /// <paramref name="applied"/> selects the "applied" rendering (see <see cref="_applied"/>).</summary>
+        public void SetReview(EditReviewSession review, Action onCompleted, bool applied = false)
         {
             _review = review ?? throw new ArgumentNullException(nameof(review));
             _onCompleted = onCompleted;
+            _applied = applied;
             _completed = false;
             _reviewSnapshot = _view.TextSnapshot;
             ComputeReservedSpace();
@@ -144,6 +160,20 @@ namespace CodeAstrogator.Editor
             if (_review == null)
                 return;
             int lineCount = _view.TextSnapshot.LineCount;
+            if (_applied)
+            {
+                // Applied mode: the added lines are real (in the buffer); reserve room ABOVE the added
+                // block for the red ghost "deleted" lines (where the removed content used to sit).
+                foreach (var hunk in _review.Hunks)
+                {
+                    int delCount = hunk.DeletedLines.Count;
+                    if (delCount == 0)
+                        continue; // pure insertion → nothing removed → no ghosts
+                    int newAnchor0 = Clamp(hunk.AppliedAnchorLine - 1, 0, lineCount - 1);
+                    Add(_spaceAbove, newAnchor0, delCount);
+                }
+                return;
+            }
             foreach (var hunk in _review.Hunks)
             {
                 int addCount = hunk.AddedLines.Count;
@@ -181,7 +211,7 @@ namespace CodeAstrogator.Editor
             var snapshot = _view.TextSnapshot;
             foreach (var hunk in _review.Hunks)
             {
-                try { DrawHunk(hunk, snapshot); }
+                try { if (_applied) DrawHunkApplied(hunk, snapshot); else DrawHunk(hunk, snapshot); }
                 catch { /* never let a draw error break the editor */ }
             }
             try { DrawNavToolbar(snapshot); }
@@ -237,6 +267,27 @@ namespace CodeAstrogator.Editor
             return b;
         }
 
+        /// <summary>Scrolls the view to the topmost change of the current review (called right after a
+        /// review is attached, so opening a file lands on its first change instead of wherever the caret
+        /// was). Works in both modes via <see cref="EffectiveAnchor"/>. Best-effort.</summary>
+        public void ScrollToFirstHunk()
+        {
+            if (_review == null || _review.Hunks.Count == 0)
+                return;
+            try
+            {
+                var snapshot = _view.TextSnapshot;
+                int minLine = int.MaxValue;
+                foreach (var h in _review.Hunks)
+                    minLine = Math.Min(minLine, EffectiveAnchor(h));
+                int line0 = Clamp(minLine - 1, 0, snapshot.LineCount - 1);
+                var line = snapshot.GetLineFromLineNumber(line0);
+                _view.ViewScroller.EnsureSpanVisible(new SnapshotSpan(line.Start, line.End),
+                    EnsureSpanVisibleOptions.AlwaysCenter);
+            }
+            catch { /* best effort */ }
+        }
+
         /// <summary>Scrolls to the previous (dir &lt; 0) or next (dir &gt; 0) hunk relative to the first
         /// visible line, wrapping around at the ends.</summary>
         private void Navigate(int dir, ITextSnapshot snapshot)
@@ -245,7 +296,7 @@ namespace CodeAstrogator.Editor
                 return;
             var lines = new List<int>();
             foreach (var h in _review.Hunks)
-                lines.Add(Clamp(h.AnchorLine - 1, 0, snapshot.LineCount - 1));
+                lines.Add(Clamp(EffectiveAnchor(h) - 1, 0, snapshot.LineCount - 1));
             lines.Sort();
 
             int curr = CurrentTopLine();
@@ -338,6 +389,53 @@ namespace CodeAstrogator.Editor
             }
         }
 
+        /// <summary>Applied mode: the edit is already in the buffer. Highlight the added lines GREEN in
+        /// place, and show the removed OLD lines as RED ghost text in the reserved space above them.
+        /// Reject dims the green (it will be reverted) and shows the red as solid (it will be restored);
+        /// accept dims the red (the old is discarded).</summary>
+        private void DrawHunkApplied(ReviewHunk hunk, ITextSnapshot snapshot)
+        {
+            int newAnchor0 = hunk.AppliedAnchorLine - 1;
+            int addCount = hunk.AddedLines.Count;
+            int delCount = hunk.DeletedLines.Count;
+            bool rejected = hunk.State == HunkState.Rejected;
+            bool accepted = hunk.State == HunkState.Accepted;
+
+            // 1) green highlight over the real (buffer) added lines
+            ITextViewLine? firstAddLine = null;
+            for (int a = 0; a < addCount; a++)
+            {
+                var tvl = VisibleLine(newAnchor0 + a, snapshot);
+                if (tvl == null) continue;
+                if (firstAddLine == null) firstAddLine = tvl;
+                AddRect(_below!, tvl.Extent, tvl.TextTop, tvl.Height, rejected ? AddFillDim : AddFill);
+            }
+
+            // 2) red ghost "deleted" lines in the reserved space above the added block (or, for a pure
+            //    deletion, above the line the removed block now sits before)
+            ITextViewLine? attachLine = firstAddLine ?? VisibleLine(newAnchor0, snapshot);
+            double ghostTop = attachLine != null ? attachLine.TextTop - delCount * _view.LineHeight : double.NaN;
+            SnapshotSpan anchorSpan = attachLine?.Extent ?? default;
+            double left = attachLine?.TextLeft ?? _view.ViewportLeft;
+            if (delCount > 0 && attachLine != null && !double.IsNaN(ghostTop))
+            {
+                for (int i = 0; i < delCount; i++)
+                {
+                    double y = ghostTop + i * _view.LineHeight;
+                    AddRect(_above!, anchorSpan, y, _view.LineHeight, accepted ? DeleteFillDim : DeleteFill);
+                    AddPhantomText(anchorSpan, hunk.DeletedLines[i], left, y, accepted ? DimText : DeleteText, strike: true);
+                }
+            }
+
+            // 3) per-hunk Keep/Revert buttons, anchored at the top of the hunk (the ghost block if any)
+            var barAnchor = attachLine ?? firstAddLine;
+            if (barAnchor != null)
+            {
+                double barTop = delCount > 0 && !double.IsNaN(ghostTop) ? ghostTop : barAnchor.TextTop;
+                AddButtonBar(hunk, barAnchor.Extent, barTop);
+            }
+        }
+
         private void AddButtonBar(ReviewHunk hunk, SnapshotSpan span, double top)
         {
             var bar = new StackPanel
@@ -345,14 +443,25 @@ namespace CodeAstrogator.Editor
                 Orientation = Orientation.Horizontal,
                 Background = new SolidColorBrush(Color.FromArgb(0xE6, 0x25, 0x29, 0x33)),
             };
-            bar.Children.Add(MakeButton(hunk.State == HunkState.Accepted ? "✓ Accepted" : "✓ Accept",
-                hunk.State == HunkState.Accepted, () => Decide(hunk, HunkState.Accepted)));
-            bar.Children.Add(MakeButton(hunk.State == HunkState.Rejected ? "✕ Rejected" : "✕ Reject",
-                hunk.State == HunkState.Rejected, () => Decide(hunk, HunkState.Rejected)));
+            // Applied mode reads as "keep / revert" (the edit is already on disk); proposal mode as
+            // "accept / reject" (the edit hasn't been applied yet).
+            var acceptLabel = _applied
+                ? (hunk.State == HunkState.Accepted ? "✓ Kept" : "✓ Keep")
+                : (hunk.State == HunkState.Accepted ? "✓ Accepted" : "✓ Accept");
+            var rejectLabel = _applied
+                ? (hunk.State == HunkState.Rejected ? "↩ Reverted" : "↩ Revert")
+                : (hunk.State == HunkState.Rejected ? "✕ Rejected" : "✕ Reject");
+            bar.Children.Add(MakeButton(acceptLabel, hunk.State == HunkState.Accepted, () => Decide(hunk, HunkState.Accepted)));
+            bar.Children.Add(MakeButton(rejectLabel, hunk.State == HunkState.Rejected, () => Decide(hunk, HunkState.Rejected)));
 
             bar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double w = bar.DesiredSize.Width;
             Canvas.SetLeft(bar, Math.Max(_view.ViewportLeft, _view.ViewportLeft + _view.ViewportWidth - w - 18));
+            // The floating Prev/Next toolbar sits at the top-right of the viewport (ViewportTop + 6); a hunk
+            // anchored to the first visible line would put its (also right-aligned) button bar right on top of
+            // it. Push the bar just below that band so the two never overlap.
+            double navClearance = _view.ViewportTop + 32;
+            if (top < navClearance) top = navClearance;
             Canvas.SetTop(bar, top);
             _above!.AddAdornment(AdornmentPositioningBehavior.TextRelative, span, "btn:" + hunk.Index, bar, null);
         }
@@ -401,17 +510,20 @@ namespace CodeAstrogator.Editor
             layer.AddAdornment(AdornmentPositioningBehavior.TextRelative, span, null, rect, null);
         }
 
-        private void AddAddedText(SnapshotSpan span, string text, double left, double top, bool dim)
+        private void AddAddedText(SnapshotSpan span, string text, double left, double top, bool dim) =>
+            AddPhantomText(span, text, left, top, dim ? DimText : AddText, strike: dim);
+
+        private void AddPhantomText(SnapshotSpan span, string text, double left, double top, Brush foreground, bool strike)
         {
             var tb = new TextBlock
             {
                 Text = text.Length == 0 ? " " : text,
-                Foreground = dim ? DimText : AddText,
+                Foreground = foreground,
                 FontFamily = GetEditorFontFamily(),
                 FontSize = GetEditorFontSize(),
                 Height = _view.LineHeight,
                 IsHitTestVisible = false,
-                TextDecorations = dim ? TextDecorations.Strikethrough : null,
+                TextDecorations = strike ? TextDecorations.Strikethrough : null,
             };
             Canvas.SetLeft(tb, left);
             Canvas.SetTop(tb, top);

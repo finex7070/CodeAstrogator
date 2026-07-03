@@ -18,6 +18,11 @@ namespace CodeAstrogator.Core
         /// <summary>UI permission mode: ask | acceptEdits | plan | bypass.</summary>
         public string PermissionMode { get; set; } = "ask";
 
+        /// <summary>When on (and <see cref="PermissionMode"/> is <c>acceptEdits</c>), edits are routed
+        /// through the permission hook and auto-approved there so a pre-edit baseline can be captured;
+        /// the changed files are reviewed at the end of the turn. See <see cref="AstrogatorOptions"/>.</summary>
+        public bool ReviewEditsAtTurnEnd { get; set; }
+
         /// <summary>How long (ms) the CLI may wait on a permission/AskUserQuestion prompt before it
         /// times out — carried in the MCP config's <c>timeout</c> field (the CLI prefers it over the
         /// MCP_TOOL_TIMEOUT env var). Driven by the settings window; defaults to
@@ -68,6 +73,15 @@ namespace CodeAstrogator.Core
         /// must match the running process's behaviour (e.g. pre-rendering auto-approved edit cards)
         /// reads this, not the live setting. Null until the first turn launches.</summary>
         public string? LaunchedPermissionMode { get; private set; }
+
+        /// <summary>Pinned per-turn: true when the "Review edits at end of turn" feature routes edits
+        /// through the permission hook (user mode acceptEdits + the toggle). The CLI is then launched in
+        /// its default (ask) mode so Edit/Write/MultiEdit reach the hook (auto-approved there, baseline
+        /// captured). The bridge reads this to (a) run the baseline-capture/auto-approve branch and
+        /// (b) suppress the tool.use pre-decided green card (which assumes CLI-side auto-accept).
+        /// <see cref="LaunchedPermissionMode"/> stays the user selection (acceptEdits) so command
+        /// semantics (Auto-accept commands) are unchanged.</summary>
+        public bool EditsRouteThroughHook { get; private set; }
 
         /// <summary>
         /// Optional MCP permission bridge (Teil A §A5). When available, its --mcp-config +
@@ -126,6 +140,7 @@ namespace CodeAstrogator.Core
                 // Pin the mode for this turn: the process below keeps it for its whole lifetime,
                 // even if the UI changes Settings.PermissionMode mid-turn (see LaunchedPermissionMode).
                 LaunchedPermissionMode = Settings.PermissionMode;
+                EditsRouteThroughHook = Settings.ReviewEditsAtTurnEnd && Settings.PermissionMode == "acceptEdits";
                 _lastResultError = null;
 
                 ClaudeTurnExit exit;
@@ -252,6 +267,11 @@ namespace CodeAstrogator.Core
         {
             if (Settings.PlanMode)
                 return "plan";
+            // "Review edits at end of turn": launch in the CLI default (ask) mode so edits pass through
+            // the permission hook (auto-approved there, with a guaranteed pre-edit baseline) instead of
+            // the CLI's own auto-accept, which would apply the write before we could snapshot it.
+            if (Settings.ReviewEditsAtTurnEnd && Settings.PermissionMode == "acceptEdits")
+                return null;
             return Settings.PermissionMode switch
             {
                 "acceptEdits" => "acceptEdits",
