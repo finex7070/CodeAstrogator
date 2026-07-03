@@ -92,5 +92,15 @@ namespace CodeAstrogator.Options
         /// toggled in the gear/appearance popover. Only takes effect in the modes that actually
         /// prompt for edits (Ask/Plan) — in Auto-accept/Bypass the CLI applies edits without a prompt.</summary>
         public bool ReviewEditsInEditor { get; set; } = false;
+
+        /// <summary>When on, "Auto-accept edits" mode still applies every edit live during the turn,
+        /// but at the <em>end of the turn</em> a list of all changed files appears above the composer.
+        /// Clicking a file opens it in the same in-editor red/green per-hunk review; rejecting a hunk
+        /// reverts the already-applied change on disk. The next prompt is blocked until the list is
+        /// cleared (every file reviewed, or "Keep all"). Off by default; toggled in the Model·Mode
+        /// popover under Auto-accept edits. Only meaningful in <c>acceptEdits</c> mode — to guarantee a
+        /// pre-edit baseline it launches the CLI so edits pass through the permission hook (auto-approved
+        /// there) instead of the CLI's own auto-accept.</summary>
+        public bool ReviewEditsAtTurnEnd { get; set; } = false;
     }
 }

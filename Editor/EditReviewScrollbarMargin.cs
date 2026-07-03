@@ -82,7 +82,7 @@ namespace CodeAstrogator.Editor
             {
                 try
                 {
-                    int line0 = hunk.AnchorLine - 1;
+                    int line0 = _adorner.EffectiveAnchor(hunk) - 1;
                     if (line0 < 0 || line0 >= snapshot.LineCount)
                         continue;
                     var point = snapshot.GetLineFromLineNumber(line0).Start;

@@ -307,6 +307,13 @@ compact_boundary evaluation) — details in the respective sections below.
   instead of a second `turn-footer`. The main result still renders the real turn footer, whose
   totals already include the subagent. **Protocol-dependent — re-verify `parent_tool_use_id` on
   subagent `result` events when the CLI updates.**
+  - **Safety net (0.6.0):** because that tagging is protocol-dependent (untagged subagent results
+    would otherwise each render their own turn footer → several footers at turn end), `app.js`
+    `turnResult` now keeps only ONE turn footer per turn: each `turn.result` removes the previous
+    turn's `turn-divider`/`turn-footer` (tracked in `curTurnDivider`/`curTurnFooter`) before
+    rendering the latest (the last result = the real total). The refs are reset when a new turn
+    starts (`applyStatus`, idle/error → working, not a mid-turn permission round-trip) and when the
+    transcript is cleared, so a completed turn's footer stays put.
 
 ## `+` menu & @-mentions (2026-06-03)
 - *Add file…* → file picker (`attach.files` → `attach.added` chips).
@@ -499,6 +506,11 @@ compact_boundary evaluation) — details in the respective sections below.
 - The separate **plan-mode toggle was removed**: "Plan" in the permission radio is the same thing
   (`--permission-mode plan`) — two controls for one state was confusing.
   `mode.set` stays in the contract (the host still processes it), the UI no longer sends it.
+- **Bypass confirmation (v0.6.0):** selecting the **Bypass** permission radio is gated behind
+  `openConfirmModal` (danger style) — it warns that every edit/command runs without asking. Only
+  `onConfirm` runs the actual switch (`applyMode` → `permission.set`); Cancel leaves
+  `state.permissionMode` untouched. Guarded by `state.permissionMode !== "bypass"` so re-selecting
+  the already-active mode (and every non-bypass mode) still switches instantly with no prompt.
 - **`mode.update` (host→web, contract addition, v0.3.6):** `{ permissionMode, planMode }`. The host
   uses it to push a host-side mode change into the UI selector, **without** wiping the transcript
   (unlike `session.init`). Used on plan approve: `ApplyPlanApprovedMode` switches to
@@ -1039,6 +1051,58 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   (B) `InterLineAdornmentTag` (settable Height), (C) VS diff viewer + per-file Accept/Reject in the chat card.
   An independent API-reflection panel (against the shipped 17.14.249 ref DLLs) confirmed every editor API used
   here exists with the signatures used; this re-fire side-effect is the one thing it could not validate offline.
+
+### Review edits at end of turn (Auto-accept, opt-in, 2026-07-03)
+- **What:** In `acceptEdits` mode, edits still apply live during the turn, but at **turn end** a list of every
+  changed file appears **above the composer**; clicking one opens the same in-editor red/green per-hunk review,
+  and the **next prompt is blocked** until the list is cleared (every file reviewed, or **Keep all**). Rejecting
+  a hunk **reverts the already-applied change on disk**. One **cumulative** diff per file (pre-turn baseline →
+  turn-end disk). Toggle: `AstrogatorOptions.ReviewEditsAtTurnEnd` (sub-toggle under Auto-accept edits).
+- **Baseline is captured via the permission hook, NOT a `tool.use` read.** A `tool.use` stream event and the
+  CLI's disk write race across two processes — reading the file then can lose the race (baseline already edited,
+  or an empty read → revert-to-empty = **data loss**). So when the toggle is on + mode `acceptEdits`,
+  `MapPermissionMode` returns **null** (CLI default/ask) so `Edit/Write/MultiEdit` reach the blocking hook;
+  `ClaudeSessionService.EditsRouteThroughHook` is pinned per-turn. In `HandlePermissionRequestedAsync` a new
+  branch (before the "Auto-accept commands" short-circuit) reads the whole file **before** replying (the CLI
+  blocks on us ⇒ guaranteed pre-image), auto-`allow`s, and posts the pre-decided green card. The `tool.use`
+  green-card path is suppressed for reviewable edits when `EditsRouteThroughHook` (else duplicate cards).
+  `LaunchedPermissionMode` stays the user selection (`acceptEdits`) so "Auto-accept commands" is unchanged.
+  Guards: Edit/MultiEdit baseline must still contain the first `old_string` (else the write landed → skip);
+  a failed/empty read on an existing file → **skip** (never a revert target); a non-existent path → baseline
+  `""` (a file created this turn, `isNew`). `NotebookEdit` isn't modelled by `EditReviewSession` → applied but
+  not reviewed.
+- **State (all under `_turnReviewLock`):** `_turnEditBaselines` (path→pristine), `_turnBaselineSkip`,
+  `_turnReviews` (path→`{Session,Baseline,IsNew}`, present ⇒ next prompt gated). Reset at **next-turn start**
+  (`RunPrompt`) + `session.new`/`load` — **NOT** `OnTurnCompleted` (it runs *after* `TurnResultEvent` in the same
+  turn and would wipe the just-built list).
+- **Reuses `EditReviewSession`** by modelling each file as a **Write** (`old`=baseline, `content`=current disk);
+  `BuildUpdatedInput` reconstructs (accept→disk line, reject→baseline line; all-rejected→null ⇒ host writes the
+  baseline back, or deletes the file if `isNew`).
+- **Applied-mode rendering (NOT a buffer swap).** The edit is already on disk, so the buffer **keeps the new
+  content** and the adorner renders in **applied mode** (`SetReview(..., applied:true)`): the added lines are
+  highlighted **green in place** (real buffer lines) and the removed old lines are shown as **red ghost text**
+  above them (reserved space via the line transform). This required a second anchor per hunk —
+  `ReviewHunk.AppliedAnchorLine` (new-text coordinates; the existing `AnchorLine` is old-text coords for the
+  proposal flow). `EditReviewViewAdorner.DrawHunkApplied` + `ComputeReservedSpace` branch on `_applied`; the
+  scrollbar margin and Prev/Next nav use `EffectiveAnchor`. Buttons read **Keep / Revert** in applied mode.
+- **Editor lifecycle (`EditReviewController.OpenForPath/CommitPath/CancelPath`):** open = attach the applied
+  review and make the buffer **read-only** (`IReadOnlyRegion` over the whole buffer) so stray typing / Ctrl+S
+  can't shift the diff anchors. Commit: `ClearReview` → drop read-only → **only if something was reverted**
+  write the reconstruction to the buffer + `SaveDocData` (accept-all writes nothing — buffer already final, no
+  EOL churn); a fully-rejected **new** file is deleted (`IVsWindowFrame.CloseFrame(NoSave)` + `File.Delete`).
+  Cancel/Keep-all/session-change: just drop read-only (the buffer was never changed → disk stays applied). This
+  is much simpler and safer than a baseline buffer-swap (no divergence between buffer and disk). **⚠ Needs
+  manual VS verification** (green/red-ghost geometry, read-only region, save path) — not unit-tested; the
+  new-coordinate anchoring **is** unit-tested. Save may renormalize EOLs on files with unusual line endings.
+- **Gate is host-authoritative:** `HandlePromptSend` bails (with a note) while `_turnReviews` is non-empty
+  (defends against reload / queued sends / Enter-races); the WebUI `canSend()` mirrors it. On WebView reload
+  the list + gate are re-posted from `SendInitialSession` (`RepostTurnReviewList`). `turn.stop` also builds the
+  list (a cancelled turn emits no `TurnResultEvent`).
+- **Contract:** web→host `reviewEditsAtTurnEnd.set {enabled}`, `editReview.openTurnFile {path}`,
+  `editReview.keepAll`, `editReview.discardAll`; host→web `editReview.turnList {files:[{path,name,hunkCount,isNew}]}`,
+  `editReview.turnFileDone {path}`, `editReview.turnListClear`. `session.init` carries `reviewEditsAtTurnEnd`.
+  **Keep all** clears the list with no disk change; **Discard all** reverts every file to its baseline (deletes
+  files created this turn) — open reviews go through `EditReviewController.CommitPath`, the rest via direct disk IO.
 
 ## AskUserQuestion (interactive follow-up questions) — solved 2026-06-05 (real in-turn card via the permission hook)
 - **Key finding (CLI 2.1.165, throwaway probes):** `AskUserQuestion` **routes through the
