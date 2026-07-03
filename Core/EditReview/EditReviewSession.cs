@@ -17,20 +17,27 @@ namespace CodeAstrogator.Core.EditReview
         /// <summary>Which edit unit this hunk belongs to (0 for Edit/Write; the <c>edits[]</c> slot for MultiEdit).</summary>
         public int UnitIndex { get; }
 
-        /// <summary>1-based line in the CURRENT file where the hunk's first line sits (adornment anchor).</summary>
+        /// <summary>1-based line in the OLD-text coordinate space where the hunk's first line sits — the
+        /// anchor for the default (proposal) review, where the editor buffer still holds the old text.</summary>
         public int AnchorLine { get; }
+
+        /// <summary>1-based line in the NEW-text coordinate space where the hunk's ADDED lines begin (for a
+        /// pure deletion, the line the removed block sat before). Used by the "applied" review, where the
+        /// buffer already holds the new text and the added lines are highlighted in place.</summary>
+        public int AppliedAnchorLine { get; }
 
         public IReadOnlyList<string> DeletedLines { get; }
         public IReadOnlyList<string> AddedLines { get; }
 
         public HunkState State { get; set; } = HunkState.Pending;
 
-        public ReviewHunk(int index, int unitIndex, int anchorLine,
+        public ReviewHunk(int index, int unitIndex, int anchorLine, int appliedAnchorLine,
             IReadOnlyList<string> deletedLines, IReadOnlyList<string> addedLines)
         {
             Index = index;
             UnitIndex = unitIndex;
             AnchorLine = anchorLine;
+            AppliedAnchorLine = appliedAnchorLine;
             DeletedLines = deletedLines;
             AddedLines = addedLines;
         }
@@ -49,8 +56,10 @@ namespace CodeAstrogator.Core.EditReview
         {
             public int Index;
             public IReadOnlyList<LineSegment> Segments = Array.Empty<LineSegment>();
-            // 1-based file line each segment starts at (only meaningful for Changed segments).
+            // 1-based OLD-text line each segment starts at (only meaningful for Changed segments).
             public int[] SegmentAnchors = Array.Empty<int>();
+            // 1-based NEW-text line each segment starts at (the "applied" anchor).
+            public int[] SegmentNewAnchors = Array.Empty<int>();
             // The hunk attached to each Changed segment, in segment order (null entries = Unchanged).
             public ReviewHunk?[] SegmentHunks = Array.Empty<ReviewHunk?>();
             public JObject? OriginalEdit; // the original edits[] entry for MultiEdit (null for Edit/Write)
@@ -135,6 +144,7 @@ namespace CodeAstrogator.Core.EditReview
                     var seg = unit.Segments[s];
                     var hunk = new ReviewHunk(
                         index: hunks.Count, unitIndex: unit.Index, anchorLine: unit.SegmentAnchors[s],
+                        appliedAnchorLine: unit.SegmentNewAnchors[s],
                         deletedLines: seg.OldLines, addedLines: seg.NewLines);
                     unit.SegmentHunks[s] = hunk;
                     hunks.Add(hunk);
@@ -147,17 +157,22 @@ namespace CodeAstrogator.Core.EditReview
         {
             var segments = LineDiff.Compute(oldText, newText);
             var anchors = new int[segments.Count];
-            int oldLineCursor = baseStartLine; // 1-based file line of the next old line
+            var newAnchors = new int[segments.Count];
+            int oldLineCursor = baseStartLine; // 1-based old-text line of the next old line
+            int newLineCursor = baseStartLine; // 1-based new-text line of the next new line
             for (int i = 0; i < segments.Count; i++)
             {
                 anchors[i] = oldLineCursor;
+                newAnchors[i] = newLineCursor;
                 oldLineCursor += segments[i].OldLines.Count;
+                newLineCursor += segments[i].NewLines.Count;
             }
             return new Unit
             {
                 Index = unitIndex,
                 Segments = segments,
                 SegmentAnchors = anchors,
+                SegmentNewAnchors = newAnchors,
                 SegmentHunks = new ReviewHunk?[segments.Count],
                 OriginalEdit = originalEdit,
             };

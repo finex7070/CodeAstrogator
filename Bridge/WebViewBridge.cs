@@ -55,6 +55,29 @@ namespace CodeAstrogator.Bridge
         // upgrade their persisted status to applied/failed. Cleared at turn end.
         private readonly System.Collections.Generic.Dictionary<string, JObject> _recordedPermissions
             = new System.Collections.Generic.Dictionary<string, JObject>();
+        // ── "Review edits at end of turn" (opt-in, acceptEdits) ──────────────────
+        // All three are guarded by _turnReviewLock (written from the MCP/stream background threads,
+        // read/mutated on the UI thread). Baselines accumulate during a turn; the reviews are built at
+        // turn end and persist (gating the next prompt) until every file is decided or "Keep all".
+        private readonly object _turnReviewLock = new object();
+        // path → pre-turn file content ("" = a file created this turn). First-touch capture only.
+        private readonly System.Collections.Generic.Dictionary<string, string> _turnEditBaselines
+            = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // paths whose pristine content couldn't be snapshotted reliably (read failed / lost the write
+        // race) — never reviewed, so a bad read can't become a revert-to-empty target.
+        private readonly System.Collections.Generic.HashSet<string> _turnBaselineSkip
+            = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // path → the cumulative review built at turn end (present ⇒ the next prompt is gated).
+        private readonly System.Collections.Generic.Dictionary<string, TurnReview> _turnReviews
+            = new System.Collections.Generic.Dictionary<string, TurnReview>(StringComparer.OrdinalIgnoreCase);
+
+        private sealed class TurnReview
+        {
+            public EditReviewSession Session = null!;
+            public string Baseline = "";  // pre-turn content (revert target)
+            public bool IsNew;            // baseline was empty → file created this turn
+        }
+
         private bool _disposed;
         private bool _uiReady; // the WebUI sent "ready" → safe to Post (else messages are dropped)
         private readonly System.Collections.Generic.List<JObject> _queuedUiMessages
@@ -86,6 +109,7 @@ namespace CodeAstrogator.Bridge
             _session.Settings.Effort = opt.DefaultEffortString;
             _session.Settings.Ultracode = opt.UltracodeEnabled;
             _session.Settings.PermissionMode = opt.PermissionModeString;
+            _session.Settings.ReviewEditsAtTurnEnd = opt.ReviewEditsAtTurnEnd;
             _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
             _activeFileSessionEnabled = opt.ActiveFileOnByDefault; // initial per-session toggle = option default
 
@@ -213,6 +237,9 @@ namespace CodeAstrogator.Bridge
                     DenyAllPendingPermissions("Turn stopped"); // let blocked MCP calls return
                     _session.StopTurn();
                     PostSystemNote("Turn stopped"); // decision #11
+                    // A cancelled turn emits no TurnResultEvent, so build the changed-files review list
+                    // here from whatever baselines were captured before the stop (edits already applied).
+                    BuildAndPostTurnReviewList();
                     break;
                 case "session.new":
                     HandleSessionNew();
@@ -268,8 +295,22 @@ namespace CodeAstrogator.Bridge
                     _package.GetOptions().ReviewEditsInEditor = msg.Value<bool?>("enabled") ?? false;
                     _package.SaveOptions();
                     break;
+                case "reviewEditsAtTurnEnd.set":
+                    _package.GetOptions().ReviewEditsAtTurnEnd = msg.Value<bool?>("enabled") ?? false;
+                    _session.Settings.ReviewEditsAtTurnEnd = _package.GetOptions().ReviewEditsAtTurnEnd;
+                    _package.SaveOptions();
+                    break;
                 case "editReview.open":
                     HandleEditReviewOpen(msg.Value<string>("requestId") ?? "");
+                    break;
+                case "editReview.openTurnFile":
+                    HandleOpenTurnFile(msg.Value<string>("path") ?? "");
+                    break;
+                case "editReview.keepAll":
+                    HandleKeepAllTurnReviews();
+                    break;
+                case "editReview.discardAll":
+                    HandleDiscardAllTurnReviews();
                     break;
                 case "consent.set":
                     // first-run consent popup answered (announcements + updates) → persist both
@@ -345,6 +386,14 @@ namespace CodeAstrogator.Bridge
                 return;
             if (RemoteSessionActive)
                 return; // remote control owns the session in the terminal — the UI locks the composer too
+            // Authoritative half of the post-turn edit-review gate (the WebUI also disables send): a new
+            // prompt can't start while changed files from the last turn are still awaiting review. Guards
+            // against a reload, queued sends, or an Enter-race that the client-only check would miss.
+            if (HasPendingTurnReview())
+            {
+                PostSystemNote("Review the changed files above before sending the next prompt.");
+                return;
+            }
 
             var typedText = text; // what the user actually typed — shown in the bubble + title
 
@@ -427,6 +476,7 @@ namespace CodeAstrogator.Bridge
                 _session.Settings.Model = options.DefaultModel;
 
             _turnHadAssistantOutput = false;
+            ResetTurnReviewState(); // fresh turn → drop the previous turn's captured baselines/reviews
             _package.JoinableTaskFactory.RunAsync(async () =>
             {
                 await TaskScheduler.Default;
@@ -461,6 +511,21 @@ namespace CodeAstrogator.Bridge
             // bridge echoes the original input, which the CLI requires.)
             if (!isQuestion && IsAutoApprovedByPattern(req.ToolName, req.Input))
                 return Task.FromResult(new PermissionDecision { Behavior = "allow" });
+
+            // "Review edits at end of turn" (opt-in, acceptEdits): edits are deliberately routed through
+            // this hook (see ClaudeSessionService.MapPermissionMode) so we can snapshot the file BEFORE
+            // the CLI writes it — the CLI blocks on our reply, guaranteeing a true pre-edit baseline.
+            // Capture it, auto-approve, and show the pre-decided green card; the changed files are reviewed
+            // collectively at turn end. MUST come before the "Auto-accept commands" short-circuit below,
+            // which would otherwise approve the edit before we snapshot it.
+            if (!isQuestion
+                && _session.EditsRouteThroughHook
+                && EditReviewSession.IsReviewableTool(req.ToolName))
+            {
+                CaptureTurnBaseline(req.ToolName, req.Input);
+                PostAutoApprovedEditCard(req.RequestId, req.ToolName, req.Input);
+                return Task.FromResult(new PermissionDecision { Behavior = "allow" });
+            }
 
             // "Auto-accept commands" toggle: in Auto-accept-edits mode, also auto-approve every
             // non-question tool the hook prompts for (Bash/PowerShell/MCP/…) — edits are already
@@ -798,6 +863,281 @@ namespace CodeAstrogator.Bridge
             return "";
         }
 
+        // ── "Review edits at end of turn" (opt-in, acceptEdits) ──────────────────
+
+        /// <summary>Snapshots a file's pristine (pre-turn) content the FIRST time it is edited this turn.
+        /// Runs on the MCP background thread while the CLI is blocked on our reply, so the read is
+        /// guaranteed to happen before the write lands. A file we can't snapshot reliably (unreadable, or
+        /// an Edit/MultiEdit whose old_string isn't in the read content ⇒ the write already landed) is
+        /// recorded as "skip" and never reviewed — so a bad read can't become a revert-to-empty target.</summary>
+        private void CaptureTurnBaseline(string toolName, JObject input)
+        {
+            var path = input.Value<string>("file_path");
+            if (string.IsNullOrEmpty(path))
+                return;
+            lock (_turnReviewLock)
+            {
+                if (_turnEditBaselines.ContainsKey(path!) || _turnBaselineSkip.Contains(path!))
+                    return; // first-touch only
+                try
+                {
+                    if (!System.IO.File.Exists(path))
+                    {
+                        _turnEditBaselines[path!] = ""; // a file created this turn → empty baseline (isNew)
+                        return;
+                    }
+                    var content = System.IO.File.ReadAllText(path);
+                    if (!BaselineMatchesEdit(toolName, input, content))
+                    {
+                        _turnBaselineSkip.Add(path!); // lost the write race → don't trust this as pristine
+                        return;
+                    }
+                    _turnEditBaselines[path!] = content;
+                }
+                catch { _turnBaselineSkip.Add(path!); }
+            }
+        }
+
+        /// <summary>For Edit/MultiEdit the pristine file must still contain the first old_string; if not,
+        /// the write already landed and the read is post-edit. Write replaces the whole file → always ok.</summary>
+        private static bool BaselineMatchesEdit(string toolName, JObject input, string content)
+        {
+            string Norm(string s) => s.Replace("\r\n", "\n").Replace("\r", "\n");
+            var c = Norm(content);
+            if (toolName == "Edit")
+            {
+                var os = input.Value<string>("old_string") ?? "";
+                return os.Length == 0 || c.IndexOf(Norm(os), StringComparison.Ordinal) >= 0;
+            }
+            if (toolName == "MultiEdit")
+            {
+                var first = (input["edits"] as JArray)?.FirstOrDefault() as JObject;
+                var os = first?.Value<string>("old_string") ?? "";
+                return os.Length == 0 || c.IndexOf(Norm(os), StringComparison.Ordinal) >= 0;
+            }
+            return true; // Write
+        }
+
+        /// <summary>Posts the pre-decided green "approved" card for an edit auto-approved by the review-at-
+        /// turn-end hook (same shape the acceptEdits/bypass tool.use path uses), and records it so a later
+        /// tool.result upgrades it to Applied/Failed. Marshals to the UI thread.</summary>
+        private void PostAutoApprovedEditCard(string requestId, string toolName, JObject input)
+        {
+            var diff = BuildPermissionDiff(toolName, input);
+            var inputClone = (JObject)input.DeepClone();
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed)
+                    return;
+                var card = new JObject
+                {
+                    ["type"] = "permission.request",
+                    ["requestId"] = requestId,
+                    ["toolName"] = toolName,
+                    ["input"] = inputClone.DeepClone(),
+                    ["autoApproved"] = true,
+                };
+                if (diff != null)
+                    card["diff"] = diff;
+                Post(card);
+                RecordPermissionMessage(
+                    new PendingPermission { RequestId = requestId, ToolName = toolName, Input = inputClone, Diff = diff },
+                    "approved");
+            }).Task.Forget();
+        }
+
+        /// <summary>Builds the cumulative per-file review from the captured baselines vs. the current disk
+        /// content and posts the changed-files list above the composer. Called at turn end (and on stop).
+        /// Idempotent — safe if it runs from both paths.</summary>
+        private void BuildAndPostTurnReviewList()
+        {
+            if (!_session.EditsRouteThroughHook)
+                return; // feature off / not acceptEdits this turn
+
+            System.Collections.Generic.Dictionary<string, string> baselines;
+            lock (_turnReviewLock)
+            {
+                if (_turnEditBaselines.Count == 0)
+                    return;
+                baselines = new System.Collections.Generic.Dictionary<string, string>(_turnEditBaselines, StringComparer.OrdinalIgnoreCase);
+            }
+
+            var files = new JArray();
+            var built = new System.Collections.Generic.Dictionary<string, TurnReview>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in baselines)
+            {
+                var path = kv.Key;
+                var baseline = kv.Value;
+                string current;
+                bool exists;
+                try
+                {
+                    exists = System.IO.File.Exists(path);
+                    current = exists ? System.IO.File.ReadAllText(path) : "";
+                }
+                catch { continue; } // unreadable now → skip
+                if (!exists) continue; // edited then deleted this turn → nothing to review on disk
+
+                // Model the whole-file change as a Write: old = baseline, new = current disk content.
+                var input = new JObject { ["file_path"] = path, ["content"] = current };
+                EditReviewSession session;
+                try { session = EditReviewSession.Build("Write", input, () => baseline); }
+                catch { continue; }
+                if (!session.HasHunks) continue; // edited then reverted to identical → drop
+
+                built[path] = new TurnReview { Session = session, Baseline = baseline, IsNew = baseline.Length == 0 };
+                files.Add(TurnReviewFileEntry(path, session));
+            }
+
+            lock (_turnReviewLock)
+            {
+                _turnReviews.Clear();
+                foreach (var kv in built)
+                    _turnReviews[kv.Key] = kv.Value;
+            }
+            if (files.Count == 0)
+                return;
+            Post(new JObject { ["type"] = "editReview.turnList", ["files"] = files });
+        }
+
+        /// <summary>Re-posts the pending changed-files list after a WebView reload so the UI (and the gate)
+        /// survive the reload. No-op when nothing is pending.</summary>
+        private void RepostTurnReviewList()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            JArray files;
+            lock (_turnReviewLock)
+            {
+                if (_turnReviews.Count == 0)
+                    return;
+                files = new JArray();
+                foreach (var kv in _turnReviews)
+                    files.Add(TurnReviewFileEntry(kv.Key, kv.Value.Session));
+            }
+            Post(new JObject { ["type"] = "editReview.turnList", ["files"] = files });
+        }
+
+        private bool HasPendingTurnReview()
+        {
+            lock (_turnReviewLock)
+                return _turnReviews.Count > 0;
+        }
+
+        /// <summary>Builds a changed-files list entry with the still-open added/removed line counts (a file
+        /// leaves the list only when fully reviewed, so every listed file's hunks are still pending).</summary>
+        private static JObject TurnReviewFileEntry(string path, EditReviewSession session)
+        {
+            int added = 0, removed = 0;
+            foreach (var h in session.Hunks)
+            {
+                added += h.AddedLines.Count;
+                removed += h.DeletedLines.Count;
+            }
+            return new JObject
+            {
+                ["path"] = path,
+                ["name"] = System.IO.Path.GetFileName(path),
+                ["added"] = added,
+                ["removed"] = removed,
+            };
+        }
+
+        /// <summary>Clears all captured baselines and pending reviews (new turn / session change).</summary>
+        private void ResetTurnReviewState()
+        {
+            lock (_turnReviewLock)
+            {
+                _turnEditBaselines.Clear();
+                _turnBaselineSkip.Clear();
+                _turnReviews.Clear();
+            }
+        }
+
+        /// <summary>web→host editReview.openTurnFile: open the changed file in the in-editor review with the
+        /// pre-turn baseline swapped in (read-only) and per-hunk Accept/Reject. UI thread.</summary>
+        private void HandleOpenTurnFile(string path)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            TurnReview? review;
+            lock (_turnReviewLock)
+                _turnReviews.TryGetValue(path ?? "", out review);
+            if (review == null)
+                return; // stale (already decided / cleared)
+            try { _editReview.OpenForPath(path!, review.Session, () => FinalizeTurnFileReview(path!)); }
+            catch (Exception ex) { PostError("Could not open the changed file for review: " + ex.Message); }
+        }
+
+        /// <summary>Called by the EditReviewController once every hunk of a post-turn file is decided:
+        /// writes the accepted/rejected reconstruction to disk (or deletes a fully-rejected new file),
+        /// drops the file from the list, and unblocks the composer once the list is empty. UI thread.</summary>
+        private void FinalizeTurnFileReview(string path)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            TurnReview? review;
+            lock (_turnReviewLock)
+                _turnReviews.TryGetValue(path ?? "", out review);
+            if (review == null)
+                return;
+
+            var updated = review.Session.BuildUpdatedInput(); // Write → { content }; null = all rejected
+            var finalContent = updated != null ? (updated.Value<string>("content") ?? "") : review.Baseline;
+            var deleteFile = review.IsNew && updated == null; // a created file, rejected in full → remove it
+            _editReview.CommitPath(path!, finalContent, deleteFile);
+
+            lock (_turnReviewLock)
+                _turnReviews.Remove(path!);
+            Post(new JObject { ["type"] = "editReview.turnFileDone", ["path"] = path });
+        }
+
+        /// <summary>web→host editReview.keepAll: accept every changed file as-is (no disk changes), close any
+        /// open review, and clear the list + gate.</summary>
+        private void HandleKeepAllTurnReviews()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _editReview.CloseAllTurnReviews(); // restore any open review buffers to the applied content
+            ResetTurnReviewState();
+            Post(new JObject { ["type"] = "editReview.turnListClear" });
+        }
+
+        /// <summary>web→host editReview.discardAll: revert every changed file to its pre-turn baseline
+        /// (delete files created this turn), then clear the list + gate. Files currently open in a review go
+        /// through the controller (buffer + save); the rest are written to disk directly.</summary>
+        private void HandleDiscardAllTurnReviews()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            System.Collections.Generic.List<(string path, string baseline, bool isNew)> items;
+            lock (_turnReviewLock)
+                items = _turnReviews.Select(kv => (kv.Key, kv.Value.Baseline, kv.Value.IsNew)).ToList();
+            foreach (var (path, baseline, isNew) in items)
+            {
+                if (_editReview.IsReviewing(path))
+                    _editReview.CommitPath(path, baseline, isNew); // open review → write baseline to buffer + save, or delete+close
+                else
+                    RevertOnDisk(path, baseline, isNew);
+            }
+            ResetTurnReviewState();
+            Post(new JObject { ["type"] = "editReview.turnListClear" });
+        }
+
+        /// <summary>Reverts a not-currently-reviewed file on disk: restore its pre-turn baseline, or delete a
+        /// file created this turn. Best-effort.</summary>
+        private static void RevertOnDisk(string path, string baseline, bool deleteFile)
+        {
+            try
+            {
+                if (deleteFile)
+                {
+                    if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                }
+                else
+                {
+                    System.IO.File.WriteAllText(path, baseline);
+                }
+            }
+            catch { /* best effort */ }
+        }
+
         // ── pattern-based auto-approve (Settings + "Always" button) ──────────────
 
         /// <summary>The string a permission request is matched against: the command for
@@ -953,15 +1293,23 @@ namespace CodeAstrogator.Bridge
         }
 
         /// <summary>Guards turn-disrupting actions: while a turn runs (working or awaiting a permission
-        /// decision), switching/clearing the session would orphan the live process and land its events on
-        /// the wrong conversation. Posts a note and returns true so the caller bails.</summary>
+        /// decision) switching/clearing the session would orphan the live process; while a post-turn edit
+        /// review is still pending it would silently abandon that review. Posts a note and returns true so
+        /// the caller bails. (The UI also disables these buttons — this is the authoritative backstop.)</summary>
         private bool TurnRunningBlocks(string action)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (!_session.IsBusy)
-                return false;
-            PostSystemNote("Stop the current turn first to " + action + ".");
-            return true;
+            if (_session.IsBusy)
+            {
+                PostSystemNote("Stop the current turn first to " + action + ".");
+                return true;
+            }
+            if (HasPendingTurnReview())
+            {
+                PostSystemNote("Review the changed files above before you " + action + ".");
+                return true;
+            }
+            return false;
         }
 
         private void HandleSessionNew()
@@ -1012,6 +1360,7 @@ namespace CodeAstrogator.Bridge
             AttachToRecord(restore);
             SendSessionInit();      // session.init first — it resets the transcript view…
             SendTranscript(restore); // …then the messages land on the clean slate
+            RepostTurnReviewList(); // WebView reloaded mid-review → restore the list + the send gate
         }
 
         private void HandleSessionLoad(string sessionId)
@@ -1088,7 +1437,13 @@ namespace CodeAstrogator.Bridge
                 _session.ResetSession();
                 _sessionStartAnnounced = false;
                 _activeFileSessionEnabled = ActiveFileDefaultOn; // per-session override resets to the option default
-                SendSessionInit();                // resets the transcript view to the fresh session
+                // The deleted session's pending post-turn review goes with it (edits stay on disk).
+                if (HasPendingTurnReview())
+                {
+                    _editReview.CloseAllTurnReviews();
+                    ResetTurnReviewState();
+                }
+                SendSessionInit();                // resets the transcript view to the fresh session (clears the UI review list)
                 SendActiveFile();
             }
 
@@ -1208,6 +1563,11 @@ namespace CodeAstrogator.Bridge
             if (_session.IsBusy)
             {
                 PostRemoteTerminalState("error", "A turn is still running — stop it before starting remote control.");
+                return;
+            }
+            if (HasPendingTurnReview())
+            {
+                PostRemoteTerminalState("error", "Review the changed files above before starting remote control.");
                 return;
             }
             if (RemoteSessionActive)
@@ -1728,8 +2088,13 @@ namespace CodeAstrogator.Bridge
                     // After a mid-turn switch (e.g. plan approval flips Settings to acceptEdits) the
                     // process is still in its old mode and fires the real permission hook; pre-rendering
                     // an auto-approved card here would then collide with it (duplicate cards).
+                    // When "Review edits at end of turn" is active, edits are routed through the permission
+                    // hook (which posts this same green card + captures the baseline), so skip it here to
+                    // avoid a duplicate card. Reviewable edits go through the hook; NotebookEdit still auto-
+                    // applies CLI-side and is pre-rendered here as before.
                     if (IsEditTool(tool.Name)
-                        && _session.LaunchedPermissionMode is "acceptEdits" or "bypass")
+                        && _session.LaunchedPermissionMode is "acceptEdits" or "bypass"
+                        && !(_session.EditsRouteThroughHook && EditReviewSession.IsReviewableTool(tool.Name)))
                     {
                         var diff = BuildPermissionDiff(tool.Name, tool.Input);
                         var card = new JObject
@@ -1845,6 +2210,9 @@ namespace CodeAstrogator.Bridge
                         // last known utilization; RefreshUsage() right after turn end updates it
                         ["limits"] = BuildLimits(),
                     });
+                    // "Review edits at end of turn": surface the collected changed-files list above the
+                    // composer and gate the next prompt until it's cleared.
+                    BuildAndPostTurnReviewList();
                     break;
 
                 case ApiRetryEvent retry:
@@ -2119,6 +2487,7 @@ namespace CodeAstrogator.Bridge
                 ["permissionMode"] = _session.Settings.PermissionMode,
                 ["autoAcceptCommands"] = options.AutoAcceptCommands,
                 ["reviewEditsInEditor"] = options.ReviewEditsInEditor,
+                ["reviewEditsAtTurnEnd"] = options.ReviewEditsAtTurnEnd,
                 ["cwd"] = _package.GetSolutionDirectory() ?? "",
                 ["tokens"] = _session.TotalTokens,
                 ["contextTokens"] = _history.Current.ContextTokens,

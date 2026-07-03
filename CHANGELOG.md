@@ -4,6 +4,18 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.0] – 2026-07-03
+
+### Added
+- **Running agents now show as a live list at the bottom of the chat.** While a prompt has one or more subagents (the Task tool) running, a small panel appears just above the message box listing each running agent with a spinner and its task label. Each entry disappears as its agent finishes, and the panel clears when the turn ends.
+- **New "Review all edits at end of turn" option for Auto-accept edits mode.** Turn it on (under *Auto-accept edits* in the model·mode popover) and Claude still applies every edit automatically as it works — but when the turn finishes, a list of **every file it changed** appears just above the message box, and you can't send the next prompt until you've dealt with it. Click a file to open it in the code editor: because the changes are already saved, the **new lines are highlighted green in place** and any **removed old lines are shown in red as ghost text** above them, with per-change **Keep / Revert** buttons. **Keep** leaves the change; **Revert** undoes just that change back to how the file was before the turn. When every change in a file is decided the file drops off the list; once the list is empty (or you press **Keep all** to accept everything as-is, or **Discard all** to revert every change from the turn — deleting files created this turn), the composer unlocks. It's a way to let Claude run freely and then do one collected review of all its edits at the end, instead of approving each edit up front. Reverting *all* changes to a file Claude *created* this turn deletes the file. The list survives a window reload, and the file is read-only while you review it so an accidental keystroke or Ctrl+S can't disturb the diff. Off by default.
+- **Switching to Bypass permission mode now asks for confirmation.** Choosing **Bypass** in the model·mode popover opens a short warning dialog explaining that Claude will apply every file edit and run every command without asking — and to use it only in a workspace you trust. **Enable Bypass** confirms the switch; **Cancel** leaves the current mode untouched. Re-selecting Bypass when it's already active does not prompt, and the other modes still switch instantly.
+
+### Fixed
+- **A prompt that spawned subagents no longer shows several turn footers.** When a turn ran one or more Task subagents, each could render its own `time · tok · $` footer at the end, so the turn appeared to "end" several times. Only a single turn footer (the real total) is now shown per turn.
+
+---
+
 ## [0.5.4] – 2026-07-02
 
 ### Added

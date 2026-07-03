@@ -23,6 +23,9 @@
     permissionMode: "ask",
     autoAcceptCommands: false, // in acceptEdits mode, also auto-approve Bash/PowerShell/MCP
     reviewEditsInEditor: false, // review file edits inline in the code editor (per-hunk) instead of the chat diff card
+    reviewEditsAtTurnEnd: false, // Auto-accept: collect all edits, review the changed files at the end of the turn
+    turnReview: { files: [] }, // pending post-turn changed-files review (blocks the next prompt until cleared)
+    runningAgents: [],       // Task subagents currently running: [{id, label}] → live spinner list
     cwd: "",
     tokens: 0,
     contextTokens: 0,        // context size after the last turn (input incl. cache + output)
@@ -92,6 +95,8 @@
   const composer = $("composer");
   const input = $("input");
   const attachmentsEl = $("attachments");
+  const turnReviewEl = $("turn-review");
+  const agentsRunningEl = $("agents-running");
   const sendBtn = $("btn-send");
   const activeFileChip = $("active-file");
   const activeFileName = $("active-file-name");
@@ -168,6 +173,12 @@
   // fresh list (the previous, worked-through tasks are cleared) instead of appending — so each
   // follow-up prompt shows its own list, not an ever-growing pile.
   let taskBatchClosed = false;
+  // A turn can emit several `result` events — the main turn total plus one per subagent (Task tool).
+  // Subagent results are normally tagged (→ agent footer), but the CLI's tagging is protocol-dependent,
+  // so to be safe we keep only ONE turn footer per turn: each turnResult removes the previous turn's
+  // footer/divider before rendering the latest (the last result = the real turn total). Reset at the
+  // start of the next turn so a completed turn's footer stays put.
+  let curTurnDivider = null, curTurnFooter = null;
 
   function resetTasks() {
     state.tasks = [];
@@ -512,6 +523,9 @@
       case "permission.result": return applyPermissionResult(m);
       case "permission.finalize": return finalizePermissionCard(m.requestId, m.status);
       case "permission.expire": return expirePermissionCard(m.requestId);
+      case "editReview.turnList": return applyTurnReviewList(m.files || []);
+      case "editReview.turnFileDone": return turnReviewFileDone(m.path);
+      case "editReview.turnListClear": return clearTurnReview();
       case "mode.update": return applyModeUpdate(m);
       case "question.request": return questionRequest(m);
       case "turn.result": return turnResult(m);
@@ -639,6 +653,8 @@
     state.permissionMode = m.permissionMode || state.permissionMode;
     if (m.autoAcceptCommands !== undefined) state.autoAcceptCommands = !!m.autoAcceptCommands;
     if (m.reviewEditsInEditor !== undefined) state.reviewEditsInEditor = !!m.reviewEditsInEditor;
+    if (m.reviewEditsAtTurnEnd !== undefined) state.reviewEditsAtTurnEnd = !!m.reviewEditsAtTurnEnd;
+    clearTurnReview(); // fresh session view → drop any pending changed-files review (host re-posts on reload)
     state.cwd = m.cwd || "";
     state.tokens = m.tokens || 0;
     state.contextTokens = m.contextTokens || 0;
@@ -649,6 +665,8 @@
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
     resetTasks(); // new session → clear the tasks banner
     transcriptInner.innerHTML = "";
+    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    clearRunningAgents(); // transcript cleared → drop any running-agents list
     renderEmptyOrSignin();
     updateTitle();
     updateModelModeLabel();
@@ -673,6 +691,8 @@
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
     resetTasks(); // rebuilt below from the loaded tool messages
     transcriptInner.innerHTML = "";
+    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    clearRunningAgents(); // transcript cleared → drop any running-agents list
     updateTitle();
     const msgs = m.messages || [];
     if (msgs.length === 0) {
@@ -695,6 +715,15 @@
   function applyStatus(s, text) {
     const prev = state.status;
     state.status = s;
+    // A new turn is starting (idle/error → working, not a mid-turn permission round-trip) → forget the
+    // previous turn's footer refs so its footer stays put and only THIS turn's footer collapses.
+    if (s === "working" && prev !== "working" && prev !== "waiting-permission") {
+      curTurnDivider = null;
+      curTurnFooter = null;
+    }
+    // Turn no longer active (ended / errored / interrupted) → clear the running-agents list; a stray
+    // agent whose result was missed can't outlive the turn.
+    if (s !== "working" && s !== "waiting-permission") clearRunningAgents();
     statusbar.setAttribute("data-state", s);
     statusText.textContent = text || STATUS_TEXT[s] || s;
     // send <-> stop
@@ -709,11 +738,7 @@
       updateSendEnabled();
       hideWorkingIndicator();
     }
-    // While a turn runs, block actions that would switch/clear the session and orphan the live
-    // process (the host also guards these via IsBusy). New chat + remote control are disabled.
-    const turnActive = isTurnActive();
-    $("btn-new").disabled = turnActive || state.remoteActive;
-    btnRemote.disabled = turnActive;
+    updateTurnLocks();
     // permission expiry: status moved away while one or more cards are still open
     // (host abandoned them — e.g. turn ended/errored). Expire every still-pending card.
     // Cards the user just answered are already removed from the set, so they're untouched.
@@ -918,6 +943,8 @@
   // -------------------------------------------------------------------------
   function renderEmptyOrSignin() {
     transcriptInner.innerHTML = "";
+    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    clearRunningAgents(); // transcript cleared → drop any running-agents list
     if (!state.loggedIn) {
       const wrap = el("div", "signin-state");
       wrap.appendChild(el("div", "msg-line", "Not signed in to Claude Code"));
@@ -1213,6 +1240,7 @@
     card.appendChild(bodyWrap);
     head.addEventListener("click", () => card.classList.toggle("collapsed"));
     appendNode(card);
+    if (isAgent) agentStart(m.id, headLabel || "Agent"); // add to the live running-agents list
   }
 
   /** TodoWrite as a checklist card (decision #15) — open by default, head collapses. */
@@ -1268,6 +1296,7 @@
 
   function toolResult(m) {
     reconcileTaskId(m.id, m.summary); // assign a TaskCreate its real "#N" id (no-op for other tools)
+    agentEnd(m.id); // if this result is for a running Task agent, drop it from the live list
     const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     if (!card) return;
     const status = card.querySelector(".tool-status");
@@ -1795,15 +1824,58 @@
     if (m.contextTokens != null) state.contextTokens = m.contextTokens; // kept for /compact note
     if (m.limits) state.limits = m.limits;
     taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
+    clearRunningAgents();   // turn ended → no agents can still be running
     updateStatusbar();
+    // Collapse multiple result events in one turn (subagent results + the main total) to a single
+    // footer: drop the previous one from THIS turn, then render the latest (see curTurnFooter note).
+    if (curTurnDivider) { curTurnDivider.remove(); curTurnDivider = null; }
+    if (curTurnFooter) { curTurnFooter.remove(); curTurnFooter = null; }
     // turn separator + footer: elapsed time · tokens generated this turn · cost
-    appendNode(el("hr", "turn-divider"));
+    curTurnDivider = el("hr", "turn-divider");
+    appendNode(curTurnDivider);
     const parts = [];
     if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
     if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
     if (m.costUsd) parts.push(formatCost(m.costUsd));
-    if (parts.length)
-      appendNode(el("div", "sys-note turn-footer", parts.join(" · ")));
+    if (parts.length) {
+      curTurnFooter = el("div", "sys-note turn-footer", parts.join(" · "));
+      appendNode(curTurnFooter);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Running Task subagents — a live list with a spinner per agent, pinned at the
+  // bottom of the chat (above the composer) while they run.
+  // -------------------------------------------------------------------------
+  function agentStart(id, label) {
+    if (!id || state.runningAgents.some((a) => a.id === id)) return;
+    state.runningAgents.push({ id, label: label || "Agent" });
+    renderRunningAgents();
+  }
+  function agentEnd(id) {
+    if (!id) return;
+    const before = state.runningAgents.length;
+    state.runningAgents = state.runningAgents.filter((a) => a.id !== id);
+    if (state.runningAgents.length !== before) renderRunningAgents();
+  }
+  function clearRunningAgents() {
+    if (!state.runningAgents.length && agentsRunningEl.hidden) return;
+    state.runningAgents = [];
+    renderRunningAgents();
+  }
+  function renderRunningAgents() {
+    agentsRunningEl.innerHTML = "";
+    if (!state.runningAgents.length) { agentsRunningEl.hidden = true; return; }
+    agentsRunningEl.hidden = false;
+    const head = el("div", "agents-running-head",
+      state.runningAgents.length === 1 ? "Agent running" : state.runningAgents.length + " agents running");
+    agentsRunningEl.appendChild(head);
+    state.runningAgents.forEach((a) => {
+      const row = el("div", "agent-run-row");
+      row.appendChild(el("span", "spinner"));
+      row.appendChild(el("span", "agent-run-label", a.label));
+      agentsRunningEl.appendChild(row);
+    });
   }
 
   // A subagent (Task tool) finished: its own time · tokens · cost, shown as a subordinate
@@ -1811,6 +1883,7 @@
   // rather than a second turn end. The turn's own footer (turnResult) still marks the real end,
   // and its totals include this subagent's usage.
   function agentResult(m) {
+    agentEnd(m.parentToolUseId); // the subagent that produced this result is done
     const parts = [];
     if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
     if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
@@ -2296,7 +2369,23 @@
     return state.status === "working" || state.status === "waiting-permission";
   }
   function canSend() {
-    return input.value.trim().length > 0 && !state.remoteActive && !isTurnActive();
+    return input.value.trim().length > 0 && !state.remoteActive && !isTurnActive()
+      && state.turnReview.files.length === 0; // must clear the post-turn edit review first (host also gates)
+  }
+  // A pending post-turn edit review blocks the next prompt, so it should also block the same
+  // turn-disrupting actions a running turn does (new chat, start remote control).
+  function isBlocked() {
+    return isTurnActive() || state.turnReview.files.length > 0;
+  }
+  function updateTurnLocks() {
+    const blocked = isBlocked();
+    $("btn-new").disabled = blocked || state.remoteActive;
+    btnRemote.disabled = blocked;
+    // The history button stays clickable while blocked — the dropdown opens, but loading a session
+    // is disabled inside it (delete stays available). renderHistoryList reflects the current state,
+    // so refresh it if it's open.
+    if (historyPanelEl && openOverlay && openOverlay.el === historyPanelEl)
+      post("session.listRequest", {});
   }
   function updateSendEnabled() {
     if (state.status === "working") { sendBtn.disabled = false; return; }
@@ -2444,6 +2533,73 @@
       chip.appendChild(x);
       attachmentsEl.appendChild(chip);
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Post-turn edit review (Auto-accept → "Review all edits at end of turn")
+  // The host lists every file changed in the turn; each chip opens the file in the
+  // in-editor per-hunk review. The next prompt is blocked until the list is empty
+  // (every file reviewed, or "Keep all"). The host enforces the same gate.
+  // -------------------------------------------------------------------------
+  function applyTurnReviewList(files) {
+    state.turnReview.files = Array.isArray(files) ? files.slice() : [];
+    renderTurnReview();
+    updateSendEnabled();
+    updateTurnLocks();
+  }
+  function turnReviewFileDone(path) {
+    state.turnReview.files = state.turnReview.files.filter((f) => f.path !== path);
+    renderTurnReview();
+    updateSendEnabled();
+    updateTurnLocks();
+  }
+  function clearTurnReview() {
+    state.turnReview.files = [];
+    renderTurnReview();
+    updateSendEnabled();
+    updateTurnLocks();
+  }
+  function renderTurnReview() {
+    turnReviewEl.innerHTML = "";
+    const files = state.turnReview.files;
+    if (!files.length) { turnReviewEl.hidden = true; return; }
+    turnReviewEl.hidden = false;
+
+    const head = el("div", "turn-review-head");
+    head.appendChild(el("span", "turn-review-title",
+      "Review " + files.length + " changed file" + (files.length === 1 ? "" : "s") + " before continuing"));
+    const discard = el("button", "turn-review-discard", "Discard all");
+    discard.title = "Revert every change from this turn (delete files created this turn)";
+    discard.addEventListener("click", () => openConfirmModal({
+      title: "Discard all changes",
+      message: "Revert all " + files.length + " changed file" + (files.length === 1 ? "" : "s") +
+        " to how they were before this turn? Files Claude created this turn are deleted. This can't be undone.",
+      confirmLabel: "Discard all",
+      danger: true,
+      onConfirm: () => post("editReview.discardAll", {}),
+    }));
+    head.appendChild(discard);
+    const keep = el("button", "turn-review-keep", "Keep all");
+    keep.title = "Accept every change as-is and continue";
+    keep.addEventListener("click", () => post("editReview.keepAll", {}));
+    head.appendChild(keep);
+    turnReviewEl.appendChild(head);
+
+    const list = el("div", "turn-review-files");
+    files.forEach((f) => {
+      const chip = el("button", "turn-review-chip");
+      chip.appendChild(svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+        { width: 13, height: 13, "stroke-width": 1.8 }));
+      chip.appendChild(el("span", "chip-name", f.name || f.path));
+      // still-open added/removed line counts (the file leaves the list once fully reviewed)
+      const added = f.added || 0, removed = f.removed || 0;
+      if (added > 0) chip.appendChild(el("span", "turn-review-add", "+" + added));
+      if (removed > 0) chip.appendChild(el("span", "turn-review-del", "−" + removed));
+      chip.title = "Open " + (f.path || f.name) + " for review";
+      chip.addEventListener("click", () => post("editReview.openTurnFile", { path: f.path }));
+      list.appendChild(chip);
+    });
+    turnReviewEl.appendChild(list);
   }
 
   // -------------------------------------------------------------------------
@@ -2750,28 +2906,30 @@
       historyPanelEl.appendChild(el("div", "history-empty", "No sessions yet."));
       return;
     }
-    // While a turn runs, switching/deleting the active session would disrupt it — show the list
-    // read-only with a hint (the host also guards this via IsBusy).
-    const busy = isTurnActive();
-    if (busy)
-      historyPanelEl.appendChild(el("div", "history-hint", "Stop the current turn to switch or delete sessions."));
+    // While a turn runs OR a post-turn edit review is still pending, LOADING a session would disrupt
+    // things — the list opens but loading is disabled (delete stays available). The host also guards
+    // switching via TurnRunningBlocks.
+    const loadBlocked = isBlocked();
+    if (loadBlocked)
+      historyPanelEl.appendChild(el("div", "history-hint",
+        isTurnActive() ? "Stop the current turn to switch sessions."
+                       : "Review the changed files before switching sessions."));
     sessions.forEach((s) => {
       // A div (not a button) so the delete button can nest inside without invalid markup.
-      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : "") + (busy ? " disabled" : ""));
+      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : "") + (loadBlocked ? " disabled" : ""));
       const top = el("div", "hi-top");
       top.appendChild(el("span", "hi-title", s.title || "Untitled"));
       top.appendChild(el("span", "hi-time", relativeTime(s.updatedAt)));
-      if (!busy) {
-        const del = el("button", "hi-delete");
-        del.title = "Delete session";
-        del.setAttribute("aria-label", "Delete session");
-        del.appendChild(iconTrash());
-        del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
-        top.appendChild(del);
-      }
+      // Delete stays available even while loading is blocked.
+      const del = el("button", "hi-delete");
+      del.title = "Delete session";
+      del.setAttribute("aria-label", "Delete session");
+      del.appendChild(iconTrash());
+      del.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteSession(s); });
+      top.appendChild(del);
       item.appendChild(top);
       if (s.preview) item.appendChild(el("div", "hi-preview", s.preview));
-      if (!busy) {
+      if (!loadBlocked) {
         item.addEventListener("click", () => {
           post("session.load", { sessionId: s.id });
           closeAllOverlays();
@@ -2789,6 +2947,8 @@
     state.title = "Untitled";
     state.activeAssistant = null;
     transcriptInner.innerHTML = "";
+    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    clearRunningAgents(); // transcript cleared → drop any running-agents list
     updateTitle();
     renderEmptyOrSignin();
     applyStatus("ready");
@@ -3152,6 +3312,16 @@
   modelModeBtn.addEventListener("click", function () {
     const pop = el("div", "popover mm-pop");
 
+    // A small "?" badge that shows an option's description as a hover tooltip, so the popover stays
+    // compact instead of carrying a full description line under every option.
+    function helpBadge(desc) {
+      const b = el("span", "mm-help", "?");
+      b.title = desc;
+      b.setAttribute("aria-label", desc);
+      b.addEventListener("click", (e) => e.stopPropagation()); // clicking the badge must not toggle/select the row
+      return b;
+    }
+
     // Model
     const s1 = el("div", "mm-section");
     s1.appendChild(el("div", "mm-section-title", "Model"));
@@ -3205,7 +3375,9 @@
     const s3 = el("div", "mm-section");
     s3.appendChild(el("div", "mm-section-title", "Ultracode"));
     const ultraRow = el("div", "toggle-row ultra-row" + (state.ultracode ? " on" : ""));
-    ultraRow.appendChild(el("span", "label", "Ultracode"));
+    const ultraLabel = el("span", "label", "Ultracode");
+    ultraLabel.appendChild(helpBadge("Multi-agent orchestration — spawns subagent workflows, uses far more tokens."));
+    ultraRow.appendChild(ultraLabel);
     ultraRow.appendChild(el("span", "toggle-switch"));
     ultraRow.addEventListener("click", () => {
       state.ultracode = !state.ultracode;
@@ -3214,7 +3386,6 @@
       post("ultracode.set", { enabled: state.ultracode });
     });
     s3.appendChild(ultraRow);
-    s3.appendChild(el("div", "mm-hint", "Multi-agent orchestration — spawns subagent workflows, uses far more tokens."));
     pop.appendChild(s3);
 
     // Permission radio — each mode's sub-toggle (if any) is nested directly beneath its radio
@@ -3228,11 +3399,12 @@
     function buildSubToggle(stateKey, msgType, label, hint) {
       const wrap = el("div", "mm-subtoggle");
       const row = el("div", "toggle-row" + (state[stateKey] ? " on" : ""));
-      row.appendChild(el("span", "label", label));
+      const lbl = el("span", "label", label);
+      lbl.appendChild(helpBadge(hint));
+      row.appendChild(lbl);
       row.appendChild(el("span", "toggle-switch"));
       wrap.appendChild(row);
-      wrap.appendChild(el("div", "mm-hint", hint));
-      // the WHOLE sub-toggle block (label, switch AND its hint) toggles, not just the switch
+      // the sub-toggle block toggles on click (the "?" badge shows the description on hover)
       wrap.addEventListener("click", (e) => {
         e.stopPropagation(); // don't bubble to the mode radio it's nested inside
         state[stateKey] = !state[stateKey];
@@ -3241,12 +3413,20 @@
       });
       return wrap;
     }
-    // mode → its nested sub-toggle element (modes without one stay bare)
+    // mode → its nested sub-toggle element(s) (modes without one stay bare)
     const subToggles = {
-      acceptEdits: buildSubToggle("autoAcceptCommands", "autoAcceptCommands.set", "Auto-accept commands",
-        "In Auto-accept edits, also run Bash, PowerShell and MCP tools without asking. Questions still prompt."),
-      ask: buildSubToggle("reviewEditsInEditor", "reviewEditsInEditor.set", "Review edits in the editor",
-        "Open file edits in the code editor with an inline red/green diff and per-hunk Accept/Reject."),
+      acceptEdits: [
+        buildSubToggle("autoAcceptCommands", "autoAcceptCommands.set", "Auto-accept commands",
+          "In Auto-accept edits, also run Bash, PowerShell and MCP tools without asking. Questions still prompt."),
+        buildSubToggle("reviewEditsAtTurnEnd", "reviewEditsAtTurnEnd.set", "Review all edits at end of turn",
+          "Edits still apply live; at the end of each turn the changed files are listed above the composer. " +
+          "Open one to review it with per-hunk Accept/Reject (rejecting reverts the change). The next prompt " +
+          "is blocked until every file is reviewed or you choose Keep all."),
+      ],
+      ask: [
+        buildSubToggle("reviewEditsInEditor", "reviewEditsInEditor.set", "Review edits in the editor",
+          "Open file edits in the code editor with an inline red/green diff and per-hunk Accept/Reject."),
+      ],
     };
 
     const perms = [
@@ -3259,19 +3439,41 @@
       const row = el("div", "radio-row" + (state.permissionMode === mode ? " selected" : ""));
       row.appendChild(el("span", "radio-dot"));
       const text = el("div", "radio-text");
-      text.appendChild(el("span", "radio-label", label));
-      text.appendChild(el("div", "mm-hint", desc));
+      const radioLabel = el("span", "radio-label", label);
+      radioLabel.appendChild(helpBadge(desc));
+      text.appendChild(radioLabel);
       // nest the mode's sub-toggle INSIDE its text column so it reads as a child of the
       // mode (indented under the label, shown only while that mode is selected)
-      if (subToggles[mode]) text.appendChild(subToggles[mode]);
+      if (subToggles[mode]) subToggles[mode].forEach((t) => text.appendChild(t));
       row.appendChild(text);
-      row.addEventListener("click", () => {
+      const applyMode = () => {
         state.permissionMode = mode;
         s4.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("selected"));
         row.classList.add("selected");
         updateModelModeLabel();
         post("permission.set", { mode });
         syncSubToggles();
+        // the sub-toggles just showed/hid → the popover's height changed; re-anchor it to the
+        // button (a "top" popover otherwise floats when it shrinks, or runs off-screen when it grows).
+        if (openOverlay && openOverlay.reposition) openOverlay.reposition();
+      };
+      row.addEventListener("click", () => {
+        // Bypass runs every edit/command without asking — warn before enabling it (only when
+        // switching in; re-selecting the active mode needs no confirmation). Cancel leaves the
+        // current mode untouched.
+        if (mode === "bypass" && state.permissionMode !== "bypass") {
+          openConfirmModal({
+            title: "Switch to Bypass mode?",
+            message: "In Bypass mode Claude applies every file edit and runs every command " +
+              "without asking. It can make unwanted changes or run commands you didn't intend. " +
+              "Only use it in a workspace you trust.",
+            confirmLabel: "Enable Bypass",
+            danger: true,
+            onConfirm: applyMode,
+          });
+          return;
+        }
+        applyMode();
       });
       s4.appendChild(row);
     });
@@ -3279,7 +3481,9 @@
     // show only the selected mode's sub-toggle
     function syncSubToggles() {
       for (const mode in subToggles)
-        subToggles[mode].style.display = state.permissionMode === mode ? "" : "none";
+        subToggles[mode].forEach((t) => {
+          t.style.display = state.permissionMode === mode ? "" : "none";
+        });
     }
     syncSubToggles();
 
