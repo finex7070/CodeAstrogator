@@ -576,6 +576,29 @@ button:focus { outline: none; }
 .tool-body pre { margin: 0; white-space: pre-wrap; overflow-x: auto; }
 .tool-card.collapsed .tool-body { display: none; }
 
+/* Sticky card header: while an EXPANDED card is scrolled through, keep its title bar pinned to the
+   top of the chat so it can be collapsed without scrolling back up — and it scrolls away with the
+   card once the card is out of view (native position:sticky behaviour). Requires the card's overflow
+   to be visible (sticky doesn't work inside overflow:hidden) and an OPAQUE header background (the
+   card body scrolls underneath it; the tint vars are translucent, so composite them over --bg-elevated). */
+.tool-card:not(.collapsed), .perm-card.expanded { overflow: visible; }
+.tool-card:not(.collapsed) .tool-head,
+.perm-card.expanded .perm-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.tool-card:not(.collapsed) .tool-head { background: var(--bg-elevated); }
+.perm-card.expanded .perm-head {
+  background: linear-gradient(var(--accent-faint), var(--accent-faint)), var(--bg-elevated);
+}
+.perm-card.approved.expanded .perm-head {
+  background: linear-gradient(var(--diff-add), var(--diff-add)), var(--bg-elevated);
+}
+.perm-card.rejected.expanded .perm-head {
+  background: linear-gradient(var(--diff-del), var(--diff-del)), var(--bg-elevated);
+}
+
 .spinner {
   width: 13px; height: 13px;
   border: 2px solid var(--accent-faint);
@@ -784,6 +807,100 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   max-width: 220px;
 }
 .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Post-turn edit review list (Auto-accept → "Review all edits at end of turn") */
+.turn-review {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin: 0 8px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-faint);
+}
+.turn-review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.turn-review-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.turn-review-keep {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.turn-review-keep:hover { border-color: var(--accent); }
+.turn-review-discard {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.turn-review-discard:hover { border-color: #F85149; color: #F85149; }
+.turn-review-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.turn-review-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.turn-review-chip:hover { border-color: var(--accent); }
+.turn-review-chip svg { flex: 0 0 auto; color: var(--accent); }
+.turn-review-chip .chip-name { min-width: 0; flex: 0 1 auto; }
+.turn-review-add { flex: 0 0 auto; color: #3FB950; font-variant-numeric: tabular-nums; }
+.turn-review-del { flex: 0 0 auto; color: #F85149; font-variant-numeric: tabular-nums; }
+
+/* Running Task subagents — live spinner list pinned at the bottom of the chat (above the composer) */
+.agents-running {
+  flex: 0 0 auto;
+  margin: 0 8px 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+.agents-running-head { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.agent-run-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-run-row .spinner { flex: 0 0 auto; }
+.agent-run-label {
+  min-width: 0; flex: 1 1 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text);
+}
 
 /* attached-file indicators inside a sent user message (live + historic) */
 .msg-attachments {
@@ -1012,6 +1129,9 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   color: var(--text);
   animation: popIn 100ms ease both;
 }
+/* The model·mode popover keeps a fixed width so it doesn't resize as the selected mode's
+   sub-toggles show/hide (its content width would otherwise vary per mode). */
+.mm-pop { width: 300px; box-sizing: border-box; }
 @keyframes popIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 .menu-item {
   display: flex;
@@ -1466,6 +1586,25 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .radio-text { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
 .radio-label { line-height: 1.3; }
 .radio-text .mm-hint { margin-top: 2px; }
+
+/* "?" help badge — replaces the always-visible option description with a hover tooltip */
+.mm-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  margin-left: 6px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+  flex: 0 0 auto;
+  user-select: none;
+}
+.mm-help:hover { color: var(--text); border-color: var(--accent); }
 .radio-dot {
   width: 14px; height: 14px;
   border-radius: 50%;
