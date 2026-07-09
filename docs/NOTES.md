@@ -1099,10 +1099,33 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   the list + gate are re-posted from `SendInitialSession` (`RepostTurnReviewList`). `turn.stop` also builds the
   list (a cancelled turn emits no `TurnResultEvent`).
 - **Contract:** web→host `reviewEditsAtTurnEnd.set {enabled}`, `editReview.openTurnFile {path}`,
-  `editReview.keepAll`, `editReview.discardAll`; host→web `editReview.turnList {files:[{path,name,hunkCount,isNew}]}`,
+  `editReview.finishTurnFile {path}`, `editReview.keepAll`, `editReview.discardAll`; host→web
+  `editReview.turnList {files:[{path,name,added,removed,allDecided}]}`, `editReview.turnFileState {path,allDecided}`,
   `editReview.turnFileDone {path}`, `editReview.turnListClear`. `session.init` carries `reviewEditsAtTurnEnd`.
+- **Per-file finish (2026-07-09):** applied-mode reviews no longer auto-complete on the last decision — the
+  adorner fires its `onCompleted` only via an explicit **Finish** (editor toolbar or chat chip; both route to
+  `HandleFinishTurnFile`/`FinalizeTurnFileReview`, guarded by `Session.AllDecided`). The toolbar also has a
+  **Reset** (`EditReviewSession.ResetDecisions`). Every decide/reset fires `onStateChanged` → `PostTurnFileState`
+  → the chip's Finish button enables/disables. Finish when the tab is closed writes the reconstruction straight
+  to disk (`FinalizeTurnFileReview` falls back to `RevertOnDisk` when `!IsReviewing`). Proposal-mode
+  (Ask-permission) reviews still auto-resolve on the last decision (`!_applied` branch in `Decide`).
   **Keep all** clears the list with no disk change; **Discard all** reverts every file to its baseline (deletes
   files created this turn) — open reviews go through `EditReviewController.CommitPath`, the rest via direct disk IO.
+- **Turn-end review UX (2026-07-09):** (1) changed files that are **already open** get the inline review
+  attached immediately at turn end (`EditReviewController.AttachIfOpen`, via `VsShellUtilities.IsDocumentOpen`;
+  works for background tabs too — the adorner redraws on `LayoutChanged` when the tab is shown). Files not open
+  are attached on demand on chip click. (2) Closing the review tab is treated like a cancel (`view.Closed` →
+  `CancelPathCore`) so the chip can reopen the file (previously the stale `_turnViews` entry made `OpenForPath`
+  no-op). (3) The editor tab caption gains a **"+N -M"** suffix while under review (`VSFPROPID_EditorCaption`,
+  set in `AttachReview`, restored in Commit/Cancel). **⚠ Needs manual VS verification** (caption rendering).
+
+## "Open in Visual Studio" button on file cards (2026-07-09)
+- File-based tool cards (Read/Edit/Write/MultiEdit/Notebook*) and permission cards now render a small
+  open-in-editor icon button in the card head, right after the path. Shown only when a path is present
+  (`cardFilePath(input, diff)` in `app.js` — `diff.path` ?? `file_path`/`notebook_path`/`path`).
+- **Contract:** web→host `editor.openFile {path}` → `WebViewBridge.HandleOpenFile` opens the file in the VS
+  text editor via `VsShellUtilities.OpenDocument` (plain open, **not** the diff review). Missing file → error
+  system note. The button's click `stopPropagation()`s so it doesn't toggle the card's collapse state.
 
 ## AskUserQuestion (interactive follow-up questions) — solved 2026-06-05 (real in-turn card via the permission hook)
 - **Key finding (CLI 2.1.165, throwaway probes):** `AskUserQuestion` **routes through the

@@ -306,6 +306,9 @@ namespace CodeAstrogator.Bridge
                 case "editReview.openTurnFile":
                     HandleOpenTurnFile(msg.Value<string>("path") ?? "");
                     break;
+                case "editReview.finishTurnFile":
+                    HandleFinishTurnFile(msg.Value<string>("path") ?? "");
+                    break;
                 case "editReview.keepAll":
                     HandleKeepAllTurnReviews();
                     break;
@@ -373,6 +376,9 @@ namespace CodeAstrogator.Bridge
                     break;
                 case "editor.insert":
                     HandleEditorInsert(msg.Value<string>("text") ?? "");
+                    break;
+                case "editor.openFile":
+                    HandleOpenFile(msg.Value<string>("path") ?? "");
                     break;
             }
         }
@@ -999,6 +1005,16 @@ namespace CodeAstrogator.Bridge
             if (files.Count == 0)
                 return;
             Post(new JObject { ["type"] = "editReview.turnList", ["files"] = files });
+
+            // Any changed file that's ALREADY open gets its inline review attached immediately, so the
+            // green/red diff shows without the user having to click the chip first (files not open are
+            // attached on demand when their chip is clicked). AttachIfOpen marshals to the UI thread
+            // internally, so this is safe from the session-event background thread (the analyzer can't see
+            // the marshaling — hence the suppression; FinalizeTurnFileReview only runs on the UI thread).
+#pragma warning disable VSTHRD010
+            foreach (var kv in built)
+                _editReview.AttachIfOpen(kv.Key, kv.Value.Session, () => FinalizeTurnFileReview(kv.Key), () => PostTurnFileState(kv.Key));
+#pragma warning restore VSTHRD010
         }
 
         /// <summary>Re-posts the pending changed-files list after a WebView reload so the UI (and the gate)
@@ -1040,6 +1056,7 @@ namespace CodeAstrogator.Bridge
                 ["name"] = System.IO.Path.GetFileName(path),
                 ["added"] = added,
                 ["removed"] = removed,
+                ["allDecided"] = session.AllDecided, // chip's Finish button is enabled only when true
             };
         }
 
@@ -1064,8 +1081,36 @@ namespace CodeAstrogator.Bridge
                 _turnReviews.TryGetValue(path ?? "", out review);
             if (review == null)
                 return; // stale (already decided / cleared)
-            try { _editReview.OpenForPath(path!, review.Session, () => FinalizeTurnFileReview(path!)); }
+            try { _editReview.OpenForPath(path!, review.Session, () => FinalizeTurnFileReview(path!), () => PostTurnFileState(path!)); }
             catch (Exception ex) { PostError("Could not open the changed file for review: " + ex.Message); }
+        }
+
+        /// <summary>web→host editReview.finishTurnFile: the user pressed Finish (editor toolbar or the chat
+        /// chip) to complete a file whose every change is decided → commit it and drop it from the list.
+        /// Ignored unless every hunk is decided (the chip's button is disabled until then anyway). UI thread.</summary>
+        private void HandleFinishTurnFile(string path)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            TurnReview? review;
+            lock (_turnReviewLock)
+                _turnReviews.TryGetValue(path ?? "", out review);
+            if (review == null || !review.Session.AllDecided)
+                return;
+            FinalizeTurnFileReview(path!);
+        }
+
+        /// <summary>Re-posts one file's "all changes decided?" flag so the chat chip can enable/disable its
+        /// Finish button. Fired by the adorner on every decide/reset (via the onStateChanged callback).</summary>
+        private void PostTurnFileState(string path)
+        {
+            bool allDecided;
+            lock (_turnReviewLock)
+            {
+                if (!_turnReviews.TryGetValue(path ?? "", out var review))
+                    return;
+                allDecided = review.Session.AllDecided;
+            }
+            Post(new JObject { ["type"] = "editReview.turnFileState", ["path"] = path, ["allDecided"] = allDecided });
         }
 
         /// <summary>Called by the EditReviewController once every hunk of a post-turn file is decided:
@@ -1083,7 +1128,12 @@ namespace CodeAstrogator.Bridge
             var updated = review.Session.BuildUpdatedInput(); // Write → { content }; null = all rejected
             var finalContent = updated != null ? (updated.Value<string>("content") ?? "") : review.Baseline;
             var deleteFile = review.IsNew && updated == null; // a created file, rejected in full → remove it
-            _editReview.CommitPath(path!, finalContent, deleteFile);
+            // Open in the editor → commit through the buffer; not open (e.g. finished from the chat chip after
+            // the tab was closed) → write the reconstruction straight to disk.
+            if (_editReview.IsReviewing(path!))
+                _editReview.CommitPath(path!, finalContent, deleteFile);
+            else
+                RevertOnDisk(path!, finalContent, deleteFile);
 
             lock (_turnReviewLock)
                 _turnReviews.Remove(path!);
@@ -1973,6 +2023,30 @@ namespace CodeAstrogator.Bridge
             }
         }
 
+        /// <summary>web→host editor.openFile: open the file referenced by an Edit/Write/Read card in the
+        /// VS text editor (plain open, not the diff review). UI thread.</summary>
+        private void HandleOpenFile(string path)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+            if (!System.IO.File.Exists(path))
+            {
+                PostError("File not found: " + path);
+                return;
+            }
+            try
+            {
+                VsShellUtilities.OpenDocument(_package, path, VSConstants.LOGVIEWID_TextView,
+                    out _, out _, out IVsWindowFrame frame);
+                frame?.Show();
+            }
+            catch (Exception ex)
+            {
+                PostError("Could not open the file in Visual Studio: " + ex.Message);
+            }
+        }
+
         // ── session events (background threads) → host → web ─────────────────
 
         private void OnSessionEvent(ClaudeEvent ev)
@@ -2211,8 +2285,12 @@ namespace CodeAstrogator.Bridge
                         ["limits"] = BuildLimits(),
                     });
                     // "Review edits at end of turn": surface the collected changed-files list above the
-                    // composer and gate the next prompt until it's cleared.
+                    // composer and gate the next prompt until it's cleared. Safe on this background thread:
+                    // it only reads files + posts + forms UI callbacks (invoked later on the UI thread) and
+                    // the auto-attach marshals internally — the analyzer can't see that, hence the suppression.
+#pragma warning disable VSTHRD010
                     BuildAndPostTurnReviewList();
+#pragma warning restore VSTHRD010
                     break;
 
                 case ApiRetryEvent retry:
