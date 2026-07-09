@@ -4,6 +4,28 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.1] – 2026-07-09
+
+### Changed
+- **The turn-end review now completes per file only when you say so.** Previously, deciding the last change in a file auto-finished that file — it dropped out of the review and off the chat list immediately. Now the file stays until you explicitly finish it. The editor's floating review toolbar gained a **Finish** button (enabled once every change is decided) and a **Reset** button (clears all decisions in the file so you can start over), and each file's chip in the chat list now has its own **Finish** button that enables as soon as all its changes are decided. (Permission-prompt reviews in Ask mode are unchanged — those still resolve automatically once every change is decided.)
+
+### Added
+- **Model list reordered by capability.** The model picker now lists the strongest model first: Fable 5, then Opus 4.8, Opus 4.7, Sonnet 4.6, Haiku 4.5. (The default model is unchanged; only the display order moved.)
+- **Clearer inline edit-review state.** The per-change Keep/Revert (and Accept/Reject) buttons in the editor are now colored — green for keep/accept, red for revert/reject — and the chosen one fills solid with bold white text so a decision you've already made stands out. The highlights follow the decision too: the winning side (kept new text, or restored old ghost text) is emphasized while the losing side is dimmed, so it's obvious at a glance what each change will end up as.
+- **Review controls got a visual pass.** The editor's floating review toolbar is now uniformly styled — flat neutral Prev/Next arrows, an amber Reset, and a solid-green primary Finish (all with hover/disabled feedback). In the chat review list, "Keep all" highlights yellow and "Discard all" red on hover. The redundant expand chevron was removed from approval cards so every card starts with the same tool icon.
+- **Permission/approval cards now carry the same tool icon as tool cards.** Approval cards previously had no icon, so an Edit/Write approval card looked different from its plain tool card. They now show the matching icon (the pencil for Edit/Write/MultiEdit), so every edit card is consistent.
+- **Bare Edit/Write tool cards now show an inline diff too.** Edit, Write, and MultiEdit tool cards that didn't go through the approval/diff path (e.g. an edit the CLI ran or rejected without prompting) previously showed their raw JSON input. They now render the same red/green inline diff, built from the tool's own input (Edit/MultiEdit from `old_string`→`new_string`, Write from `content` shown as additions). Line numbers are omitted since the bare tool input carries no file position; cards that still lack a diffable input fall back to JSON as before.
+- **The editor tab shows the review's line counts.** While a file is under inline edit review (turn-end review), its Visual Studio document tab caption gains a "(+N -M)" suffix (added/removed lines) — e.g. `GraphicPixelExplosion.cs (+24 -3)` — matching the count on the file's chip. The suffix is removed again when the review is decided, kept, discarded, or the tab is closed.
+- **Open a file card's file directly in Visual Studio.** File-based cards — Edit, Write, Read, MultiEdit, Notebook edits, and their permission cards — now show a small open-in-editor button right after the file path in the card header. Click it to open that file in the Visual Studio text editor (a plain open, independent of the inline edit-review). The button only appears when the card refers to a file, and clicking it no longer collapses or expands the card.
+
+### Fixed
+- **Usage meters no longer show a misleading 0% before the first `/usage` report.** Right after Visual Studio started, the Session and Weekly meters read a solid 0% (as if nothing had been used) until the first usage fetch completed. A window with no fetched value yet now shows a dimmed "—" instead, so an unknown value is never mistaken for "nothing used"; it fills in as soon as real data arrives (a genuine 0% still shows as 0%).
+- **Already-open files now show their inline review immediately at turn end.** With "Review edits at end of turn" on, if a changed file was already open in the editor, its green/red inline diff only appeared after clicking the file's chip. Changed files that are already open now get the inline review attached right away (files that aren't open are still opened on demand when you click their chip).
+- **Closing a file from the turn-end review list and reopening it now works.** In the "Review N changed files before continuing" list, opening a file's chip, then closing that editor tab, left the review "stuck open" internally, so clicking the chip again did nothing. Closing the tab is now treated like leaving the review pending — the chip stays in the list and reopens the file cleanly.
+- **Inline edit-review Prev/Next buttons now work correctly.** The floating "▲ ▼ N to review" toolbar's arrows jumped to the wrong change and ignored where you'd scrolled. They now navigate relative to the current view: ▼ scrolls to the first change below the visible area and ▲ to the first change above it (skipping changes already on screen), wrapping around at the ends — so they behave correctly even after you scroll manually between presses.
+
+---
+
 ## [0.6.0] – 2026-07-03
 
 ### Added

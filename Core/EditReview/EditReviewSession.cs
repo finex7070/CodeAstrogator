@@ -85,6 +85,14 @@ namespace CodeAstrogator.Core.EditReview
         public bool HasHunks => Hunks.Count > 0;
         public bool AnyAccepted => Hunks.Any(h => h.State == HunkState.Accepted);
         public bool AllDecided => Hunks.All(h => h.State != HunkState.Pending);
+        public bool AnyDecided => Hunks.Any(h => h.State != HunkState.Pending);
+
+        /// <summary>Clears every hunk back to <see cref="HunkState.Pending"/> (the "reset all decisions" action).</summary>
+        public void ResetDecisions()
+        {
+            foreach (var h in Hunks)
+                h.State = HunkState.Pending;
+        }
 
         /// <summary>Marks every still-pending hunk as accepted (used as the "default = keep" finalize).</summary>
         public void AcceptPending()
