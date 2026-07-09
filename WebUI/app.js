@@ -48,10 +48,11 @@
     tasksDismissed: false,   // user closed the tasks banner (re-shown when a NEW task is created)
   };
 
+  // Ordered strongest → lightest: Fable 5 (most capable) first, then the Opus tier, Sonnet, Haiku.
   const MODELS = [
+    { id: "claude-fable-5", label: "Fable 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-opus-4-7", label: "Opus 4.7" },
-    { id: "claude-fable-5", label: "Fable 5" },
     { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ];
@@ -525,6 +526,7 @@
       case "permission.expire": return expirePermissionCard(m.requestId);
       case "editReview.turnList": return applyTurnReviewList(m.files || []);
       case "editReview.turnFileDone": return turnReviewFileDone(m.path);
+      case "editReview.turnFileState": return turnReviewFileState(m.path, m.allDecided);
       case "editReview.turnListClear": return clearTurnReview();
       case "mode.update": return applyModeUpdate(m);
       case "question.request": return questionRequest(m);
@@ -800,28 +802,45 @@
   }
 
   function updateStatusbar() {
-    const sp = clampPct(state.limits.sessionPct);
-    const wp = clampPct(state.limits.weeklyPct);
-    meterSession.style.width = sp + "%";
-    meterWeekly.style.width = wp + "%";
-    labelSession.textContent = "Session " + sp + "%";
-    labelWeekly.textContent = "Weekly " + wp + "%";
-    setMeterLevel(statusSession, sp);
-    setMeterLevel(statusWeekly, wp);
-    // resets_at + last-fetch time from /usage — shown as native tooltips on the meters. A meter
-    // dims when its value is stale (the /usage report kept omitting that window for a while).
-    const sStale = isStaleUsage(state.limits.sessionFetchedAt);
-    const wStale = isStaleUsage(state.limits.weeklyFetchedAt);
-    statusSession.title = meterTooltip("Session usage", sp, state.limits.sessionResetsAt, state.limits.sessionFetchedAt, sStale);
-    statusWeekly.title = meterTooltip("Weekly usage", wp, state.limits.weeklyResetsAt, state.limits.weeklyFetchedAt, wStale);
-    statusSession.classList.toggle("stale", sStale);
-    statusWeekly.classList.toggle("stale", wStale);
+    renderMeter(statusSession, meterSession, labelSession, "Session",
+      state.limits.sessionPct, state.limits.sessionResetsAt, state.limits.sessionFetchedAt);
+    renderMeter(statusWeekly, meterWeekly, labelWeekly, "Weekly",
+      state.limits.weeklyPct, state.limits.weeklyResetsAt, state.limits.weeklyFetchedAt);
     if (state.plan) {
       planLabel.textContent = state.plan;
       planBadge.hidden = false;
     } else {
       planBadge.hidden = true;
     }
+  }
+
+  // Renders one usage meter. A window with no fetched value yet (fetchedAt null — e.g. right after VS
+  // startup, before the first /usage report lands, or in API-key mode) shows a dimmed "—" instead of a
+  // solid 0%, so an unknown value never reads as "nothing used". Once a real percentage arrives (0%
+  // included — SessionFetchedAt is only set for a genuinely reported window) it renders normally, and
+  // still dims via .stale if /usage later keeps dropping that window (isStaleUsage).
+  function renderMeter(meterEl, fillEl, labelEl, name, pct, resetsAt, fetchedAt) {
+    if (!hasUsageData(fetchedAt)) {
+      fillEl.style.width = "0%";
+      labelEl.textContent = name + " —";
+      meterEl.classList.remove("warn", "crit");
+      meterEl.classList.add("stale");
+      meterEl.title = name + " usage: not available yet (waiting for the first /usage report)";
+      return;
+    }
+    const p = clampPct(pct);
+    fillEl.style.width = p + "%";
+    labelEl.textContent = name + " " + p + "%";
+    setMeterLevel(meterEl, p);
+    const stale = isStaleUsage(fetchedAt);
+    meterEl.classList.toggle("stale", stale);
+    meterEl.title = meterTooltip(name + " usage", p, resetsAt, fetchedAt, stale);
+  }
+
+  // True once a window has a real fetched value (parseable timestamp). null/absent = never reported.
+  function hasUsageData(fetchedAt) {
+    if (!fetchedAt) return false;
+    return !isNaN(Date.parse(fetchedAt));
   }
 
   // -------------------------------------------------------------------------
@@ -1229,14 +1248,14 @@
       : toolHeadLabel(m.name, m.input); // file/lines for Read, command for Bash, …
     head.appendChild(el("span", "tool-summary", headLabel || (mcp ? "" : "running…")));
     if (headLabel || mcp) card.dataset.headLabel = "1"; // keep it; don't let tool.result overwrite
+    const openBtn = openFileButton(cardFilePath(m.input, m.diff));
+    if (openBtn) head.appendChild(openBtn);
     const status = el("span", "tool-status");
     status.appendChild(el("span", "spinner"));
     head.appendChild(status);
     card.appendChild(head);
     const bodyWrap = el("div", "tool-body");
-    const pre = el("pre");
-    pre.textContent = prettyJson(m.input);
-    bodyWrap.appendChild(pre);
+    fillToolBody(bodyWrap, m.name, m.input);
     card.appendChild(bodyWrap);
     head.addEventListener("click", () => card.classList.toggle("collapsed"));
     appendNode(card);
@@ -1390,6 +1409,30 @@
     }
   }
 
+  // The concrete file a card refers to (Read/Edit/Write/MultiEdit/Notebook* input, or a diff
+  // card's path), or "" when the tool isn't file-based. Used to offer an "open in VS" button.
+  function cardFilePath(input, diff) {
+    if (diff && diff.path) return diff.path;
+    if (!input) return "";
+    return input.file_path || input.notebook_path || input.path || "";
+  }
+
+  // Small icon button that opens `path` in the Visual Studio editor (host handles editor.openFile).
+  // Returns null when there is no path, so callers can append the result unconditionally.
+  function openFileButton(path) {
+    if (!path) return null;
+    const btn = el("button", "open-file-btn");
+    btn.type = "button";
+    btn.title = "Open in Visual Studio";
+    btn.setAttribute("aria-label", "Open in Visual Studio");
+    btn.appendChild(svg('<path d="M14 4h6v6M20 4l-9 9M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/>', { width: 13, height: 13 }));
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't toggle the card's collapse/expand
+      post("editor.openFile", { path: path });
+    });
+    return btn;
+  }
+
   // -------------------------------------------------------------------------
   // Permission / diff card (§5.2)
   // -------------------------------------------------------------------------
@@ -1412,9 +1455,11 @@
     const card = el("div", "perm-card");
     card.dataset.requestId = m.requestId;
     const head = el("div", "perm-head");
-    head.appendChild(el("span", "perm-chevron", "▸")); // far left; re-expand toggle (decided only)
+    head.appendChild(toolIcon(m.toolName)); // same icon set as tool cards (pencil for Edit/Write)
     head.appendChild(el("span", "perm-tool", m.toolName || "Permission"));
     head.appendChild(el("span", "perm-path", cardHeadDetail(m)));
+    const permOpenBtn = openFileButton(cardFilePath(m.input, m.diff));
+    if (permOpenBtn) head.appendChild(permOpenBtn);
     head.appendChild(el("span", "perm-status")); // filled in once decided/expired
     card.appendChild(head);
 
@@ -1788,7 +1833,10 @@
   // Line-based diff via prefix/suffix trim + middle replacement.
   // startLine = 1-based file line where this snippet begins (Edit) so the gutter shows
   // real file line numbers, not snippet-relative ones.
-  function buildDiff(oldText, newText, startLine) {
+  // opts.noLno: omit the line-number gutters (used for tool-card diffs built from tool input alone,
+  // where the file position isn't known — showing "1,2,3…" there would be misleading).
+  function buildDiff(oldText, newText, startLine, opts) {
+    const noLno = !!(opts && opts.noLno);
     const base = startLine && startLine > 0 ? startLine : 1;
     const wrap = el("div", "diff");
     const oldLines = String(oldText).split("\n");
@@ -1804,8 +1852,10 @@
 
     const addLine = (oldNo, newNo, sign, cls, txt) => {
       const line = el("div", "diff-line " + cls);
-      line.appendChild(el("span", "diff-lno", oldNo == null ? "" : String(oldNo)));
-      line.appendChild(el("span", "diff-lno", newNo == null ? "" : String(newNo)));
+      if (!noLno) {
+        line.appendChild(el("span", "diff-lno", oldNo == null ? "" : String(oldNo)));
+        line.appendChild(el("span", "diff-lno", newNo == null ? "" : String(newNo)));
+      }
       line.appendChild(el("span", "diff-sign", sign));
       line.appendChild(el("span", "diff-text", txt));
       wrap.appendChild(line);
@@ -1815,6 +1865,44 @@
     for (let i = start; i < endN; i++) addLine(null, base + i, "+", "diff-add", newLines[i]);
     for (let i = endO; i < oldLines.length; i++) addLine(base + i, base + endN + (i - endO), " ", "", oldLines[i]);
     return wrap;
+  }
+
+  // Inline diff for a bare tool-use card, built from the tool INPUT alone (no file access), so an
+  // Edit/Write/MultiEdit card that didn't go through the approval/diff path still shows red/green
+  // instead of raw JSON. Returns null for tools without a diffable input. Line numbers are omitted
+  // (the input carries no file position).
+  function toolDiffBody(name, input) {
+    if (!input) return null;
+    if (name === "Edit") {
+      if (input.old_string == null && input.new_string == null) return null;
+      return buildDiff(input.old_string || "", input.new_string || "", 0, { noLno: true });
+    }
+    if (name === "Write") {
+      if (input.content == null) return null;
+      return buildDiff("", input.content || "", 0, { noLno: true }); // whole content as additions
+    }
+    if (name === "MultiEdit" && Array.isArray(input.edits) && input.edits.length) {
+      const wrap = el("div", "tool-multidiff");
+      input.edits.forEach((e) => {
+        if (!e) return;
+        wrap.appendChild(buildDiff(e.old_string || "", e.new_string || "", 0, { noLno: true }));
+      });
+      return wrap;
+    }
+    return null;
+  }
+
+  // Fills a .tool-body with the inline diff when the tool has a diffable input, else the raw JSON.
+  function fillToolBody(bodyWrap, name, input) {
+    const diff = toolDiffBody(name, input);
+    if (diff) {
+      bodyWrap.classList.add("has-diff"); // drop the body padding so the diff spans full width
+      bodyWrap.appendChild(diff);
+    } else {
+      const pre = el("pre");
+      pre.textContent = prettyJson(input);
+      bodyWrap.appendChild(pre);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1967,13 +2055,14 @@
         head.appendChild(el("span", "tool-summary",
           toolHeadLabel(msg.toolName, msg.input)
             || (isMcpTool(msg.toolName) ? "" : (msg.status === "error" ? "error" : "ok"))));
+        const tOpenBtn = openFileButton(cardFilePath(msg.input, msg.diff));
+        if (tOpenBtn) head.appendChild(tOpenBtn);
         const status = el("span", "tool-status");
         status.appendChild(msg.status === "error" ? iconCross() : iconCheck());
         head.appendChild(status);
         card.classList.add(msg.status === "error" ? "tool-err" : "tool-ok");
         const bodyWrap = el("div", "tool-body");
-        const pre = el("pre"); pre.textContent = prettyJson(msg.input);
-        bodyWrap.appendChild(pre);
+        fillToolBody(bodyWrap, msg.toolName, msg.input);
         card.appendChild(head); card.appendChild(bodyWrap);
         head.addEventListener("click", () => card.classList.toggle("collapsed"));
         transcriptInner.appendChild(card);
@@ -1985,9 +2074,11 @@
         const sc = permStatusClass(status);
         if (sc) card.classList.add(status, sc);
         const head = el("div", "perm-head");
-        head.appendChild(el("span", "perm-chevron", "▸"));
+        head.appendChild(toolIcon(msg.toolName)); // same icon set as tool cards (pencil for Edit/Write)
         head.appendChild(el("span", "perm-tool", msg.toolName || "Permission"));
         head.appendChild(el("span", "perm-path", cardHeadDetail(msg)));
+        const pOpenBtn = openFileButton(cardFilePath(msg.input, msg.diff));
+        if (pOpenBtn) head.appendChild(pOpenBtn);
         head.appendChild(el("span", "perm-status", permLabel(status)));
         card.appendChild(head);
         const body = el("div", "perm-body");
@@ -2553,6 +2644,13 @@
     updateSendEnabled();
     updateTurnLocks();
   }
+  // Per-file "all changes decided?" update from the editor review — enables/disables the chip's Finish button.
+  function turnReviewFileState(path, allDecided) {
+    const f = state.turnReview.files.find((x) => x.path === path);
+    if (!f) return;
+    f.allDecided = !!allDecided;
+    renderTurnReview();
+  }
   function clearTurnReview() {
     state.turnReview.files = [];
     renderTurnReview();
@@ -2587,16 +2685,30 @@
 
     const list = el("div", "turn-review-files");
     files.forEach((f) => {
-      const chip = el("button", "turn-review-chip");
-      chip.appendChild(svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+      const chip = el("div", "turn-review-chip");
+      // clickable open area (icon + name + counts) — opens the file's in-editor review
+      const open = el("button", "turn-review-open");
+      open.appendChild(svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
         { width: 13, height: 13, "stroke-width": 1.8 }));
-      chip.appendChild(el("span", "chip-name", f.name || f.path));
-      // still-open added/removed line counts (the file leaves the list once fully reviewed)
+      open.appendChild(el("span", "chip-name", f.name || f.path));
+      // still-open added/removed line counts (the file leaves the list once finished)
       const added = f.added || 0, removed = f.removed || 0;
-      if (added > 0) chip.appendChild(el("span", "turn-review-add", "+" + added));
-      if (removed > 0) chip.appendChild(el("span", "turn-review-del", "−" + removed));
-      chip.title = "Open " + (f.path || f.name) + " for review";
-      chip.addEventListener("click", () => post("editReview.openTurnFile", { path: f.path }));
+      if (added > 0) open.appendChild(el("span", "turn-review-add", "+" + added));
+      if (removed > 0) open.appendChild(el("span", "turn-review-del", "−" + removed));
+      open.title = "Open " + (f.path || f.name) + " for review";
+      open.addEventListener("click", () => post("editReview.openTurnFile", { path: f.path }));
+      chip.appendChild(open);
+      // Finish — completes the file's review; enabled only once every change is decided
+      const finish = el("button", "turn-review-finish", "Finish");
+      finish.disabled = !f.allDecided;
+      finish.title = f.allDecided
+        ? "Complete the review for this file and remove it from the list"
+        : "Decide every change in this file first (open it to review)";
+      finish.addEventListener("click", () => {
+        if (finish.disabled) return;
+        post("editReview.finishTurnFile", { path: f.path });
+      });
+      chip.appendChild(finish);
       list.appendChild(chip);
     });
     turnReviewEl.appendChild(list);
