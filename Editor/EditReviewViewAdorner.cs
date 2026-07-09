@@ -39,9 +39,28 @@ namespace CodeAstrogator.Editor
         private static readonly Brush DeleteFillDim = Frozen(Color.FromArgb(0x14, 0xF8, 0x51, 0x49));   // red faint
         private static readonly Brush AddFill = Frozen(Color.FromArgb(0x33, 0x3F, 0xB9, 0x50));         // green ~.20
         private static readonly Brush AddFillDim = Frozen(Color.FromArgb(0x12, 0x3F, 0xB9, 0x50));      // green faint
+        // Stronger fills used for the "winning" side once a decision is made (accepted-add / reverted-del),
+        // so the chosen outcome reads clearly against the dimmed losing side.
+        private static readonly Brush DeleteFillStrong = Frozen(Color.FromArgb(0x52, 0xF8, 0x51, 0x49)); // red ~.32
+        private static readonly Brush AddFillStrong = Frozen(Color.FromArgb(0x52, 0x3F, 0xB9, 0x50));    // green ~.32
         private static readonly Brush AddText = Frozen(Color.FromRgb(0x3F, 0xB9, 0x50));
         private static readonly Brush DeleteText = Frozen(Color.FromRgb(0xF8, 0x51, 0x49));       // red — removed (ghost)
         private static readonly Brush DimText = Frozen(Color.FromArgb(0x99, 0x9A, 0x9A, 0x9A));
+
+        // Accept/Keep = green, Reject/Revert = red. Outline when not chosen, solid fill + white text when chosen.
+        private static readonly Color AcceptColor = Color.FromRgb(0x3F, 0xB9, 0x50);
+        private static readonly Color RejectColor = Color.FromRgb(0xF8, 0x51, 0x49);
+        private static readonly Brush AcceptBrush = Frozen(AcceptColor);
+        private static readonly Brush RejectBrush = Frozen(RejectColor);
+        private static readonly Brush AcceptFillSolid = Frozen(Color.FromArgb(0xF0, 0x2E, 0x7D, 0x39)); // green chosen bg
+        private static readonly Brush RejectFillSolid = Frozen(Color.FromArgb(0xF0, 0xB3, 0x3A, 0x33)); // red chosen bg
+        private static readonly Brush BtnChosenText = Frozen(Colors.White);
+        private static readonly Brush BtnInactiveBg = Frozen(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF)); // faint tint
+        // Neutral toolbar buttons (Prev/Next); Reset gets an amber "undo" tint.
+        private static readonly Brush ToolbarBtnText = Frozen(Color.FromRgb(0xCE, 0xD2, 0xD8));
+        private static readonly Brush ToolbarBtnBorder = Frozen(Color.FromArgb(0x3A, 0xFF, 0xFF, 0xFF));
+        private static readonly Brush ResetBtnText = Frozen(Color.FromRgb(0xE0, 0xA8, 0x4E)); // amber
+        private static readonly ControlTemplate ButtonTemplate = BuildButtonTemplate();
 
         private readonly IWpfTextView _view;
         private IAdornmentLayer? _below;
@@ -49,6 +68,7 @@ namespace CodeAstrogator.Editor
 
         private EditReviewSession? _review;
         private Action? _onCompleted;
+        private Action? _onStateChanged; // fired on every decide/reset so the chat chip can update
         private bool _completed;
         // "applied" mode (post-turn "Review edits at end of turn"): the edit is ALREADY in the buffer, so
         // the ADDED lines are real buffer lines highlighted green in place, and the removed OLD lines are
@@ -87,10 +107,12 @@ namespace CodeAstrogator.Editor
 
         /// <summary>Attaches a review to this view and (re)draws it. Replaces any prior review.
         /// <paramref name="applied"/> selects the "applied" rendering (see <see cref="_applied"/>).</summary>
-        public void SetReview(EditReviewSession review, Action onCompleted, bool applied = false)
+        public void SetReview(EditReviewSession review, Action onCompleted, bool applied = false,
+            Action? onStateChanged = null)
         {
             _review = review ?? throw new ArgumentNullException(nameof(review));
             _onCompleted = onCompleted;
+            _onStateChanged = onStateChanged;
             _applied = applied;
             _completed = false;
             _reviewSnapshot = _view.TextSnapshot;
@@ -245,6 +267,28 @@ namespace CodeAstrogator.Editor
                 Margin = new Thickness(6, 0, 8, 0),
             });
 
+            // Applied (post-turn) review: the file no longer auto-closes on the last decision — the user
+            // completes it explicitly. Reset clears every decision; Finish (enabled once all are decided)
+            // commits the file and drops it from the list.
+            if (_applied)
+            {
+                var reset = MakeNavButton("↺ Reset", "Reset all decisions in this file", () => ResetDecisions());
+                reset.Foreground = ResetBtnText; // amber "undo" tint
+                reset.IsEnabled = _review.AnyDecided; // template dims it when disabled
+                bar.Children.Add(reset);
+                var finish = MakeNavButton("✓ Finish", "Complete the review for this file", () => FinishReview());
+                finish.IsEnabled = _review.AllDecided; // template dims it when disabled
+                if (_review.AllDecided)
+                {
+                    // solid green fill + white bold text so it's clearly readable and reads as the primary action
+                    finish.Background = AcceptFillSolid;
+                    finish.Foreground = BtnChosenText;
+                    finish.BorderBrush = AcceptBrush;
+                    finish.FontWeight = FontWeights.Bold;
+                }
+                bar.Children.Add(finish);
+            }
+
             bar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double w = bar.DesiredSize.Width;
             Canvas.SetLeft(bar, Math.Max(_view.ViewportLeft, _view.ViewportRight - w - 16));
@@ -259,9 +303,14 @@ namespace CodeAstrogator.Editor
                 Content = glyph,
                 ToolTip = tip,
                 Margin = new Thickness(2, 1, 2, 1),
-                Padding = new Thickness(7, 1, 7, 1),
+                Padding = new Thickness(8, 2, 8, 2),
                 FontSize = 11,
                 Cursor = System.Windows.Input.Cursors.Hand,
+                Template = ButtonTemplate,
+                Background = BtnInactiveBg,
+                Foreground = ToolbarBtnText,
+                BorderBrush = ToolbarBtnBorder,
+                BorderThickness = new Thickness(1),
             };
             b.Click += (s, e) => onClick();
             return b;
@@ -288,8 +337,11 @@ namespace CodeAstrogator.Editor
             catch { /* best effort */ }
         }
 
-        /// <summary>Scrolls to the previous (dir &lt; 0) or next (dir &gt; 0) hunk relative to the first
-        /// visible line, wrapping around at the ends.</summary>
+        /// <summary>Jumps to the next (dir &gt; 0) or previous (dir &lt; 0) review hunk relative to the CURRENT
+        /// viewport — always the first hunk below the last visible line (next) or the last hunk above the first
+        /// visible line (prev), so it works from wherever the user has scrolled and skips hunks already on
+        /// screen. Wraps around at the ends. Reading the live visible RANGE (not a tracked index) is what makes
+        /// manual scrolling between presses behave.</summary>
         private void Navigate(int dir, ITextSnapshot snapshot)
         {
             if (_review == null || _review.Hunks.Count == 0)
@@ -299,17 +351,17 @@ namespace CodeAstrogator.Editor
                 lines.Add(Clamp(EffectiveAnchor(h) - 1, 0, snapshot.LineCount - 1));
             lines.Sort();
 
-            int curr = CurrentTopLine();
+            GetVisibleLineRange(out int firstVisible, out int lastVisible);
             int target = -1;
             if (dir > 0)
             {
-                foreach (var l in lines) if (l > curr) { target = l; break; }
-                if (target < 0) target = lines[0]; // past the last → wrap to the first
+                foreach (var l in lines) if (l > lastVisible) { target = l; break; } // first below the viewport
+                if (target < 0) target = lines[0];                                    // none below → wrap to first
             }
             else
             {
-                for (int i = lines.Count - 1; i >= 0; i--) if (lines[i] < curr) { target = lines[i]; break; }
-                if (target < 0) target = lines[lines.Count - 1]; // before the first → wrap to the last
+                for (int i = lines.Count - 1; i >= 0; i--) if (lines[i] < firstVisible) { target = lines[i]; break; } // last above
+                if (target < 0) target = lines[lines.Count - 1];                       // none above → wrap to last
             }
             try
             {
@@ -320,16 +372,21 @@ namespace CodeAstrogator.Editor
             catch { /* best effort */ }
         }
 
-        private int CurrentTopLine()
+        /// <summary>The 0-based line numbers of the first and last fully-or-partly visible lines (0/0 on error).</summary>
+        private void GetVisibleLineRange(out int firstVisible, out int lastVisible)
         {
+            firstVisible = 0;
+            lastVisible = 0;
             try
             {
                 var lines = _view.TextViewLines;
                 if (lines != null && lines.Count > 0)
-                    return lines.FirstVisibleLine.Start.GetContainingLine().LineNumber;
+                {
+                    firstVisible = lines.FirstVisibleLine.Start.GetContainingLine().LineNumber;
+                    lastVisible = lines.LastVisibleLine.Start.GetContainingLine().LineNumber;
+                }
             }
             catch { }
-            return 0;
         }
 
         private void DrawHunk(ReviewHunk hunk, ITextSnapshot snapshot)
@@ -347,7 +404,9 @@ namespace CodeAstrogator.Editor
                 var tvl = VisibleLine(anchor0 + d, snapshot);
                 if (tvl == null) continue;
                 if (firstDelLine == null) firstDelLine = tvl;
-                AddRect(_below!, tvl.Extent, tvl.TextTop, tvl.Height, rejected ? DeleteFillDim : DeleteFill);
+                // to-be-deleted: rejected → faint (edit won't apply), accepted → strong, undecided → normal
+                AddRect(_below!, tvl.Extent, tvl.TextTop, tvl.Height,
+                    rejected ? DeleteFillDim : accepted ? DeleteFillStrong : DeleteFill);
             }
 
             // 2) green phantom "added" lines in the reserved space
@@ -375,7 +434,9 @@ namespace CodeAstrogator.Editor
                 for (int i = 0; i < addCount; i++)
                 {
                     double y = phantomTop + i * _view.LineHeight;
-                    AddRect(_above!, anchorSpan, y, _view.LineHeight, rejected ? AddFillDim : AddFill);
+                    // to-be-added: rejected → faint (edit won't apply), accepted → strong, undecided → normal
+                    AddRect(_above!, anchorSpan, y, _view.LineHeight,
+                        rejected ? AddFillDim : accepted ? AddFillStrong : AddFill);
                     AddAddedText(anchorSpan, hunk.AddedLines[i], left, y, rejected);
                 }
             }
@@ -408,7 +469,9 @@ namespace CodeAstrogator.Editor
                 var tvl = VisibleLine(newAnchor0 + a, snapshot);
                 if (tvl == null) continue;
                 if (firstAddLine == null) firstAddLine = tvl;
-                AddRect(_below!, tvl.Extent, tvl.TextTop, tvl.Height, rejected ? AddFillDim : AddFill);
+                // new text: reverted → faint (it'll go), kept → strong, undecided → normal
+                AddRect(_below!, tvl.Extent, tvl.TextTop, tvl.Height,
+                    rejected ? AddFillDim : accepted ? AddFillStrong : AddFill);
             }
 
             // 2) red ghost "deleted" lines in the reserved space above the added block (or, for a pure
@@ -422,7 +485,9 @@ namespace CodeAstrogator.Editor
                 for (int i = 0; i < delCount; i++)
                 {
                     double y = ghostTop + i * _view.LineHeight;
-                    AddRect(_above!, anchorSpan, y, _view.LineHeight, accepted ? DeleteFillDim : DeleteFill);
+                    // old text (ghost): kept → faint (discarded), reverted → strong (it'll come back), undecided → normal
+                    AddRect(_above!, anchorSpan, y, _view.LineHeight,
+                        accepted ? DeleteFillDim : rejected ? DeleteFillStrong : DeleteFill);
                     AddPhantomText(anchorSpan, hunk.DeletedLines[i], left, y, accepted ? DimText : DeleteText, strike: true);
                 }
             }
@@ -451,8 +516,8 @@ namespace CodeAstrogator.Editor
             var rejectLabel = _applied
                 ? (hunk.State == HunkState.Rejected ? "↩ Reverted" : "↩ Revert")
                 : (hunk.State == HunkState.Rejected ? "✕ Rejected" : "✕ Reject");
-            bar.Children.Add(MakeButton(acceptLabel, hunk.State == HunkState.Accepted, () => Decide(hunk, HunkState.Accepted)));
-            bar.Children.Add(MakeButton(rejectLabel, hunk.State == HunkState.Rejected, () => Decide(hunk, HunkState.Rejected)));
+            bar.Children.Add(MakeButton(acceptLabel, hunk.State == HunkState.Accepted, accept: true, () => Decide(hunk, HunkState.Accepted)));
+            bar.Children.Add(MakeButton(rejectLabel, hunk.State == HunkState.Rejected, accept: false, () => Decide(hunk, HunkState.Rejected)));
 
             bar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double w = bar.DesiredSize.Width;
@@ -466,19 +531,54 @@ namespace CodeAstrogator.Editor
             _above!.AddAdornment(AdornmentPositioningBehavior.TextRelative, span, "btn:" + hunk.Index, bar, null);
         }
 
-        private Button MakeButton(string text, bool active, Action onClick)
+        private Button MakeButton(string text, bool active, bool accept, Action onClick)
         {
+            var accent = accept ? AcceptBrush : RejectBrush;
             var b = new Button
             {
                 Content = text,
                 Margin = new Thickness(2, 1, 2, 1),
-                Padding = new Thickness(6, 1, 6, 1),
+                Padding = new Thickness(8, 2, 8, 2),
                 FontSize = 11,
                 Cursor = System.Windows.Input.Cursors.Hand,
+                Template = ButtonTemplate,
+                BorderBrush = accent,
+                BorderThickness = new Thickness(1),
+                // Chosen: solid accent fill + white bold text. Not chosen: faint tint, accent-colored text.
+                Background = active ? (accept ? AcceptFillSolid : RejectFillSolid) : BtnInactiveBg,
+                Foreground = active ? BtnChosenText : accent,
                 FontWeight = active ? FontWeights.Bold : FontWeights.Normal,
+                Opacity = active ? 1.0 : 0.9,
             };
             b.Click += (s, e) => onClick();
             return b;
+        }
+
+        /// <summary>A minimal button template (rounded border + centered content) so our Background/Border/
+        /// Foreground render exactly as set, without the OS theme's default gray chrome or hover repaint.</summary>
+        private static ControlTemplate BuildButtonTemplate()
+        {
+            var border = new FrameworkElementFactory(typeof(Border));
+            border.SetValue(Border.BackgroundProperty, new System.Windows.TemplateBindingExtension(Control.BackgroundProperty));
+            border.SetValue(Border.BorderBrushProperty, new System.Windows.TemplateBindingExtension(Control.BorderBrushProperty));
+            border.SetValue(Border.BorderThicknessProperty, new System.Windows.TemplateBindingExtension(Control.BorderThicknessProperty));
+            border.SetValue(Border.PaddingProperty, new System.Windows.TemplateBindingExtension(Control.PaddingProperty));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+            border.SetValue(Border.SnapsToDevicePixelsProperty, true);
+            var content = new FrameworkElementFactory(typeof(ContentPresenter));
+            content.SetValue(ContentPresenter.HorizontalAlignmentProperty, System.Windows.HorizontalAlignment.Center);
+            content.SetValue(ContentPresenter.VerticalAlignmentProperty, System.Windows.VerticalAlignment.Center);
+            border.AppendChild(content);
+            var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
+            // Hover brightens slightly; disabled dims. Setters without a TargetName apply to the button itself.
+            var hover = new System.Windows.Trigger { Property = System.Windows.UIElement.IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new System.Windows.Setter(System.Windows.UIElement.OpacityProperty, 0.82));
+            template.Triggers.Add(hover);
+            var disabled = new System.Windows.Trigger { Property = System.Windows.UIElement.IsEnabledProperty, Value = false };
+            disabled.Setters.Add(new System.Windows.Setter(System.Windows.UIElement.OpacityProperty, 0.4));
+            template.Triggers.Add(disabled);
+            template.Seal();
+            return template;
         }
 
         private void Decide(ReviewHunk hunk, HunkState state)
@@ -488,12 +588,39 @@ namespace CodeAstrogator.Editor
             hunk.State = state;
             Draw(); // refresh button labels / dimming
             ReviewChanged?.Invoke(); // repaint the scrollbar marks (decided hunks dim)
-            if (_review.AllDecided && !_completed)
+            _onStateChanged?.Invoke(); // let the chat chip enable/disable its Finish button
+            // Proposal mode (a blocking permission prompt) auto-resolves once every hunk is decided.
+            // Applied mode (post-turn review) waits for an explicit Finish so the user controls when the
+            // file leaves the list — see FinishReview.
+            if (!_applied && _review.AllDecided && !_completed)
             {
                 _completed = true;
                 var cb = _onCompleted;
                 cb?.Invoke(); // host reconstructs updatedInput + resolves the CLI call, then Close()s us
             }
+        }
+
+        /// <summary>Explicitly completes an applied-mode (post-turn) review — the user pressed Finish once
+        /// every change was decided. Commits via <see cref="_onCompleted"/> (bridge → CommitPath). No-op
+        /// unless every hunk is decided.</summary>
+        public void FinishReview()
+        {
+            if (_review == null || _completed || !_review.AllDecided)
+                return;
+            _completed = true;
+            _onCompleted?.Invoke();
+        }
+
+        /// <summary>Resets every hunk back to undecided (the "reset all decisions" toolbar action) and
+        /// redraws. Notifies the host so the chip's Finish button disables again.</summary>
+        public void ResetDecisions()
+        {
+            if (_review == null || _completed || !_review.AnyDecided)
+                return;
+            _review.ResetDecisions();
+            Draw();
+            ReviewChanged?.Invoke();
+            _onStateChanged?.Invoke();
         }
 
         private void AddRect(IAdornmentLayer layer, SnapshotSpan span, double top, double height, Brush fill)

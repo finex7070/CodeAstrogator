@@ -36,6 +36,10 @@ namespace CodeAstrogator.Services
             public IWpfTextView View = null!;
             public IVsWindowFrame? Frame;
             public readonly List<IReadOnlyRegion> ReadOnly = new List<IReadOnlyRegion>();
+            // The frame's editor-caption suffix before we appended the "+N -M" review counts, so we can
+            // restore it when the review ends (usually null → clears back to just the file name).
+            public string? PriorCaption;
+            public bool CaptionSet;
         }
         private readonly Dictionary<string, TurnFileReview> _turnViews =
             new Dictionary<string, TurnFileReview>(StringComparer.OrdinalIgnoreCase);
@@ -127,7 +131,7 @@ namespace CodeAstrogator.Services
         /// review's duration so stray typing / Ctrl+S can't disturb the anchors. When every hunk is decided,
         /// <paramref name="onDecided"/> fires (bridge → CommitPath). Throws if the view can't be obtained.
         /// UI thread.</summary>
-        public void OpenForPath(string path, EditReviewSession review, Action onDecided)
+        public void OpenForPath(string path, EditReviewSession review, Action onDecided, Action onStateChanged)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (string.IsNullOrEmpty(path))
@@ -148,14 +152,101 @@ namespace CodeAstrogator.Services
             if (view == null)
                 throw new InvalidOperationException("Could not open an editor view for " + path);
 
+            AttachReview(path, view, frame, review, onDecided, onStateChanged);
+        }
+
+        /// <summary>If <paramref name="path"/> is ALREADY open in an editor, attach the inline review to it
+        /// right away so the green/red diff shows without the user having to click the chip first. No-op when
+        /// the file isn't open (it gets opened + attached on demand via <see cref="OpenForPath"/>) or already
+        /// under review. Marshals to the UI thread; safe to call from a session-event background thread.</summary>
+        public void AttachIfOpen(string path, EditReviewSession review, Action onDecided, Action onStateChanged)
+        {
+#pragma warning disable VSTHRD010
+            RunOnUi(() => AttachIfOpenCore(path, review, onDecided, onStateChanged));
+#pragma warning restore VSTHRD010
+        }
+
+        private void AttachIfOpenCore(string path, EditReviewSession review, Action onDecided, Action onStateChanged)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (string.IsNullOrEmpty(path) || _turnViews.ContainsKey(path))
+                return;
+            if (!VsShellUtilities.IsDocumentOpen(_package, path, Guid.Empty,
+                    out _, out _, out IVsWindowFrame frame) || frame == null)
+                return; // not open → leave it for the chip click
+            var vsTextView = VsShellUtilities.GetTextView(frame);
+            var view = vsTextView == null ? null : _package.GetComponentModel()
+                ?.GetService<IVsEditorAdaptersFactoryService>()?.GetWpfTextView(vsTextView);
+            if (view == null)
+                return; // open but not a text view (e.g. a designer) → skip auto-attach
+            AttachReview(path, view, frame, review, onDecided, onStateChanged);
+        }
+
+        /// <summary>Attaches the applied-mode review to an open <paramref name="view"/>: locks the buffer
+        /// read-only (so stray typing / Ctrl+S can't shift the diff anchors), records the view, wires the
+        /// tab-close cleanup, draws the review and scrolls to the first change. UI thread.</summary>
+        private void AttachReview(string path, IWpfTextView view, IVsWindowFrame? frame,
+            EditReviewSession review, Action onDecided, Action onStateChanged)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
             var rec = new TurnFileReview { View = view, Frame = frame };
-            // The buffer already holds the applied (new) content — no swap. Lock it read-only so a stray
-            // edit / Ctrl+S can't shift the diff anchors mid-review, then attach the review in applied mode.
+            // The buffer already holds the applied (new) content — no swap. Lock it read-only, then attach the
+            // review in applied mode.
             AddReadOnly(rec);
             _turnViews[path] = rec;
+            // If the user closes the editor tab without deciding, drop the entry (like a cancel) so the chip
+            // can reopen the file — otherwise OpenForPath would short-circuit to Show() on a closed frame and
+            // nothing would happen. The review stays pending host-side, so the chip remains in the list.
+            EventHandler? onClosed = null;
+            onClosed = (s, e) =>
+            {
+                view.Closed -= onClosed;
+                if (_turnViews.TryGetValue(path, out var cur) && ReferenceEquals(cur, rec))
+                    CancelPathCore(path);
+            };
+            view.Closed += onClosed;
             var adorner = EditReviewViewAdorner.GetOrCreate(view);
-            adorner.SetReview(review, onDecided, applied: true);
+            adorner.SetReview(review, onDecided, applied: true, onStateChanged: onStateChanged);
             adorner.ScrollToFirstHunk(); // land on the first change instead of the caret's old position
+            ApplyReviewCaption(rec, review);
+        }
+
+        /// <summary>Appends the review's "+N -M" line counts to the editor tab caption (so the tab shows e.g.
+        /// "GraphicPixelExplosion.cs +24 -3" while it's under review), remembering the prior caption to
+        /// restore later. Best-effort — a failure just leaves the plain file-name tab.</summary>
+        private static void ApplyReviewCaption(TurnFileReview rec, EditReviewSession review)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var frame = rec.Frame;
+            if (frame == null)
+                return;
+            int added = 0, removed = 0;
+            foreach (var h in review.Hunks)
+            {
+                added += h.AddedLines.Count;
+                removed += h.DeletedLines.Count;
+            }
+            try
+            {
+                if (frame.GetProperty((int)__VSFPROPID.VSFPROPID_EditorCaption, out var prior) == VSConstants.S_OK)
+                    rec.PriorCaption = prior as string;
+                // VS appends the caption straight onto the file name, so lead with a space and wrap the
+                // counts in parentheses, e.g. "GraphicPixelExplosion.cs (+24 -3)" (VS keeps a leading space).
+                frame.SetProperty((int)__VSFPROPID.VSFPROPID_EditorCaption, " (+" + added + " -" + removed + ")");
+                rec.CaptionSet = true;
+            }
+            catch { /* best effort — leave the plain tab caption */ }
+        }
+
+        /// <summary>Restores the editor tab caption we changed in <see cref="ApplyReviewCaption"/> (no-op if we
+        /// never set it or the frame is gone).</summary>
+        private static void RestoreCaption(TurnFileReview rec)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!rec.CaptionSet || rec.Frame == null)
+                return;
+            try { rec.Frame.SetProperty((int)__VSFPROPID.VSFPROPID_EditorCaption, rec.PriorCaption); } catch { }
+            rec.CaptionSet = false;
         }
 
         /// <summary>Finalizes a post-turn review: removes the read-only lock and the adornments, then either
@@ -179,6 +270,7 @@ namespace CodeAstrogator.Services
             _turnViews.Remove(path);
             try
             {
+                RestoreCaption(rec);
                 if (EditReviewViewAdorner.TryGet(rec.View, out var adorner))
                     adorner?.ClearReview();
                 RemoveReadOnly(rec);
@@ -215,6 +307,7 @@ namespace CodeAstrogator.Services
             _turnViews.Remove(path);
             try
             {
+                RestoreCaption(rec);
                 if (EditReviewViewAdorner.TryGet(rec.View, out var adorner))
                     adorner?.ClearReview();
                 RemoveReadOnly(rec);

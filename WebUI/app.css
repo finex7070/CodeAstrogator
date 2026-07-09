@@ -567,6 +567,24 @@ button:focus { outline: none; }
 .tool-name { font-weight: 600; color: var(--text); }
 .tool-summary { color: var(--text-dim); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
 .tool-status { flex: 0 0 auto; display: inline-flex; align-items: center; }
+/* "Open in Visual Studio" button in file-based tool/permission card headers. Sits after the path;
+   dim by default, brightens on hover. flex:0 so it never steals width from the path/summary. */
+.open-file-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  margin: -2px 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.65;
+}
+.open-file-btn:hover { color: var(--accent); background: var(--bg-elevated); opacity: 1; }
+.open-file-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .tool-body {
   border-top: 1px solid var(--border);
   padding: 8px;
@@ -574,6 +592,11 @@ button:focus { outline: none; }
   background: var(--bg);
 }
 .tool-body pre { margin: 0; white-space: pre-wrap; overflow-x: auto; }
+/* Edit/Write/MultiEdit tool cards render an inline diff instead of JSON — let it span full width
+   (its lines carry their own padding), and separate stacked MultiEdit diffs with a faint rule. */
+.tool-body.has-diff { padding: 0; }
+.tool-body.has-diff .diff { padding: 6px 0; }
+.tool-multidiff .diff + .diff { border-top: 1px solid var(--border); }
 .tool-card.collapsed .tool-body { display: none; }
 
 /* Sticky card header: while an EXPANDED card is scrolled through, keep its title bar pinned to the
@@ -842,7 +865,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   font-size: 11.5px;
   cursor: pointer;
 }
-.turn-review-keep:hover { border-color: var(--accent); }
+.turn-review-keep:hover { border-color: #E3B341; color: #E3B341; background: rgba(227, 179, 65, 0.12); }
 .turn-review-discard {
   flex: 0 0 auto;
   border: 1px solid var(--border);
@@ -853,7 +876,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   font-size: 11.5px;
   cursor: pointer;
 }
-.turn-review-discard:hover { border-color: #F85149; color: #F85149; }
+.turn-review-discard:hover { border-color: #F85149; color: #F85149; background: rgba(248, 81, 73, 0.12); }
 .turn-review-files {
   display: flex;
   flex-wrap: wrap;
@@ -861,23 +884,49 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .turn-review-chip {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 240px;
-  padding: 3px 10px;
+  align-items: stretch;
+  max-width: 300px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 11.5px;
-  cursor: pointer;
+  overflow: hidden;
 }
 .turn-review-chip:hover { border-color: var(--accent); }
-.turn-review-chip svg { flex: 0 0 auto; color: var(--accent); }
-.turn-review-chip .chip-name { min-width: 0; flex: 0 1 auto; }
+/* open area (icon + name + counts) — the clickable body of the chip */
+.turn-review-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 240px;
+  padding: 3px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.turn-review-open svg { flex: 0 0 auto; color: var(--accent); }
+.turn-review-open .chip-name { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .turn-review-add { flex: 0 0 auto; color: #3FB950; font-variant-numeric: tabular-nums; }
 .turn-review-del { flex: 0 0 auto; color: #F85149; font-variant-numeric: tabular-nums; }
+/* Finish — completes the file; enabled only once every change is decided */
+.turn-review-finish {
+  flex: 0 0 auto;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.turn-review-finish:hover:not(:disabled) { background: var(--accent-faint); }
+.turn-review-finish:disabled { color: var(--text-faint); opacity: 0.55; cursor: default; }
 
 /* Running Task subagents — live spinner list pinned at the bottom of the chat (above the composer) */
 .agents-running {
