@@ -126,7 +126,8 @@ namespace CodeAstrogator.Bridge
             // Accept/Reject; calls FinalizeEditReview when every hunk in a request is decided.
             _editReview = new EditReviewController(_package, FinalizeEditReview);
             _history = SessionHistoryStore.LoadFrom(
-                SessionHistoryStore.GetHistoryPath(package.GetSolutionDirectory()));
+                SessionHistoryStore.GetHistoryPath(package.GetSolutionDirectory()),
+                package.GetOptions().HistoryRetentionDays);
 
             _activeDocs = new ActiveDocumentTracker(package);
             _activeDocs.ActiveDocumentChanged += OnActiveDocumentChanged;
@@ -357,6 +358,9 @@ namespace CodeAstrogator.Bridge
                     break;
                 case "clipboard.paste":
                     HandleClipboardPaste();
+                    break;
+                case "attachment.preview":
+                    HandleAttachmentPreview(msg.Value<string>("path") ?? "", msg.Value<string>("token") ?? "");
                     break;
                 case "remote.start":
                     HandleRemoteStart();
@@ -1521,6 +1525,7 @@ namespace CodeAstrogator.Bridge
                 foreach (var m in record.Messages)
                     messages.Add(m.DeepClone());
             }
+            MarkAttachmentExistence(messages); // flag which attachment files still exist (previewable)
 
             Post(new JObject
             {
@@ -1889,6 +1894,131 @@ namespace CodeAstrogator.Bridge
             if (i > 0 && i + 2 < path.Length && char.IsDigit(path[i + 2]))
                 return (path.Substring(0, i), path.Substring(i));
             return (path, "");
+        }
+
+        // ── Attachment previews ─────────────────────────────────────────────────
+        // The WebUI shows expandable inline previews for image/text attachments in a user message.
+        // It requests content lazily via `attachment.preview {path, token}`; we read the file off the
+        // UI thread and post the result back keyed by `token`. A missing / oversized / binary file
+        // yields ok:false → the WebUI downgrades the chip to a plain, non-expandable name.
+        private static readonly HashSet<string> _attImageExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".apng", ".avif" };
+        private static readonly HashSet<string> _attTextExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".txt", ".md", ".markdown", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".config",
+          ".csv", ".tsv", ".log", ".cs", ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx", ".html", ".htm",
+          ".css", ".scss", ".less", ".py", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".cc", ".go",
+          ".rs", ".rb", ".php", ".sh", ".bat", ".ps1", ".psm1", ".sql", ".gradle", ".properties",
+          ".editorconfig", ".gitignore", ".gitattributes", ".env", ".sln", ".csproj", ".props",
+          ".targets", ".razor", ".cshtml", ".vue", ".svelte", ".swift", ".lua", ".pl", ".dart",
+          ".scala", ".groovy" };
+
+        private const long AttImageMaxBytes = 16 * 1024 * 1024; // 16 MB — refuse to inline larger images
+        private const int AttTextMaxChars = 200 * 1024;         // ~200k chars of text, then mark truncated
+
+        private static string AttImageMime(string ext)
+        {
+            switch (ext.ToLowerInvariant())
+            {
+                case ".png": return "image/png";
+                case ".jpg":
+                case ".jpeg": return "image/jpeg";
+                case ".gif": return "image/gif";
+                case ".bmp": return "image/bmp";
+                case ".webp": return "image/webp";
+                case ".svg": return "image/svg+xml";
+                case ".ico": return "image/x-icon";
+                case ".apng": return "image/apng";
+                case ".avif": return "image/avif";
+                default: return "application/octet-stream";
+            }
+        }
+
+        private void HandleAttachmentPreview(string rawPath, string token)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (string.IsNullOrEmpty(rawPath))
+                return;
+            var (path, _) = SplitLineSuffix(rawPath);
+            // Read + encode off the UI thread; Post() marshals the reply back to the WebView.
+            _ = Task.Run(() =>
+            {
+                var reply = BuildAttachmentPreview(path);
+                reply["type"] = "attachment.preview";
+                reply["path"] = rawPath; // echo exactly what the WebUI holds
+                reply["token"] = token;
+                Post(reply);
+            });
+        }
+
+        private static JObject BuildAttachmentPreview(string path)
+        {
+            try
+            {
+                if (!System.IO.File.Exists(path))
+                    return new JObject { ["ok"] = false, ["reason"] = "missing" };
+                var ext = System.IO.Path.GetExtension(path) ?? "";
+                if (_attImageExts.Contains(ext))
+                {
+                    if (new System.IO.FileInfo(path).Length > AttImageMaxBytes)
+                        return new JObject { ["ok"] = false, ["reason"] = "toolarge" };
+                    var bytes = System.IO.File.ReadAllBytes(path);
+                    return new JObject
+                    {
+                        ["ok"] = true,
+                        ["kind"] = "image",
+                        ["dataUri"] = "data:" + AttImageMime(ext) + ";base64," + Convert.ToBase64String(bytes),
+                    };
+                }
+                if (_attTextExts.Contains(ext))
+                {
+                    string content;
+                    bool truncated;
+                    using (var reader = new System.IO.StreamReader(path, System.Text.Encoding.UTF8, true))
+                    {
+                        var buf = new char[AttTextMaxChars];
+                        int read = reader.ReadBlock(buf, 0, AttTextMaxChars);
+                        content = new string(buf, 0, read);
+                        truncated = !reader.EndOfStream;
+                    }
+                    return new JObject
+                    {
+                        ["ok"] = true,
+                        ["kind"] = "text",
+                        ["text"] = content,
+                        ["truncated"] = truncated,
+                    };
+                }
+                return new JObject { ["ok"] = false, ["reason"] = "binary" };
+            }
+            catch (Exception ex)
+            {
+                return new JObject { ["ok"] = false, ["reason"] = "error", ["error"] = ex.Message };
+            }
+        }
+
+        /// <summary>Sets <c>exists</c> on every attachment of every user message, so the WebUI can decide
+        /// at render time whether a chip is previewable (files deleted since the chat was recorded stay
+        /// plain, non-expandable name chips).</summary>
+        private static void MarkAttachmentExistence(JArray messages)
+        {
+            foreach (var m in messages.OfType<JObject>())
+            {
+                if (!string.Equals(m.Value<string>("role"), "user", StringComparison.Ordinal))
+                    continue;
+                if (!(m["attachments"] is JArray atts))
+                    continue;
+                foreach (var a in atts.OfType<JObject>())
+                {
+                    var p = a.Value<string>("path");
+                    bool ex = false;
+                    if (!string.IsNullOrEmpty(p))
+                    {
+                        var (sp, _) = SplitLineSuffix(p!);
+                        try { ex = System.IO.File.Exists(sp); } catch { ex = false; }
+                    }
+                    a["exists"] = ex;
+                }
+            }
         }
 
         /// <summary>

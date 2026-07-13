@@ -64,8 +64,11 @@ namespace CodeAstrogator.Services
             return Path.Combine(baseDir, key + ".json");
         }
 
-        /// <summary>Loads the store; missing/corrupt files yield an empty store.</summary>
-        public static SessionHistoryStore LoadFrom(string path)
+        /// <summary>Loads the store; missing/corrupt files yield an empty store. When
+        /// <paramref name="retentionDays"/> &gt; 0, sessions whose last activity is older than that many
+        /// days are dropped at load time (mirrors <see cref="RetentionService"/> so the in-memory view
+        /// and the next <see cref="Save"/> reflect the retention window). <c>0</c> = keep everything.</summary>
+        public static SessionHistoryStore LoadFrom(string path, int retentionDays = 0)
         {
             var store = new SessionHistoryStore { _path = path };
             try
@@ -73,11 +76,14 @@ namespace CodeAstrogator.Services
                 if (!File.Exists(path))
                     return store;
 
+                var cutoff = retentionDays > 0 ? DateTime.UtcNow.AddDays(-retentionDays) : (DateTime?)null;
                 var root = JObject.Parse(File.ReadAllText(path));
                 foreach (var token in root["sessions"] as JArray ?? new JArray())
                 {
                     if (token is not JObject s)
                         continue;
+                    if (cutoff is { } c && RetentionService.IsExpired(s["updatedAt"], c))
+                        continue; // older than the retention window → skip
                     var record = new SessionRecord
                     {
                         Id = s.Value<string>("id") ?? Guid.NewGuid().ToString("n"),

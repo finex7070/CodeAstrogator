@@ -141,9 +141,9 @@ found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout
   `loadNotice()` and/or `loadUpdate()`; **disabled → no fetch at all, no display at all.**
 - **Fetch policy + cache (shared, `fetchThrottledCached`):** Cache in **`localStorage`** (persisted via
   a fixed WebView2 UserDataFolder): `cpfc.notice.*` resp. `cpfc.update.*` (`.cache` = last success, `.lastFetch`
-  = ms timestamp of the last **attempt**). Fetch only if **≥3 h** (`MIN_INTERVAL`) since the last attempt
+  = ms timestamp of the last **attempt**). Fetch only if **≥1 h** (`MIN_INTERVAL`) since the last attempt
   (timestamp set **before** the attempt → failures throttled too). Success → cache + render. **Failure
-  → render from cache; no cache → nothing.** Retry on the next open (3-h throttled).
+  → render from cache; no cache → nothing.** Retry on the next open (1-h throttled).
 - **Behavior:** Banners are `hidden` by default in the HTML. ✕ (`#notice-close`/`#update-close`) sets
   `hidden` — **only for the session, no persistence**; re-evaluated on the next open.
 - **External link:** `ClaudeChatWindowControl` now registers `core.NewWindowRequested`
@@ -208,6 +208,9 @@ compact_boundary evaluation) — details in the respective sections below.
 - **`attach.added` (host → web)** — not defined in the plan, but necessary: on
   `attach.files`/`attach.context`/`attach.browse` the host opens a picker and returns the result as
   `{ type: "attach.added", attachments: [{ name, path }] }`; the UI renders chips.
+- **`attachment.preview` (web ↔ host)** — not in the plan: lazy inline preview of an image/text
+  attachment in a sent user message. web→host `{ path, token }`; host→web `{ path, token, ok, kind,
+  dataUri?|text?, truncated?, reason? }`. See "Expandable attachment previews" below.
 - `prompt.send.attachments` carries `{ id, name, path? }`; the host appends `@<path>` references
   to the prompt (the CLI reads the files itself). **Paths with spaces are quoted**
   (`Core/CliReferenceFormatter.FormatFileReference`): otherwise the CLI's `@` parser breaks at the
@@ -365,6 +368,29 @@ compact_boundary evaluation) — details in the respective sections below.
   `SaveOptions()` (instead of the former `PersistSetting`).
 - On store errors: `RecordSettingsError` → `%LocalAppData%\CodeAstrogator\settings-error.log`
   + the bridge shows a ⚠ system note on `ready`; defaults still apply.
+
+## Retention / on-disk cleanup (2026-07-13)
+- **What:** optional auto-cleanup of the two data areas under `%LocalAppData%\CodeAstrogator`:
+  chat **history** sessions (per-workspace `history\<key>.json`) and pasted-**image** files (`pasted\`).
+  Two independent settings, `AstrogatorOptions.HistoryRetentionDays` (default **90**) /
+  `PastedRetentionDays` (default **30**) (int days, **`0` = keep forever**). Presets in
+  `RetentionDayChoices` = {0,7,14,30,60,90,180,365}.
+- **Settings UI:** "History & storage" section in `AstrogatorSettingsWindow` — two combos
+  (`MakeRetentionCombo`/`SelectRetention`/`SelectedRetention`) mapping friendly labels ("Never" / "N days")
+  to the day ints. Persisted as `Int32` in the store; copied in `CodeAstrogatorPackage.Copy`.
+- **When it runs:** `CodeAstrogatorPackage.RunRetentionCleanup()` — on **VS startup** (after `LoadSettings`)
+  and after **every settings Save** (`UpdateOptions`) so a shortened window takes effect at once. Runs on a
+  background thread (`Task.Run`), no-op when both are 0.
+- **`Services/RetentionService` (best-effort, all try/catch):**
+  - *Pasted:* deletes files in `pasted\` with `LastWriteTimeUtc` older than the cutoff.
+  - *History:* rewrites each `history\*.json`, dropping sessions whose `updatedAt` is older than the cutoff
+    (unparseable timestamps are **kept** — never delete on ambiguity); a file emptied of sessions is deleted.
+    Only rewrites when something was actually removed.
+- **Consistency with the live store:** `SessionHistoryStore.LoadFrom(path, retentionDays)` applies the **same**
+  cutoff at load time (skips expired sessions via `RetentionService.IsExpired`), so the current workspace's
+  in-memory view + next `Save()` match the sweep regardless of ordering/races. `WebViewBridge` passes
+  `GetOptions().HistoryRetentionDays`. (Deleting an old pasted image is fine for the attachment-preview
+  feature — a missing file already renders as a plain, non-expandable chip.)
 
 ## Startup behavior & defaults
 - **Restore last session** (Settings → Code Astrogator, default on): When the
@@ -598,9 +624,26 @@ compact_boundary evaluation) — details in the respective sections below.
     `.gutter-logo` 18×18 + `.msg-assistant .gutter { width:18px }`. The `--msg-assistant-fg`
     glyph color no longer applies (it's an image now).
 - **Attachment chips in the transcript:** `appendMsgAttachments(body, attachments)` renders one
-  `.att-chip` per file (file icon + name, `path` as tooltip). Used by `renderUserMessage` (live) and
+  `.att-item` per file (file icon + name, `path` as tooltip). Used by `renderUserMessage` (live) and
   `renderHistoricMessage` (role user). **Bug fixed:** the chips were previously built but never appended to
   the body element.
+- **Expandable attachment previews (2026-07-13):** an attachment whose file **still exists** and is an
+  **image or text** file (classified by extension: `attKind` / `ATT_IMAGE_EXTS` / `ATT_TEXT_EXTS`) becomes
+  an expandable `.att-item.att-expandable` — a clickable chip header (`.att-chip.att-toggle` + `▸` chevron)
+  and a hidden `.att-preview` panel below it (`<img class="att-img">` or `<pre class="att-pre">`).
+  - **Default open-state by verbosity** (`attDefaultOpen`): **compact** → all closed · **normal** → images
+    open, text closed · **detailed** → all open. `applyVerbosity()` re-applies this to every existing
+    `.att-item.att-expandable` (via `item.attSetOpen`, which also lazy-loads).
+  - **Lazy content load:** on first open the WebUI posts **`attachment.preview` (web→host)** `{ path, token }`;
+    the host reads the file **off the UI thread** (`HandleAttachmentPreview` → `BuildAttachmentPreview`, image
+    ≤ 16 MB → base64 data-URI, text ≤ 200k chars w/ `truncated` flag) and replies **`attachment.preview`
+    (host→web)** `{ path, token, ok, kind, dataUri?|text?, truncated?, reason? }`. `onAttachmentPreview`
+    matches by `token` (registry `attPreviewReg`) and fills the panel.
+  - **Missing / unreadable / non-previewable → plain chip:** on history load the host stamps
+    `attachments[].exists` (`MarkAttachmentExistence`, called in `SendTranscript`) so a deleted file renders
+    as a non-expandable name chip up front. A late failure (`ok:false`, or the file vanished between load and
+    open) is downgraded live by `onAttachmentPreview` (strips the chevron + click, removes the panel).
+    Live-sent messages omit `exists` → assumed present (the files were just attached).
 - **Live vs. host record:** Live takes `sendPrompt` `state.attachments` **plus** the active file
   (from `state.activeFile`, if `optionEnabled && enabled`; name incl. `:lines`). Host-side
   (`HandlePromptSend`) the user message is persisted with `attachments`=[{name,path}] (explicit + active

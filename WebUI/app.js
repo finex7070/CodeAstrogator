@@ -131,7 +131,7 @@
   // session only.
   //
   // Fetch policy (when enabled): on each window open fetch the notice and cache it in
-  // localStorage, but at most once per NOTICE_MIN_INTERVAL (≥3 h between fetch ATTEMPTS — both
+  // localStorage, but at most once per NOTICE_MIN_INTERVAL (≥1 h between fetch ATTEMPTS — both
   // success and failure reset the timer). A failed fetch (offline/404/bad JSON) falls back to the
   // last cached notice; if there is none, nothing is shown — and it retries on the next window
   // open (still throttled). When disabled, nothing is fetched or shown at all.
@@ -286,9 +286,9 @@
 
   // localStorage cache (persists across window opens via the fixed WebView2 user-data folder).
   // Fetch policy for BOTH banners: on each window open fetch from GitHub, but at most once per
-  // MIN_INTERVAL (≥3 h between attempts — success AND failure reset the timer). A failed fetch
+  // MIN_INTERVAL (≥1 h between attempts — success AND failure reset the timer). A failed fetch
   // falls back to the last cached value; if none, nothing shows — retried (throttled) next open.
-  const MIN_INTERVAL = 3 * 60 * 60 * 1000; // ≥3 h between fetch attempts
+  const MIN_INTERVAL = 60 * 60 * 1000; // ≥1 h between fetch attempts
   const NOTICE_CACHE_KEY = "cpfc.notice.cache", NOTICE_LASTFETCH_KEY = "cpfc.notice.lastFetch";
   const UPDATE_CACHE_KEY = "cpfc.update.cache", UPDATE_LASTFETCH_KEY = "cpfc.update.lastFetch";
 
@@ -538,6 +538,7 @@
       case "thinking.delta": return thinkingDelta(m.id, m.text, m.estimatedTokens);
       case "thinking.end": return thinkingEnd(m.id);
       case "attach.added": return attachAdded(m.attachments || []);
+      case "attachment.preview": return onAttachmentPreview(m);
       case "files.list": return onFilesList(m.files || []);
       case "slash.commands": return onSlashCommands(m.commands || []);
       case "remote.state": return applyRemoteState(m);
@@ -935,6 +936,10 @@
     const expand = state.verbosity === "detailed";
     transcriptInner.querySelectorAll(".thinking-card, .tool-card:not(.todo-card)")
       .forEach((c) => c.classList.toggle("collapsed", !expand));
+    // re-apply attachment-preview defaults for the new verbosity (lazy-loads any newly opened)
+    transcriptInner.querySelectorAll(".att-item.att-expandable").forEach((item) => {
+      if (typeof item.attSetOpen === "function") item.attSetOpen(attDefaultOpen(item.dataset.kind || ""));
+    });
   }
   function formatNum(n) { return (Number(n) || 0).toLocaleString("en-US"); }
 
@@ -1063,22 +1068,122 @@
     appendNode(row);
   }
 
+  // Attachment previews: an attachment whose file still exists AND is an image or text file gets an
+  // expandable inline preview. Default open-state follows verbosity (see attDefaultOpen). A file that
+  // no longer exists (host sets exists:false on history load), is not previewable, or turns out
+  // unreadable renders as a plain, non-expandable name chip — the pre-preview behaviour.
+  const ATT_IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "apng", "avif"];
+  const ATT_TEXT_EXTS = ["txt", "md", "markdown", "json", "xml", "yaml", "yml", "toml", "ini", "cfg",
+    "config", "csv", "tsv", "log", "cs", "js", "mjs", "cjs", "ts", "jsx", "tsx", "html", "htm", "css",
+    "scss", "less", "py", "java", "kt", "c", "h", "cpp", "hpp", "cc", "go", "rs", "rb", "php", "sh",
+    "bat", "ps1", "psm1", "sql", "gradle", "properties", "editorconfig", "gitignore", "gitattributes",
+    "env", "sln", "csproj", "props", "targets", "razor", "cshtml", "vue", "svelte", "swift", "lua",
+    "pl", "dart", "scala", "groovy"];
+  function attExt(name) {
+    const s = String(name || "").replace(/[#:]l?\d[\d-]*$/i, ""); // drop a trailing :12-20 / #L12 suffix
+    const m = /\.([a-z0-9]+)$/i.exec(s);
+    return m ? m[1].toLowerCase() : "";
+  }
+  function attKind(name) {
+    const e = attExt(name);
+    if (ATT_IMAGE_EXTS.indexOf(e) !== -1) return "image";
+    if (ATT_TEXT_EXTS.indexOf(e) !== -1) return "text";
+    return "";
+  }
+  /** Default expand state by verbosity: compact → none, normal → images only, detailed → all. */
+  function attDefaultOpen(kind) {
+    if (state.verbosity === "detailed") return true;
+    if (state.verbosity === "normal") return kind === "image";
+    return false; // compact
+  }
+  let attPreviewSeq = 0;
+  const attPreviewReg = {}; // token → { item, kind, previewEl }
+
   // Renders attached-file chips below a user message (shared by live + historic).
-  // Each attachment is { name, path } (or a bare string name).
+  // Each attachment is { name, path, exists? } (or a bare string name).
   function appendMsgAttachments(body, attachments) {
     if (!attachments || !attachments.length) return;
     const ch = el("div", "msg-attachments");
     attachments.forEach((a) => {
       const name = (a && (a.name || a.path)) || a;
       if (!name) return;
-      const chip = el("span", "att-chip");
+      const path = a && a.path;
+      const kind = path ? attKind(name) : "";
+      const exists = !a || a.exists !== false; // live send omits `exists` → assume the file is present
+      const canPreview = !!path && kind !== "" && exists;
+
+      const item = el("div", "att-item" + (canPreview ? " att-expandable att-" + kind : ""));
+      const chip = el("span", "att-chip" + (canPreview ? " att-toggle" : ""));
+      if (canPreview) chip.appendChild(el("span", "att-chev", "▸"));
       chip.appendChild(iconFile());
-      const nm = el("span", "att-name", String(name));
-      if (a && a.path) chip.title = a.path;
-      chip.appendChild(nm);
-      ch.appendChild(chip);
+      const nameEl = el("span", "att-name", String(name));
+      // el() defaults the att-name title to the name text — show the full path on hover instead.
+      if (path) { nameEl.title = String(path); chip.title = String(path); }
+      chip.appendChild(nameEl);
+      item.appendChild(chip);
+
+      if (canPreview) {
+        const preview = el("div", "att-preview");
+        preview.appendChild(el("div", "att-preview-loading", "Loading preview…"));
+        item.appendChild(preview);
+        item.dataset.kind = kind;
+        let loaded = false;
+        function ensureLoaded() {
+          if (loaded) return;
+          loaded = true;
+          const token = "attp-" + (++attPreviewSeq);
+          attPreviewReg[token] = { item: item, kind: kind, previewEl: preview };
+          post("attachment.preview", { path: String(path), token: token });
+        }
+        // exposed on the node so applyVerbosity() can re-apply the default state (and lazy-load)
+        item.attSetOpen = function (open) {
+          item.classList.toggle("expanded", open);
+          if (open) ensureLoaded();
+        };
+        chip.addEventListener("click", function () {
+          item.attSetOpen(!item.classList.contains("expanded"));
+        });
+        if (attDefaultOpen(kind)) item.attSetOpen(true);
+      }
+      ch.appendChild(item);
     });
     body.appendChild(ch);
+  }
+
+  // host→web reply to an attachment.preview request: fill (or downgrade) the matching chip.
+  function onAttachmentPreview(m) {
+    const reg = attPreviewReg[m.token];
+    if (!reg) return;
+    delete attPreviewReg[m.token];
+    const item = reg.item, previewEl = reg.previewEl;
+    previewEl.innerHTML = "";
+    if (!m.ok) {
+      // file gone / unreadable / not previewable → downgrade to a plain name-only chip
+      item.classList.remove("att-expandable", "expanded", "att-image", "att-text");
+      item.attSetOpen = null;
+      const chip = item.querySelector(".att-chip");
+      if (chip) {
+        // clone to drop the click listener, then strip the chevron + toggle affordance
+        const clone = chip.cloneNode(true);
+        clone.classList.remove("att-toggle");
+        const chev = clone.querySelector(".att-chev");
+        if (chev) chev.remove();
+        chip.parentNode.replaceChild(clone, chip);
+      }
+      previewEl.remove();
+      return;
+    }
+    if (m.kind === "image") {
+      const img = el("img", "att-img");
+      img.alt = "";
+      img.src = m.dataUri;
+      previewEl.appendChild(img);
+    } else {
+      const pre = el("pre", "att-pre");
+      pre.textContent = m.text || "";
+      previewEl.appendChild(pre);
+      if (m.truncated) previewEl.appendChild(el("div", "att-trunc", "… preview truncated"));
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -951,10 +951,13 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   font-size: 12px; color: var(--text);
 }
 
-/* attached-file indicators inside a sent user message (live + historic) */
+/* attached-file indicators inside a sent user message (live + historic). Stacked vertically (one
+   per row) so a mix of collapsed chips and expanded preview cards stays orderly — a wrapping row
+   gets jumbled once a card expands to its own width. */
 .msg-attachments {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
   margin-top: 6px;
 }
@@ -973,6 +976,46 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .msg-attachments .att-chip svg { flex: 0 0 auto; opacity: 0.8; }
 .msg-attachments .att-chip .att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Expandable attachment previews (image/text). A collapsed item sits inline as a chip; expanding one
+   turns it into a single connected card on its own row — the chip becomes the card's header bar with
+   the preview docked directly beneath it (so the preview visibly belongs to that filename). */
+.att-item { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
+.att-item .att-chip { align-self: flex-start; }
+.att-item.att-expandable .att-chip { cursor: pointer; max-width: 320px; }
+.att-item.att-expandable .att-chip:hover { color: var(--text); border-color: var(--accent); }
+.att-chev { flex: 0 0 auto; font-size: 9px; color: var(--text-faint); transition: transform 120ms; }
+
+.att-item.expanded {
+  width: fit-content;              /* hug the preview/header … */
+  max-width: min(100%, 480px);     /* … capped so it stays tied to the header, not full-bleed */
+  margin-top: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+/* chip → header bar of the card: full width, square top corners, divider above the preview */
+.att-item.expanded .att-chip {
+  align-self: stretch;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-faint);
+}
+.att-item.expanded .att-chev { transform: rotate(90deg); }
+
+.att-preview { display: none; max-width: 100%; }
+.att-item.expanded .att-preview { display: block; }
+.att-preview-loading { padding: 8px 10px; font-size: 11px; color: var(--text-dim); }
+.att-img { display: block; max-width: 100%; max-height: 320px; height: auto; object-fit: contain; }
+.att-pre {
+  margin: 0; padding: 8px 10px; max-height: 320px; overflow: auto;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5;
+  white-space: pre; color: var(--text);
+}
+.att-trunc { padding: 4px 10px; font-size: 10.5px; color: var(--text-faint); border-top: 1px solid var(--border); }
 .chip-x {
   display: inline-flex;
   align-items: center;
