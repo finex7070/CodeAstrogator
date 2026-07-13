@@ -73,6 +73,18 @@ namespace CodeAstrogator
             }
 
             LoadSettings();
+            RunRetentionCleanup(); // prune old history / pasted files per the retention settings
+        }
+
+        /// <summary>Kicks off the best-effort on-disk cleanup (old chat history + pasted images) on a
+        /// background thread, using the current retention settings. No-op when both are "keep forever".</summary>
+        private void RunRetentionCleanup()
+        {
+            var historyDays = _options.HistoryRetentionDays;
+            var pastedDays = _options.PastedRetentionDays;
+            if (historyDays <= 0 && pastedDays <= 0)
+                return;
+            _ = Task.Run(() => RetentionService.Cleanup(historyDays, pastedDays));
         }
 
         private void ShowChatWindow(object sender, EventArgs e)
@@ -177,6 +189,7 @@ namespace CodeAstrogator
             Copy(from: updated, to: _options);
             SaveOptions();
             OptionsChanged?.Invoke();
+            RunRetentionCleanup(); // a shortened retention window should take effect immediately
         }
 
         /// <summary>Persists the current snapshot. UI thread. Used by the gear popover writes.</summary>
@@ -219,6 +232,8 @@ namespace CodeAstrogator
             to.UsePersistentCli = from.UsePersistentCli;
             to.ReviewEditsInEditor = from.ReviewEditsInEditor;
             to.ReviewEditsAtTurnEnd = from.ReviewEditsAtTurnEnd;
+            to.HistoryRetentionDays = AstrogatorOptions.ClampRetentionDays(from.HistoryRetentionDays);
+            to.PastedRetentionDays = AstrogatorOptions.ClampRetentionDays(from.PastedRetentionDays);
         }
 
         private void RecordSettingsError(string message)

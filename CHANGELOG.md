@@ -4,6 +4,17 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.2] – 2026-07-13
+
+### Added
+- **History & pasted-image retention (auto-cleanup).** A new "History & storage" section in the settings window lets old data be cleaned up automatically: chat history sessions (by last activity) and pasted image files can each be set to be deleted after a chosen age (Never / 7 / 14 / 30 / 60 / 90 / 180 / 365 days). Defaults are **90 days** for chat history and **30 days** for pasted images; choose "Never" to keep everything. Cleanup runs on Visual Studio startup and again whenever you save the settings, and is best-effort (it never interferes with the app). Deleting an old pasted image simply turns its chip in an old chat back into a plain, non-expandable name.
+- **Attached files in a prompt now show an expandable inline preview.** Files listed under a sent user message are expandable when the file is an image or a text/code file: the chip gains a chevron and, when opened, turns into a single connected card — the filename as the header bar with the preview docked directly beneath it (the image itself, or the file's text in a monospaced panel), width-capped so it stays visibly tied to that filename rather than spanning the whole message. Hovering a chip shows the file's full path. The default open-state follows the verbosity setting — **Compact**: all collapsed; **Normal**: images open, text collapsed; **Detailed**: all open (switching verbosity re-applies this). Previews load lazily and work for chats reopened from history. Files that no longer exist on disk — or that aren't a previewable image/text type — stay as plain, non-expandable name chips, exactly as before.
+
+### Changed
+- **Announcement and update banners now check GitHub hourly instead of every 3 hours.** The shared fetch throttle (`MIN_INTERVAL`) for both the announcement (`notice.json`) and the GitHub release update-check dropped from ≥3 h to ≥1 h between fetch attempts. Everything else is unchanged — still opt-in, still only on window open, and both success and failure still reset the timer.
+
+---
+
 ## [0.6.1] – 2026-07-09
 
 ### Changed
