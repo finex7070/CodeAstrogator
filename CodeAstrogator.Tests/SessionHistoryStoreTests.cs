@@ -168,6 +168,33 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void LoadFrom_WithRetention_DropsSessionsOlderThanCutoff()
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+            var recent = DateTime.UtcNow.AddDays(-3).ToString("o");
+            var old = DateTime.UtcNow.AddDays(-40).ToString("o");
+            var root = new JObject
+            {
+                ["sessions"] = new JArray
+                {
+                    new JObject { ["id"] = "fresh", ["title"] = "Fresh", ["updatedAt"] = recent,
+                        ["messages"] = new JArray { Msg("user", "recent") } },
+                    new JObject { ["id"] = "stale", ["title"] = "Stale", ["updatedAt"] = old,
+                        ["messages"] = new JArray { Msg("user", "ancient") } },
+                },
+            };
+            File.WriteAllText(_path, root.ToString());
+
+            // retentionDays = 0 → keep everything
+            Assert.Equal(2, SessionHistoryStore.LoadFrom(_path, 0).ToSessionList().Count);
+
+            // retentionDays = 30 → the 40-day-old session is dropped
+            var pruned = SessionHistoryStore.LoadFrom(_path, 30);
+            var entry = Assert.Single(pruned.ToSessionList());
+            Assert.Equal("fresh", entry.Value<string>("id"));
+        }
+
+        [Fact]
         public void GetHistoryPath_IsStablePerWorkspaceAndIgnoresCaseAndTrailingSlash()
         {
             var a = SessionHistoryStore.GetHistoryPath(@"C:\Users\Jan\source\repos\Foo");

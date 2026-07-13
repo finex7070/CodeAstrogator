@@ -102,5 +102,20 @@ namespace CodeAstrogator.Options
         /// pre-edit baseline it launches the CLI so edits pass through the permission hook (auto-approved
         /// there) instead of the CLI's own auto-accept.</summary>
         public bool ReviewEditsAtTurnEnd { get; set; } = false;
+
+        /// <summary>Auto-delete chat-history sessions whose last activity is older than this many days.
+        /// Runs on VS startup and whenever the settings are saved, and is also enforced when a
+        /// workspace's history is loaded. <c>0</c> = keep forever (no time-based cleanup). Default 90.</summary>
+        public int HistoryRetentionDays { get; set; } = 90;
+
+        /// <summary>Auto-delete pasted-image files (…\CodeAstrogator\pasted) older than this many days.
+        /// Runs on VS startup and whenever the settings are saved. <c>0</c> = keep forever. Default 30.</summary>
+        public int PastedRetentionDays { get; set; } = 30;
+
+        /// <summary>Retention-days presets offered in the settings window (0 = "Never").</summary>
+        public static readonly int[] RetentionDayChoices = { 0, 7, 14, 30, 60, 90, 180, 365 };
+
+        /// <summary>Snaps an arbitrary retention value to a non-negative day count (negatives → 0).</summary>
+        public static int ClampRetentionDays(int days) => days < 0 ? 0 : days;
     }
 }

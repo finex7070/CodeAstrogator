@@ -62,6 +62,10 @@ namespace CodeAstrogator.Services
                 UsePersistentCli = GetBool(nameof(AstrogatorOptions.UsePersistentCli), d.UsePersistentCli),
                 ReviewEditsInEditor = GetBool(nameof(AstrogatorOptions.ReviewEditsInEditor), d.ReviewEditsInEditor),
                 ReviewEditsAtTurnEnd = GetBool(nameof(AstrogatorOptions.ReviewEditsAtTurnEnd), d.ReviewEditsAtTurnEnd),
+                HistoryRetentionDays = AstrogatorOptions.ClampRetentionDays(
+                    GetInt(nameof(AstrogatorOptions.HistoryRetentionDays), d.HistoryRetentionDays)),
+                PastedRetentionDays = AstrogatorOptions.ClampRetentionDays(
+                    GetInt(nameof(AstrogatorOptions.PastedRetentionDays), d.PastedRetentionDays)),
             };
         }
 
@@ -94,6 +98,10 @@ namespace CodeAstrogator.Services
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UsePersistentCli), o.UsePersistentCli);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ReviewEditsInEditor), o.ReviewEditsInEditor);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ReviewEditsAtTurnEnd), o.ReviewEditsAtTurnEnd);
+            _store.SetInt32(Collection, nameof(AstrogatorOptions.HistoryRetentionDays),
+                AstrogatorOptions.ClampRetentionDays(o.HistoryRetentionDays));
+            _store.SetInt32(Collection, nameof(AstrogatorOptions.PastedRetentionDays),
+                AstrogatorOptions.ClampRetentionDays(o.PastedRetentionDays));
         }
 
         private string GetString(string name, string fallback) =>

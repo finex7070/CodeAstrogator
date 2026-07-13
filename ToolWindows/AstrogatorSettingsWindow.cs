@@ -38,6 +38,8 @@ namespace CodeAstrogator.ToolWindows
         private readonly CheckBox _updateCheck;
         private readonly TextBox _promptTimeout;
         private readonly CheckBox _persistentCli;
+        private readonly ComboBox _historyRetention;
+        private readonly ComboBox _pastedRetention;
 
         public AstrogatorSettingsWindow(CodeAstrogatorPackage package, AstrogatorOptions current)
         {
@@ -76,6 +78,8 @@ namespace CodeAstrogator.ToolWindows
             _promptTimeout.HorizontalAlignment = HorizontalAlignment.Left;
             _promptTimeout.MinWidth = 80;
             _persistentCli = MakeCheck("Use a persistent CLI session (lower latency; experimental)", new Thickness(0, 8, 0, 0));
+            _historyRetention = MakeRetentionCombo();
+            _pastedRetention = MakeRetentionCombo();
 
             var panel = new StackPanel { Margin = new Thickness(16) };
             panel.Children.Add(Header("Claude CLI"));
@@ -92,6 +96,13 @@ namespace CodeAstrogator.ToolWindows
             panel.Children.Add(Header("Announcements & updates"));
             panel.Children.Add(_noticeFetch);
             panel.Children.Add(_updateCheck);
+            panel.Children.Add(Header("History & storage"));
+            panel.Children.Add(Labeled(
+                "Automatically delete chat history older than (by last activity; \"Never\" keeps it forever):",
+                _historyRetention));
+            panel.Children.Add(Labeled(
+                "Automatically delete pasted images older than (files under …\\CodeAstrogator\\pasted):",
+                _pastedRetention));
             panel.Children.Add(Header("Permissions"));
             panel.Children.Add(Labeled(
                 "Auto-approve patterns (* = wildcard) — matching Bash/PowerShell commands and MCP tools "
@@ -156,6 +167,8 @@ namespace CodeAstrogator.ToolWindows
             _updateCheck.IsChecked = o.UpdateCheckEnabled;
             _promptTimeout.Text = AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes).ToString();
             _persistentCli.IsChecked = o.UsePersistentCli;
+            SelectRetention(_historyRetention, o.HistoryRetentionDays);
+            SelectRetention(_pastedRetention, o.PastedRetentionDays);
         }
 
         private void ApplyAndPersist()
@@ -183,6 +196,8 @@ namespace CodeAstrogator.ToolWindows
                 UpdateCheckDecided = true,
                 PromptTimeoutMinutes = ParsePromptTimeout(_promptTimeout.Text),
                 UsePersistentCli = _persistentCli.IsChecked == true,
+                HistoryRetentionDays = SelectedRetention(_historyRetention),
+                PastedRetentionDays = SelectedRetention(_pastedRetention),
                 // Popover-managed state (Model·Mode + accent color) — carry it over untouched
                 DefaultModel = _current.DefaultModel,
                 DefaultEffortString = _current.DefaultEffortString,
@@ -331,6 +346,24 @@ namespace CodeAstrogator.ToolWindows
         }
 
         private static string Selected(ComboBox c, string fallback) => c.SelectedItem as string ?? fallback;
+
+        // ── retention combos (day presets ↔ friendly labels; 0 = "Never") ────────
+        private static string RetentionLabel(int days) => days <= 0 ? "Never" : days + " days";
+
+        private static ComboBox MakeRetentionCombo() =>
+            MakeCombo(AstrogatorOptions.RetentionDayChoices.Select(RetentionLabel).ToArray());
+
+        private static void SelectRetention(ComboBox c, int days) =>
+            SelectCombo(c, RetentionLabel(AstrogatorOptions.ClampRetentionDays(days)), "Never");
+
+        private static int SelectedRetention(ComboBox c)
+        {
+            var label = c.SelectedItem as string ?? "Never";
+            foreach (var d in AstrogatorOptions.RetentionDayChoices)
+                if (RetentionLabel(d) == label)
+                    return d;
+            return 0;
+        }
 
         /// <summary>Parses the prompt-timeout minutes field; non-numeric → 60, then clamped to range.</summary>
         private static int ParsePromptTimeout(string? text) =>
