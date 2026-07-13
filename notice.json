@@ -1,7 +1,7 @@
 {
-  "enabled": false,
-  "from": "",
-  "to": "",
-  "title": "",
-  "content": ""
+  "enabled": true,
+  "from": "2026-07-13T00:00:00Z",
+  "to": "2026-07-20T23:59:59Z",
+  "title": "CodeAstrogator is now on the Marketplace! 🎉",
+  "content": "CodeAstrogator is now available on the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=CodeAstrogator.code-astrogator). If you enjoy it, please leave a ⭐ rating & review — it really helps!"
 }
