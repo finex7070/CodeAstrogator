@@ -73,6 +73,12 @@
       <div class="tasks-list" id="tasks-list"></div>
     </div>
 
+    <!-- Notification stack (below the header banners, above the transcript). Transient,
+         dismissible banners for incidental action failures (e.g. "couldn't open this file") and
+         other host notices — driven by app.js (showNotify) from host `notify` messages. Supports
+         several at once and optional auto-close. NOT part of the conversation transcript. -->
+    <div class="notify-stack" id="notify-stack" role="log" aria-live="polite" aria-relevant="additions" hidden></div>
+
     <!-- Transcript -->
     <div class="transcript-wrap">
       <main class="transcript" id="transcript" tabindex="-1">

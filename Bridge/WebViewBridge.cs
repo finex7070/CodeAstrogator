@@ -822,7 +822,7 @@ namespace CodeAstrogator.Bridge
                 || !_pendingPermissions.TryGetValue(requestId, out var p) || p.Review == null)
                 return;
             try { _editReview.Open(requestId, p.Review); }
-            catch (Exception ex) { PostError("Could not open the edit for review: " + ex.Message); }
+            catch (Exception ex) { PostNotify("Could not open the edit for review: " + ex.Message); }
         }
 
         /// <summary>Called by the EditReviewController once every hunk of a request is decided.
@@ -1086,7 +1086,7 @@ namespace CodeAstrogator.Bridge
             if (review == null)
                 return; // stale (already decided / cleared)
             try { _editReview.OpenForPath(path!, review.Session, () => FinalizeTurnFileReview(path!), () => PostTurnFileState(path!)); }
-            catch (Exception ex) { PostError("Could not open the changed file for review: " + ex.Message); }
+            catch (Exception ex) { PostNotify("Could not open the changed file for review: " + ex.Message); }
         }
 
         /// <summary>web→host editReview.finishTurnFile: the user pressed Finish (editor toolbar or the chat
@@ -1737,7 +1737,7 @@ namespace CodeAstrogator.Bridge
 
                 if (discoveryError != null)
                 {
-                    PostError("Importing the remote session failed: " + discoveryError);
+                    PostNotify("Importing the remote session failed: " + discoveryError);
                     return;
                 }
 
@@ -2059,7 +2059,7 @@ namespace CodeAstrogator.Bridge
             }
             catch (Exception ex)
             {
-                PostError("Paste from clipboard failed: " + ex.Message);
+                PostNotify("Paste from clipboard failed: " + ex.Message, autoCloseMs: 10000);
                 return;
             }
 
@@ -2149,7 +2149,7 @@ namespace CodeAstrogator.Bridge
             }
             catch (Exception ex)
             {
-                PostError("Insert into editor failed: " + ex.Message);
+                PostNotify("Insert into editor failed: " + ex.Message, autoCloseMs: 10000);
             }
         }
 
@@ -2160,20 +2160,55 @@ namespace CodeAstrogator.Bridge
             ThreadHelper.ThrowIfNotOnUIThread();
             if (string.IsNullOrWhiteSpace(path))
                 return;
+            // Directory targets (e.g. a Grep/Glob card whose `path` is a folder) can't be
+            // opened as a document — reveal them in Windows Explorer instead.
+            if (System.IO.Directory.Exists(path))
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    PostNotify("Could not open the folder in Explorer: " + ex.Message, autoCloseMs: 10000);
+                }
+                return;
+            }
             if (!System.IO.File.Exists(path))
             {
-                PostError("File not found: " + path);
+                PostNotify("File not found: " + path, autoCloseMs: 10000);
                 return;
             }
             try
             {
-                VsShellUtilities.OpenDocument(_package, path, VSConstants.LOGVIEWID_TextView,
+                // LOGVIEWID_Primary lets VS pick the appropriate editor for the file type
+                // (text editor for code, image viewer for images, notebook editor for .ipynb, …)
+                // instead of forcing the text view onto binary files like a PNG or PDF.
+                VsShellUtilities.OpenDocument(_package, path, VSConstants.LOGVIEWID_Primary,
                     out _, out _, out IVsWindowFrame frame);
                 frame?.Show();
             }
             catch (Exception ex)
             {
-                PostError("Could not open the file in Visual Studio: " + ex.Message);
+                // Files VS has no editor for (e.g. .exe/.dll or an unregistered binary type) can't be
+                // opened as a document — fall back to selecting the file in Windows Explorer.
+                if (!RevealInExplorer(path))
+                    PostNotify("Could not open the file in Visual Studio: " + ex.Message, autoCloseMs: 10000);
+            }
+        }
+
+        /// <summary>Selects <paramref name="path"/> in a Windows Explorer window. Returns false on failure.</summary>
+        private static bool RevealInExplorer(string path)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    "explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = true });
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -2805,6 +2840,22 @@ namespace CodeAstrogator.Bridge
                 ["ts"] = DateTime.UtcNow.ToString("o"),
             });
             Post(new JObject { ["type"] = "error", ["message"] = message });
+        }
+
+        /// <summary>Transient, dismissible banner at the top of the chat for incidental action
+        /// failures (e.g. "couldn't open this file"). Unlike <see cref="PostError"/> it is NOT
+        /// recorded into the conversation history and does NOT change the turn status — use it for
+        /// UI-action problems that shouldn't clutter the transcript. <paramref name="level"/> is
+        /// "error" | "warning" | "info"; <paramref name="autoCloseMs"/> 0 = sticky (user dismisses).</summary>
+        private void PostNotify(string message, string level = "error", int autoCloseMs = 0)
+        {
+            Post(new JObject
+            {
+                ["type"] = "notify",
+                ["level"] = level,
+                ["message"] = message,
+                ["autoClose"] = autoCloseMs,
+            });
         }
 
         /// <summary>Host-generated informational message rendered as an assistant block.</summary>

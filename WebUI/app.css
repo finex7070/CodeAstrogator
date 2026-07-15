@@ -248,6 +248,54 @@ button { font-family: inherit; }
 .task-item.in_progress .task-mark { color: var(--accent); }
 .task-item.in_progress .task-text { color: var(--text); font-weight: 600; }
 
+/* Notification stack — transient, dismissible banners (below the header banners, above the chat).
+   Several stack vertically; each is color-coded by level. Not part of the transcript. */
+.notify-stack {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+.notify-stack[hidden] { display: none; }
+.notify-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px 9px 12px;
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid var(--error);
+  background: var(--diff-del);
+  color: var(--text);
+  animation: notify-in 0.14s ease-out;
+}
+@keyframes notify-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.notify-item .notify-icon { flex: 0 0 auto; margin-top: 1px; color: var(--error); }
+.notify-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.notify-item.notify-warning { border-left-color: var(--warn); background: rgba(217,162,63,0.12); }
+.notify-item.notify-warning .notify-icon { color: var(--warn); }
+.notify-item.notify-info { border-left-color: var(--accent); background: var(--accent-faint); }
+.notify-item.notify-info .notify-icon { color: var(--accent); }
+.notify-close {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.notify-close:hover { background: var(--bg-elevated); color: var(--text); }
+.notify-close:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
 .title-wrap {
   flex: 1 1 auto;
   min-width: 0;
@@ -1022,12 +1070,14 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   justify-content: center;
   width: 18px; height: 18px;
   border: none;
-  background: transparent;
-  color: var(--text-dim);
+  background: var(--bg);
+  color: var(--text);
   border-radius: 999px;
   cursor: pointer;
+  opacity: 0.85;
 }
-.chip-x:hover { background: var(--accent-faint); color: var(--text); }
+.chip-x:hover { background: #F85149; color: #fff; opacity: 1; }
+.chip-x:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .input {
   display: block;
   width: 100%;
