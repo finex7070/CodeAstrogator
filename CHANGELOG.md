@@ -4,6 +4,22 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.3] – 2026-07-15
+
+### Fixed
+- **The open button on Grep/Glob tool cards now opens the folder in Explorer.** When a card's path pointed to a directory (as it commonly does for Grep and Glob), clicking the open-in-editor button produced a spurious "File not found" error because a folder can't be opened as a document. The host now detects a directory target and reveals it in Windows Explorer instead; file cards are unchanged and still open in the Visual Studio editor.
+- **The open button now handles non-text files.** Opening a card that referred to an image, PDF, or other non-text file (e.g. a Read of a screenshot) previously forced Visual Studio's text editor onto it, showing binary garbage. The file now opens with Visual Studio's appropriate editor for its type (image viewer, notebook editor, …); files Visual Studio can't open at all (like an `.exe`/`.dll`) fall back to being selected in Windows Explorer.
+
+### Added
+- **Attached files in the prompt composer now have an open button.** Each file chip above the input (added by drag-drop, the picker, or a paste) now shows the same open-in-editor button as tool cards — click it to open that file (or reveal a folder in Explorer). Hovering a chip also shows its full path. The chip's remove (×) button was made more visible, and turns red on hover so it's clear it removes the attachment.
+- **Attached files under a sent message now have an open button too.** The file chips shown beneath a user message (including reopened chats) gained the same open-in-editor button, right of the filename, whenever the file still exists on disk. Clicking it opens the file without toggling the chip's inline preview.
+- **Incidental errors now appear as dismissible banners instead of in the chat.** Problems from UI actions — a file that couldn't be opened, a failed clipboard paste, a review that couldn't open, a remote import that failed — used to be inserted into the conversation as an error block that stayed there forever. They now surface as a color-coded, closable banner at the top of the chat (above the transcript), stacking when several occur and supporting optional auto-close, without cluttering the conversation or changing the turn status. Open-in-editor, clipboard-paste, and insert-into-editor failures auto-dismiss after 10 seconds; genuine turn/streaming failures still appear inline in the transcript as before.
+
+### Changed
+- **The open button now appears only on genuine file/folder cards.** The rule for showing the open-in-editor button was tightened: it still appears for all file tools (Read, Write, Edit, MultiEdit, Notebook edits) and folder/search tools (Grep, Glob), but no longer for command tools (Bash/PowerShell) or for other tools (e.g. MCP tools) that happen to carry a `path` argument pointing at something that isn't a local file or folder. Previously any tool with a bare `path` field could show a button that then failed on click.
+
+---
+
 ## [0.6.2] – 2026-07-13
 
 ### Added
