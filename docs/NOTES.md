@@ -1165,10 +1165,56 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
 ## "Open in Visual Studio" button on file cards (2026-07-09)
 - File-based tool cards (Read/Edit/Write/MultiEdit/Notebook*) and permission cards now render a small
   open-in-editor icon button in the card head, right after the path. Shown only when a path is present
-  (`cardFilePath(input, diff)` in `app.js` — `diff.path` ?? `file_path`/`notebook_path`/`path`).
-- **Contract:** web→host `editor.openFile {path}` → `WebViewBridge.HandleOpenFile` opens the file in the VS
-  text editor via `VsShellUtilities.OpenDocument` (plain open, **not** the diff review). Missing file → error
+  (`cardFilePath(name, input, diff)` in `app.js`).
+- **Which cards get the button (tightened 2026-07-15):** `cardFilePath` is tool-aware. `diff.path`
+  (permission/diff cards) and the unambiguous `file_path`/`notebook_path` fields are honored for any
+  tool; the bare `path` field is only treated as a local target for the actual file/folder tools
+  (`Grep`, `Glob`, `LS`, `Read`, `NotebookRead`). Everything else — command tools (`Bash`/`PowerShell`,
+  which carry `command` not `path`) and MCP/web tools that may use `path` for non-local things — returns
+  "" and gets no button. Prevents a false-positive open button on e.g. MCP tools with a `path` arg.
+  (Grep/Glob without an explicit `path` search the cwd and show no button — no cwd is in the input.)
+- **Contract:** web→host `editor.openFile {path}` → `WebViewBridge.HandleOpenFile` opens the file in VS
+  via `VsShellUtilities.OpenDocument` (plain open, **not** the diff review). Missing file → error
   system note. The button's click `stopPropagation()`s so it doesn't toggle the card's collapse state.
+- **Non-text / binary files (2026-07-15):** `Read` can target images/PDF/`.ipynb`, and Edit/Write paths
+  are arbitrary, so `OpenDocument` uses **`LOGVIEWID_Primary`** (VS picks the right editor per file type —
+  image viewer, notebook editor, …) rather than forcing `LOGVIEWID_TextView` (which rendered a PNG as
+  binary garbage). Files VS has no editor for (`.exe`/`.dll`/unregistered binaries) throw on open → we
+  fall back to **selecting the file in Explorer** (`explorer /select,"path"`, `RevealInExplorer`) and only
+  surface an error if that also fails.
+- **Composer attachment chips (2026-07-15):** the file chips above the input (`renderAttachments`) reuse
+  the same `openFileButton(a.path)` — an open button appears per chip when it has a path, and the chip's
+  `title` is the full path. The chip's remove `.chip-x` was made more visible (solid neutral bg, red hover).
+- **Sent-message attachment chips (2026-07-15):** `appendMsgAttachments` (chips under a user message, live
+  + historic) also get an `openFileButton(path)` right of the name, but only when the file is present
+  (`path && exists`) — a missing file would just yield a "File not found" banner. The button's click
+  `stopPropagation()`s so it never toggles the inline preview. On preview downgrade (file gone/unreadable,
+  `onAttachmentPreview` `m.ok === false`) the chip is cloned to a plain name-only chip and the now-dead
+  open button is removed from the clone (`cloneNode` wouldn't carry its listener anyway).
+- **Directory targets (2026-07-15):** a Grep/Glob card's `path` can be a folder, so `cardFilePath` may hand
+  `HandleOpenFile` a directory. `File.Exists` is false for a dir, which previously produced a spurious
+  "File not found" error. `HandleOpenFile` now checks `Directory.Exists` first and reveals the folder in
+  Windows Explorer (`Process.Start` with `UseShellExecute`) instead of trying to open it as a document.
+
+## Notification stack — incidental errors as banners (2026-07-15)
+- **Two distinct error surfaces now.** Genuine turn/streaming failures (host `PostError`, paired with
+  `PostStatus("error")` at the turn boundaries) still render inline in the transcript (`errorMessage`,
+  `type:"error"`) and are recorded to history — they belong to the conversation. **Incidental UI-action
+  failures** (open-file/-folder, clipboard paste, insert-into-editor, open-for-review, remote import) now
+  go through **`PostNotify(message, level, autoCloseMs)`** → host→web **`type:"notify"`
+  `{level, message, autoClose}`** and render as dismissible banners, **not** recorded to history and **not**
+  touching the turn status.
+- **UI:** `#notify-stack` (in `index.html`, below the header banners, above `.transcript-wrap`) holds a
+  vertical stack of `.notify-item`s (`showNotify`/`dismissNotify` in `app.js`). Level `error|warning|info`
+  colors the left border/icon; each has a close button; `autoClose` (ms, 0 = sticky) removes it on a timer.
+  Identical `message`+`level` are de-duplicated (existing banner's timer is re-armed) so repeatedly clicking
+  a broken open button doesn't stack copies. Open/paste/insert failures (open-file/-folder/-for-review's
+  siblings — currently the three `HandleOpenFile` errors plus clipboard-paste and insert-into-editor) pass
+  `autoCloseMs: 10000` (10 s); the remaining action errors (open-for-review ×2, remote import) are sticky.
+  Mock (`index.html` in a browser): `editor.openFile` replies with a `notify` (`autoClose: 10000`) so the
+  stack + auto-close are testable in isolation.
+- **When adding a new error:** if it's the result of a user UI action (not a turn), prefer `PostNotify`;
+  reserve `PostError` for turn/stream failures that should live in the transcript.
 
 ## AskUserQuestion (interactive follow-up questions) — solved 2026-06-05 (real in-turn card via the permission hook)
 - **Key finding (CLI 2.1.165, throwaway probes):** `AskUserQuestion` **routes through the
