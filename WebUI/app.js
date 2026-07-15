@@ -97,6 +97,7 @@
   const input = $("input");
   const attachmentsEl = $("attachments");
   const turnReviewEl = $("turn-review");
+  const notifyStackEl = $("notify-stack");
   const agentsRunningEl = $("agents-running");
   const sendBtn = $("btn-send");
   const activeFileChip = $("active-file");
@@ -546,6 +547,7 @@
       case "composer.append": return appendToComposer(m.text);
       case "banner.settings": return applyBannerSettings(m);
       case "error": return errorMessage(m.message);
+      case "notify": return showNotify(m);
     }
   }
 
@@ -1120,6 +1122,13 @@
       // el() defaults the att-name title to the name text — show the full path on hover instead.
       if (path) { nameEl.title = String(path); chip.title = String(path); }
       chip.appendChild(nameEl);
+      // Open button right of the name — only when the file is present on disk (a missing file would
+      // just produce a "File not found" banner). Its click stopPropagation()s so it never toggles
+      // the preview. Non-previewable-but-present files (e.g. a .dll) still get an open button.
+      if (path && exists) {
+        const openBtn = openFileButton(String(path));
+        if (openBtn) chip.appendChild(openBtn);
+      }
       item.appendChild(chip);
 
       if (canPreview) {
@@ -1163,11 +1172,15 @@
       item.attSetOpen = null;
       const chip = item.querySelector(".att-chip");
       if (chip) {
-        // clone to drop the click listener, then strip the chevron + toggle affordance
+        // clone to drop the click listener, then strip the chevron + toggle affordance.
+        // Also drop the open button: the file is gone/unreadable (m.ok === false), and cloneNode
+        // wouldn't carry its click listener anyway.
         const clone = chip.cloneNode(true);
         clone.classList.remove("att-toggle");
         const chev = clone.querySelector(".att-chev");
         if (chev) chev.remove();
+        const deadOpen = clone.querySelector(".open-file-btn");
+        if (deadOpen) deadOpen.remove();
         chip.parentNode.replaceChild(clone, chip);
       }
       previewEl.remove();
@@ -1353,7 +1366,7 @@
       : toolHeadLabel(m.name, m.input); // file/lines for Read, command for Bash, …
     head.appendChild(el("span", "tool-summary", headLabel || (mcp ? "" : "running…")));
     if (headLabel || mcp) card.dataset.headLabel = "1"; // keep it; don't let tool.result overwrite
-    const openBtn = openFileButton(cardFilePath(m.input, m.diff));
+    const openBtn = openFileButton(cardFilePath(m.name, m.input, m.diff));
     if (openBtn) head.appendChild(openBtn);
     const status = el("span", "tool-status");
     status.appendChild(el("span", "spinner"));
@@ -1514,12 +1527,27 @@
     }
   }
 
-  // The concrete file a card refers to (Read/Edit/Write/MultiEdit/Notebook* input, or a diff
-  // card's path), or "" when the tool isn't file-based. Used to offer an "open in VS" button.
-  function cardFilePath(input, diff) {
+  // The concrete file/folder a card refers to (or a diff card's path), or "" when the tool
+  // isn't file-based. Used to offer an "open in VS / reveal in Explorer" button.
+  // `file_path`/`notebook_path` are unambiguous file fields, honored for any tool. A bare
+  // `path` is only treated as a local filesystem target for the actual file/folder tools:
+  // command tools (Bash/PowerShell) carry `command` not `path`, and other tools (MCP, web…)
+  // may use `path` for non-local things, so we don't offer a button for those.
+  function cardFilePath(name, input, diff) {
     if (diff && diff.path) return diff.path;
     if (!input) return "";
-    return input.file_path || input.notebook_path || input.path || "";
+    if (input.file_path) return input.file_path;
+    if (input.notebook_path) return input.notebook_path;
+    switch (name) {
+      case "Grep":
+      case "Glob":
+      case "LS":
+      case "Read":
+      case "NotebookRead":
+        return input.path || "";
+      default:
+        return "";
+    }
   }
 
   // Small icon button that opens `path` in the Visual Studio editor (host handles editor.openFile).
@@ -1563,7 +1591,7 @@
     head.appendChild(toolIcon(m.toolName)); // same icon set as tool cards (pencil for Edit/Write)
     head.appendChild(el("span", "perm-tool", m.toolName || "Permission"));
     head.appendChild(el("span", "perm-path", cardHeadDetail(m)));
-    const permOpenBtn = openFileButton(cardFilePath(m.input, m.diff));
+    const permOpenBtn = openFileButton(cardFilePath(m.toolName, m.input, m.diff));
     if (permOpenBtn) head.appendChild(permOpenBtn);
     head.appendChild(el("span", "perm-status")); // filled in once decided/expired
     card.appendChild(head);
@@ -2125,6 +2153,57 @@
   }
 
   // -------------------------------------------------------------------------
+  // Notification stack — transient, dismissible banners at the top of the chat for incidental
+  // action failures (e.g. "couldn't open this file") and other host notices. Distinct from the
+  // transcript error block: these are NOT part of the conversation and never touch the turn status.
+  // Several can show at once; each is individually closable, and `autoClose` (ms) removes it on a
+  // timer. Identical messages are de-duplicated (the existing banner's auto-close timer is reset)
+  // so repeatedly clicking a broken open button doesn't stack copies.
+  // -------------------------------------------------------------------------
+  const NOTIFY_ICONS = {
+    error: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>',
+    warning: '<path d="M10.3 3.7 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>',
+  };
+  function showNotify(m) {
+    if (!notifyStackEl) return;
+    const level = NOTIFY_ICONS[m.level] ? m.level : "error";
+    const message = m.message || "Something went wrong.";
+    // De-dupe: if the same message is already showing, just restart its auto-close timer.
+    const existing = Array.prototype.find.call(
+      notifyStackEl.children, (n) => n.dataset.msg === message && n.dataset.level === level);
+    if (existing) { armNotifyAutoClose(existing, m.autoClose); return; }
+
+    const item = el("div", "notify-item notify-" + level);
+    item.setAttribute("role", level === "error" ? "alert" : "status");
+    item.dataset.msg = message;
+    item.dataset.level = level;
+    item.appendChild(svg(NOTIFY_ICONS[level], { width: 15, height: 15, class: "notify-icon" }));
+    item.appendChild(el("div", "notify-text", message));
+    const close = el("button", "notify-close");
+    close.type = "button";
+    close.title = "Dismiss";
+    close.setAttribute("aria-label", "Dismiss");
+    close.appendChild(svg('<path d="M6 6l12 12M18 6L6 18"/>', { width: 14, height: 14, "stroke-width": 2 }));
+    close.addEventListener("click", () => dismissNotify(item));
+    item.appendChild(close);
+    notifyStackEl.appendChild(item);
+    notifyStackEl.hidden = false;
+    armNotifyAutoClose(item, m.autoClose);
+  }
+  function armNotifyAutoClose(item, autoClose) {
+    if (item._notifyTimer) { clearTimeout(item._notifyTimer); item._notifyTimer = null; }
+    const ms = Number(autoClose) || 0;
+    if (ms > 0) item._notifyTimer = setTimeout(() => dismissNotify(item), ms);
+  }
+  function dismissNotify(item) {
+    if (!item) return;
+    if (item._notifyTimer) { clearTimeout(item._notifyTimer); item._notifyTimer = null; }
+    item.remove();
+    if (notifyStackEl && !notifyStackEl.children.length) notifyStackEl.hidden = true;
+  }
+
+  // -------------------------------------------------------------------------
   // Historic messages (transcript.load)
   // -------------------------------------------------------------------------
   function renderHistoricMessage(msg) {
@@ -2160,7 +2239,7 @@
         head.appendChild(el("span", "tool-summary",
           toolHeadLabel(msg.toolName, msg.input)
             || (isMcpTool(msg.toolName) ? "" : (msg.status === "error" ? "error" : "ok"))));
-        const tOpenBtn = openFileButton(cardFilePath(msg.input, msg.diff));
+        const tOpenBtn = openFileButton(cardFilePath(msg.toolName, msg.input, msg.diff));
         if (tOpenBtn) head.appendChild(tOpenBtn);
         const status = el("span", "tool-status");
         status.appendChild(msg.status === "error" ? iconCross() : iconCheck());
@@ -2182,7 +2261,7 @@
         head.appendChild(toolIcon(msg.toolName)); // same icon set as tool cards (pencil for Edit/Write)
         head.appendChild(el("span", "perm-tool", msg.toolName || "Permission"));
         head.appendChild(el("span", "perm-path", cardHeadDetail(msg)));
-        const pOpenBtn = openFileButton(cardFilePath(msg.input, msg.diff));
+        const pOpenBtn = openFileButton(cardFilePath(msg.toolName, msg.input, msg.diff));
         if (pOpenBtn) head.appendChild(pOpenBtn);
         head.appendChild(el("span", "perm-status", permLabel(status)));
         card.appendChild(head);
@@ -2722,8 +2801,14 @@
     attachmentsEl.hidden = false;
     state.attachments.forEach((a) => {
       const chip = el("div", "chip");
+      if (a.path) chip.title = a.path;
       chip.appendChild(el("span", "chip-name", a.name));
+      const openBtn = openFileButton(a.path);
+      if (openBtn) chip.appendChild(openBtn);
       const x = el("button", "chip-x");
+      x.type = "button";
+      x.title = "Remove";
+      x.setAttribute("aria-label", "Remove attachment");
       x.appendChild(svg('<path d="M6 6l12 12M18 6L6 18"/>', { width: 12, height: 12, "stroke-width": 2 }));
       x.addEventListener("click", () => removeAttachment(a.id));
       chip.appendChild(x);
@@ -3858,6 +3943,10 @@
         ] }, 150);
         case "slash.run": return onSlash(msg.command);
         case "editor.insert": return;
+        // Mock: exercise the notification stack (real host opens the file / reveals the folder).
+        case "editor.openFile":
+          return sendIn("notify", { level: "error", autoClose: 10000,
+            message: "File not found: " + (msg.path || "(unknown)") }, 60);
         case "remote.start": return onRemoteStart();
         case "remote.stop": return onRemoteStop();
         case "activeFile.setEnabled":
