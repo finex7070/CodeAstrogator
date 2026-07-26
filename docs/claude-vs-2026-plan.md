@@ -233,7 +233,7 @@ Order exactly: **left** `+`, then `/` — **right** `Model·Mode`, then **Send**
   - (Extensible: `@`-file references, insert image.)
 - **`/` (slash):** menu with slash commands (list from the host or static defaults: `/clear`, `/compact`, `/model`, `/init`, `/help`, …). Selection → `slash.run`. Bonus: if the user types `/` as the first character in the textarea, the same menu should appear as autocomplete.
 - **`Model·Mode` button (one button, opens a popover):** the label shows the current state compactly, e.g. `Opus 4.8 · Ask`. Popover sections:
-  1. **Model** — radio list (models supplied by the host, e.g. Opus 4.8 / Opus 4.7 / Sonnet 4.6 / Haiku 4.5) → `model.set`.
+  1. **Model** — radio list (models supplied by the host, e.g. Fable 5 / Opus 5 / Opus 4.8 / Sonnet 5 / Haiku 4.5) → `model.set`.
   2. **Effort / Thinking** — three levels low/medium/high → `effort.set`.
   3. **Plan Mode** — toggle → `mode.set {planMode}`.
   4. **Permission** — radio: *Ask before edits* / *Auto-accept edits* / *Plan* / *Bypass* → `permission.set`. (Default **Ask**, since the inline-diff flow is built exactly on that.)
