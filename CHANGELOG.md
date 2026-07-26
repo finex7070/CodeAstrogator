@@ -4,6 +4,13 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.4] – 2026-07-26
+
+### Changed
+- **The Model · Mode picker now offers the Claude 5 family.** `Opus 5` (`claude-opus-5`) and `Sonnet 5` (`claude-sonnet-5`) were added, and the superseded `Opus 4.7` and `Sonnet 4.6` were removed. `Fable 5`, `Opus 4.8` and `Haiku 4.5` stay. The list is ordered strongest → lightest: Fable 5 · Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5.
+
+---
+
 ## [0.6.3] – 2026-07-15
 
 ### Fixed
