@@ -1044,6 +1044,40 @@
     return { row, body: content };
   }
 
+  /// Adds the "Copy as Markdown" button to an assistant bubble. Copies the message's RAW markdown
+  /// source (kept for this purpose — the rendered DOM can't be turned back into a table/code fence),
+  /// so the result pastes straight back into a prompt. Appended as a THIRD flex child of .msg-body,
+  /// not absolutely positioned: the bubble tint is a translucent rgba, so an overlay button would
+  /// have prose bleeding through it, and as a flex child it can never cover the first line.
+  /// `contentEl` is the .msg-content returned by makeMsgRow; the button goes on its parent so a
+  /// re-render of the content (assistantEnd clears innerHTML) doesn't remove it.
+  function addCopyMarkdownButton(contentEl, markdown) {
+    const bubble = contentEl && contentEl.parentNode;
+    if (!bubble || !markdown) return;
+    const btn = el("button", "msg-copy-btn");
+    btn.type = "button";
+    btn.title = "Copy as Markdown";
+    btn.setAttribute("aria-label", "Copy message as Markdown");
+    btn.appendChild(iconCopy());
+    let revert = 0;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyText(markdown);
+      btn.innerHTML = "";
+      btn.appendChild(iconCheck());
+      btn.classList.add("copied");
+      btn.title = "Copied";
+      clearTimeout(revert);
+      revert = setTimeout(() => {
+        btn.innerHTML = "";
+        btn.appendChild(iconCopy());
+        btn.classList.remove("copied");
+        btn.title = "Copy as Markdown";
+      }, 1200);
+    });
+    bubble.appendChild(btn);
+  }
+
   function appendNode(node) {
     clearEmptyState();
     const atBottom = isNearBottom();
@@ -1055,7 +1089,7 @@
       transcriptInner.appendChild(node);
     }
     if (atBottom) scrollToBottom();
-    else showJumpPill(true);
+    else updateJumpPill();
     return node;
   }
 
@@ -1228,10 +1262,12 @@
     if (!a || a.id !== id) return;
     const atBottom = isNearBottom();        // capture BEFORE the markdown re-render changes height
     if (a.caret && a.caret.parentNode) a.caret.remove();
-    // final markdown render
+    // final markdown render — keep the raw source for the copy button before activeAssistant is dropped
+    const md = a.accText;
     a.el.innerHTML = "";
     a.el.classList.add("md");
-    a.el.appendChild(renderMarkdown(a.accText));
+    a.el.appendChild(renderMarkdown(md));
+    addCopyMarkdownButton(a.el, md);
     state.activeAssistant = null;
     if (atBottom) scrollToBottom();
   }
@@ -1850,7 +1886,11 @@
     if (answered) summaryEl.textContent = summarizeQuestionAnswers(prefilled);
     head.appendChild(summaryEl);
     head.addEventListener("click", () => {
-      if (card.classList.contains("answered")) card.classList.toggle("expanded");
+      if (!card.classList.contains("answered")) return;
+      card.classList.toggle("expanded");
+      // The body was display:none while collapsed, so any auto-grown textarea measured 0 and is still
+      // one row high. Re-measure now that it has a layout, or a multi-line answer shows up clipped.
+      if (card.classList.contains("expanded")) states.forEach((s) => s.grow && s.grow());
     });
     card.appendChild(head);
 
@@ -1885,24 +1925,44 @@
             st.selected.clear();
             optsEl.querySelectorAll(".q-option.sel").forEach((e) => e.classList.remove("sel"));
             st.selected.add(label); btn.classList.add("sel");
-            // single question, single-select, no free text typed → decide immediately
-            if (questions.length === 1 && !(st.customEl && st.customEl.value.trim())) submit();
+            // NO auto-submit here. A single-question, single-select card used to answer the moment an
+            // option was clicked, which stole the chance to still type something into the "Other…" field
+            // (the guard only checked whether text was ALREADY there). Answering is always an explicit
+            // Submit click (or Enter in the free-text field).
           }
         });
         optsEl.appendChild(btn);
       });
       block.appendChild(optsEl);
 
-      // free-text "Other" (the TUI option) — a custom answer alongside the buttons
-      const other = document.createElement("input");
-      other.type = "text";
+      // free-text "Other" (the TUI option) — a custom answer alongside the buttons. A TEXTAREA, not a
+      // single-line input: these answers are sometimes several lines long. Key handling mirrors the
+      // composer exactly (`!e.shiftKey`, app.js "input" keydown): **Enter submits, Shift+Enter inserts a
+      // newline** — one convention for both multi-line inputs in the UI. Not checking ctrlKey means
+      // Ctrl+Enter keeps submitting too. Starts one row high and grows with its content (CSS caps it).
+      const other = document.createElement("textarea");
       other.className = "q-other-input";
+      other.rows = 1;
       other.placeholder = "Other… (type a custom answer)";
       other.value = preCustom;
+      const growOther = () => {
+        other.style.height = "auto";
+        other.style.height = other.scrollHeight + "px";
+      };
+      st.grow = growOther; // so re-expanding a collapsed answered card can re-measure (see head click)
       if (answered) other.disabled = true;
-      else other.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+      else {
+        other.addEventListener("input", growOther);
+        other.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+        });
+      }
       st.customEl = other;
       block.appendChild(other);
+      if (!answered)
+        block.appendChild(el("div", "q-hint q-other-hint", "Enter to submit · Shift+Enter for a new line"));
+      // Size to the prefilled (history) or empty content once it is in the DOM — scrollHeight needs layout.
+      requestAnimationFrame(growOther);
 
       states.push(st);
       body.appendChild(block);
@@ -2220,6 +2280,7 @@
         const { row, body } = makeMsgRow("assistant", "✳");
         body.classList.add("md");
         body.appendChild(renderMarkdown(msg.text || ""));
+        addCopyMarkdownButton(body, msg.text || "");
         transcriptInner.appendChild(row);
         break;
       }
@@ -2478,10 +2539,19 @@
     return block;
   }
 
+  // Single clipboard entry point. NOTE: there used to be a second `copyText` further down which,
+  // because function declarations hoist and the last wins, silently shadowed this one for EVERY call
+  // site — and its fallback was a bare execCommand("copy") with nothing selected, i.e. a no-op. Keep
+  // exactly one declaration so the textarea fallback below stays reachable.
   function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-    } else {
+    if (!text) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+      } else {
+        fallbackCopy(text);
+      }
+    } catch (_) {
       fallbackCopy(text);
     }
   }
@@ -2586,6 +2656,8 @@
   function iconCheck() { return svg('<path d="M5 13l4 4L19 7"/>', { class: "status-ok", width: 14, height: 14, "stroke-width": 2.2 }); }
   function iconCross() { return svg('<path d="M6 6l12 12M18 6L6 18"/>', { class: "status-err", width: 14, height: 14, "stroke-width": 2.2 }); }
   function iconTrash() { return svg('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/>', { width: 14, height: 14, "stroke-width": 1.8 }); }
+  // two offset sheets — the conventional "copy" glyph
+  function iconCopy() { return svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M14 5.5A1.5 1.5 0 0012.5 4H6a2 2 0 00-2 2v6.5A1.5 1.5 0 005.5 14"/>', { width: 13, height: 13 }); }
   function toolIcon(name) {
     // MCP tools (mcp__server__Tool) get one consistent "plug" icon — the substring heuristic
     // below would otherwise misclassify them by their long names (e.g. "...ManageEditor" → edit).
@@ -2631,10 +2703,24 @@
   }
   function showJumpPill(show) { jumpPill.hidden = !show; }
 
-  transcript.addEventListener("scroll", () => {
-    if (isNearBottom()) showJumpPill(false);
-  });
+  /// The pill's visibility is a pure function of scroll position: it is there whenever the view is not
+  /// at the bottom, whether or not anything new arrived. (It used to be shown ONLY by appendNode, so
+  /// scrolling up by hand never revealed it and it vanished for good once the turn went quiet.)
+  function updateJumpPill() { showJumpPill(!isNearBottom()); }
+
+  transcript.addEventListener("scroll", updateJumpPill);
   jumpPill.addEventListener("click", () => scrollToBottom(true));
+
+  // Scroll events alone are not enough: the transcript can grow or shrink with no scroll at all —
+  // streaming text, the markdown re-render at assistantEnd, a tool card expanding/collapsing, the
+  // working rocket coming and going — and resizing the tool window changes the viewport height.
+  // Both can move the view off (or back to) the bottom silently. `.jump-pill` is position:absolute,
+  // so toggling it cannot resize the observed elements → no observer feedback loop.
+  if (window.ResizeObserver) {
+    const jumpPillRo = new ResizeObserver(updateJumpPill);
+    jumpPillRo.observe(transcriptInner); // content height
+    jumpPillRo.observe(transcript);      // viewport height
+  }
 
   // -------------------------------------------------------------------------
   // Composer: send / stop / keyboard
@@ -3018,19 +3104,7 @@
     openOverlay = { el: pop, anchor: null, reposition: function () {} };
   }
 
-  function copyText(text) {
-    if (!text) return;
-    const fallback = () => { try { document.execCommand("copy"); } catch (_) {} };
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(fallback);
-      } else {
-        fallback();
-      }
-    } catch (_) {
-      fallback();
-    }
-  }
+  // (copyText lives next to buildCodeBlock — a second declaration here used to shadow it.)
 
   // -------------------------------------------------------------------------
   // Rename modal (session.rename, §5.1)
