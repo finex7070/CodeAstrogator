@@ -4,6 +4,21 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.5] – 2026-07-27
+
+### Added
+- **Claude's messages now have a "Copy as Markdown" button.** It sits in the top-right corner of the message, faint until you hover the message and fully visible then. It copies the message's original Markdown source — tables stay pipe tables, code stays fenced, `**bold**` stays `**bold**` — so the result can be pasted straight back into a prompt instead of arriving as flattened plain text. A green check confirms the copy. User messages are unchanged.
+- **The free-text field on Claude's questions now takes several lines.** It became a proper text box that starts one line high and grows as you type (scrolling once it gets tall), so a long custom answer no longer has to be squeezed into a single line. It behaves like the prompt composer: **Enter** sends the answer, **Shift+Enter** starts a new line. Multi-line answers are also shown in full when you reopen an earlier question in the history.
+
+### Fixed
+- **Claude's questions no longer answer themselves when you pick an option.** A question card with a single single-select question submitted the moment you clicked an option, so there was no way to choose an option *and* add a remark in the "Other…" field — the card was already answered by the time you got to the text box. Picking an option now only marks it; the answer is sent when you click Submit (or press Enter in the free-text field), which is how cards with several questions or multi-select already behaved.
+- **The jump-to-bottom button now appears whenever the transcript isn't scrolled to the bottom.** Previously it only showed up when a new entry arrived while you were scrolled up, and it stayed hidden if you simply scrolled up on your own — so once the turn went quiet there was no way back to the bottom but scrolling. Its visibility now follows the scroll position alone. It also reacts to things that move the view without any scrolling, such as streaming text, a tool card expanding, or resizing the tool window. Its label changed from "Jump to latest" to **"Jump to bottom"**, since it now usually appears with nothing new below.
+- **The clipboard fallback works again.** A second, later `copyText` function silently shadowed the first one for every caller (function declarations hoist, and the last one wins), and its fallback path called `document.execCommand("copy")` without putting anything on the clipboard first — so whenever the async Clipboard API was unavailable or rejected, copying did nothing at all. There is now a single `copyText` whose fallback goes through a temporary textarea, which also fixes the Copy button on code blocks in that situation.
+- **Inline review no longer marks almost the whole file as changed.** When a turn's edits were spread far apart in a large file, the review reported nearly every line between the first and last edit as changed — a ~90-line spelling pass over a 6565-line JSON language file showed up as `+5108 -5108`, with a single file-sized hunk that could only be kept or reverted as a whole. Cause: the line diff skipped its LCS whenever the differing region exceeded a line cap and fell back to emitting that entire region as one hunk. It now splits oversized regions at lines that occur exactly once on both sides (patience diff) and diffs the gaps between those anchors, so the hunks stay tight regardless of file size. The same two files now report `+92 -90` across 20 hunks and `+88 -89` across 18 hunks, matching the real diff. A region with no line unique to both sides (e.g. thousands of identical lines) still falls back to one hunk.
+- **Scrolling a file with a large review no longer lags.** The editor's review adornments were rebuilt on every layout pass — i.e. every scroll tick — and created a rectangle plus a text element for *every* line of *every* hunk, including the ones far outside the visible area. With a hunk spanning thousands of lines this made the file nearly unscrollable. Both the highlighted buffer lines and the phantom/ghost lines are now culled to the viewport before anything is drawn. This also speeds up genuinely large reviews, such as a whole-file write.
+
+---
+
 ## [0.6.4] – 2026-07-26
 
 ### Changed
