@@ -623,6 +623,40 @@ compact_boundary evaluation) — details in the respective sections below.
     `Resources\codeastrogator-head.png`), served from the WebUI folder like `logo.png`; CSS
     `.gutter-logo` 18×18 + `.msg-assistant .gutter { width:18px }`. The `--msg-assistant-fg`
     glyph color no longer applies (it's an image now).
+- **"Copy as Markdown" on assistant bubbles (2026-07-27):** `addCopyMarkdownButton(contentEl, markdown)`
+  appends `.msg-copy-btn` as a **third flex child of `.msg-body`** (after `.gutter` + `.msg-content`),
+  *not* an absolute overlay — `--msg-assistant-bg` is a translucent `rgba`, so an overlay button would
+  have the prose showing through it, and as a flex child it can never cover the first line. Faint
+  (`opacity:.3`) until `.msg-assistant .msg-body:hover`. Copies the **raw markdown source**, verified
+  byte-identical to the input.
+  - **There is no single chokepoint for assistant bubbles** — the raw source must be captured at *both*
+    creation sites: `assistantEnd` (`const md = a.accText` **before** `state.activeAssistant = null`) and
+    `renderHistoricMessage` `case "assistant"` (`msg.text`). `renderMarkdown` discards its input and
+    `state.messages` is a dead field (nothing ever pushes into it), so there is no store to read back from.
+  - Deliberately added **only in `assistantEnd`**, never in `assistantStart`/`assistantDelta`, so a
+    half-streamed message has no button. The button survives `assistantEnd`'s `a.el.innerHTML = ""`
+    because it lives on the **parent**, not in `.msg-content`.
+- **`copyText` had a shadowing twin (fixed 2026-07-27):** two `function copyText` declarations existed in
+  the same IIFE; declarations hoist and the **last wins**, so every caller silently ran the later one —
+  whose fallback was a bare `document.execCommand("copy")` with nothing selected, i.e. a no-op, leaving
+  the working `fallbackCopy` textarea path dead. Now **one** declaration only. Keep it that way.
+- **Jump-to-latest pill = pure function of scroll position (fixed 2026-07-27):** `updateJumpPill()` sets
+  `.jump-pill` from `!isNearBottom()` (tolerance 40 px) and **nothing else** decides its visibility. It
+  used to be shown only by `appendNode` when content arrived while scrolled up, so scrolling up by hand
+  never revealed it and it disappeared for good once the turn went quiet.
+  - Driven by the `scroll` listener **and a `ResizeObserver` on both `transcriptInner` (content height)
+    and `transcript` (viewport height)** — scroll events alone are not enough: streaming text, the
+    markdown re-render at `assistantEnd`, a card expanding/collapsing, the working rocket, and a
+    tool-window resize all move the view relative to the bottom **without firing a scroll event**
+    (verified: growing the pane until the content fit produced **0** scroll events, and only the
+    observer hid the pill).
+  - Safe against observer feedback loops because `.jump-pill` is `position:absolute` — toggling it
+    cannot resize the observed elements. If it is ever made part of the flow, this needs re-checking.
+  - **Deviation from the plan:** the spec (plan §Auto-scroll) calls it a **"Jump to latest"** pill; the
+    label is **"Jump to bottom"**. "Latest" only made sense while the pill meant "new content arrived
+    below" — now it appears whenever the view is off the bottom, usually with nothing new down there, so
+    the label names the destination instead of implying novelty. The `.jump-pill` class/id keep their
+    names.
 - **Attachment chips in the transcript:** `appendMsgAttachments(body, attachments)` renders one
   `.att-item` per file (file icon + name, `path` as tooltip). Used by `renderUserMessage` (live) and
   `renderHistoricMessage` (role user). **Bug fixed:** the chips were previously built but never appended to
@@ -1040,7 +1074,19 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   - `LineDiff.Compute(old,new)` → ordered `LineSegment`s (Unchanged/Changed). Trims common prefix/suffix,
     LCS-diffs the middle → **multiple hunks** (unlike the single-block WebUI `buildDiff`). Equality ignores a
     trailing `\r` (CRLF==LF) but segments emit verbatim lines so a **full accept reproduces `new_string`
-    exactly**. LCS capped at 4000 lines/side (falls back to one big hunk).
+    exactly**. LCS capped at **1500 lines/side** (a 1500² `int[,]` is already ~9 MB, allocated inside
+    devenv). **Over the cap the region is split patience-diff style** (`TrySplitOnUniqueAnchors` +
+    `LongestIncreasingChain`): lines occurring **exactly once on both sides** become fixed anchors (longest
+    non-crossing chain, patience-sort LIS with back-pointers) and the gaps between them recurse into
+    `DiffMiddle`, so each gap normally drops under the cap on the first pass. Only a region with **no**
+    line unique to both sides (e.g. thousands of repeats) still falls back to one big hunk.
+    - **Why (bug fixed 2026-07-27):** the old code *gave up* over the cap and emitted the whole differing
+      middle as one hunk. Because the middle spans first-edit→last-edit, a ~90-line spelling pass over a
+      6565-line JSON language file reported **`+5108 -5108`** (verified: `en.json` → 20 hunks/`+92 -90`,
+      `de.json` → 18 hunks/`+88 -89` after the fix). Symptom to recognise: **added == removed == roughly the
+      file's line count**, one file-sized hunk, editor unscrollable. Regression tests:
+      `LineDiff_ScatteredEditsInHugeFile_StayGranular`, `..._HugeFile_SegmentsStillPartitionBothTexts`,
+      `..._HugeFileWithNoUniqueLines_FallsBackToOneHunk`, `..._HugeFile_CrlfVsLf_OnlyRealEditsAreHunks`.
   - `EditReviewSession.Build(tool, input, readFile)` → per-edit units (Edit/Write = 1; MultiEdit = one per
     `edits[]`), each diffed; `ReviewHunk { Index, UnitIndex, AnchorLine (1-based, anchored via the same
     CRLF-normalised `FindStartLine`), DeletedLines, AddedLines, mutable State }`. `BuildUpdatedInput()`
@@ -1060,6 +1106,14 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   scrolling) — `Navigate(±1)` jumps to the prev/next hunk anchor relative to the first visible line (wraps at
   the ends) via `ViewScroller.EnsureSpanVisible(AlwaysCenter)`. It raises a **`ReviewChanged`** event on
   attach/clear/decide and exposes **`ReviewHunks`** so the scrollbar margin can repaint.
+  - **Viewport culling is mandatory in the draw loops (fix 2026-07-27).** `Draw()` runs on **every**
+    `LayoutChanged`, i.e. every scroll tick, and rebuilds all adornments from scratch. Both `DrawHunk` and
+    `DrawHunkApplied` therefore: (a) clamp the buffer-line highlight loop to `GetVisibleLineRange()` instead
+    of probing every line of the hunk through `VisibleLine`, and (b) skip phantom/ghost rows failing
+    **`YVisible(y)`**. Phantom rows live in reserved space and have **no buffer line to cull them by**, so
+    without (b) a hunk spanning N lines built ~2N rects + `TextBlock`s per scroll tick — with the giant hunk
+    from the `LineDiff` bug above (5108 lines) the editor became unscrollable. Keep both guards if these
+    loops are touched; a legitimately large hunk (e.g. a whole-file `Write`) hits the same path.
 - **Scrollbar marks (MEF) — `Editor/EditReviewScrollbarMargin.cs`:** an `IWpfTextViewMarginProvider`
   (`[MarginContainer(PredefinedMarginNames.VerticalScrollBarContainer)]`, `[Order(After=…OverviewChangeTracking)]`)
   adds a thin strip next to the vertical scrollbar (like git change / error marks). Gets the
@@ -1231,8 +1285,23 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   **`question.request {requestId, questions}`** (PendingPermission tracking identical). The UI
   (`buildQuestionCard`/`questionRequest`) replaces the previously shown tool card of the same id and
   renders per question `header`+`question`+clickable **`.q-option`** buttons (label+description) **plus
-  a free-text field "Other"**. Single-select = radio, multiSelect = multiple + "Submit". A
-  single single-select question **without** typed free text → 1 click submits immediately. Selection →
+  a free-text field "Other"**. Single-select = radio, multiSelect = multiple. **Answering is always an
+  explicit "Submit" click** (or Enter in the free-text field) — never a side effect of picking an option.
+  - **No auto-submit (changed 2026-07-27):** a single single-select question used to submit the instant an
+    option was clicked (guarded only by "no free text typed *yet*"). That stole the chance to pick an
+    option **and then** add a note in the "Other…" field — by the time you reached for it, the answer was
+    already gone. Do not reintroduce a one-click fast path here.
+  - **The free-text field is a `<textarea>` (2026-07-27),** not a single-line input — answers are sometimes
+    several lines. Key handling **mirrors the composer**: `if (e.key === "Enter" && !e.shiftKey)` →
+    **Enter submits, Shift+Enter inserts a newline**, one convention for both multi-line inputs in the UI
+    (`ctrlKey` is not checked, so Ctrl+Enter submits as well). The hint line `.q-other-hint` states both.
+    Auto-grown from JS (`st.grow`, one row → CSS `max-height:160px`, then it scrolls) with `resize:none`,
+    since the inline height set per keystroke would fight a manual drag.
+  - **Answered cards must re-measure on expand:** `.q-card.answered .q-body` is `display:none`, so a
+    textarea built inside a collapsed history card measures `scrollHeight === 0` and stays one row high.
+    The header's click handler therefore calls `s.grow()` for every question when expanding, and CSS lifts
+    the cap (`max-height:none`) for answered cards — they are `pointer-events:none`, so a capped box could
+    not be scrolled and a long answer would just be clipped. Submit →
   **`question.answer {requestId, answers:[{header,question,selected[],custom}]}`** → host
   `HandleQuestionAnswer` → `FormatQuestionAnswers` (text "The user answered:\n- <header>: …") →
   `ResolvePending(deny, message)`. Persisted as role **`question`** (`questions`+`answers`),

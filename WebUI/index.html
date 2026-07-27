@@ -84,9 +84,11 @@
       <main class="transcript" id="transcript" tabindex="-1">
         <div class="transcript-inner" id="transcript-inner"></div>
       </main>
+      <!-- Label is "bottom", not "latest": the pill now shows whenever the view isn't at the bottom,
+           which is often with nothing new below at all. See NOTES "Jump-to-latest pill". -->
       <button class="jump-pill" id="jump-pill" hidden>
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-        Jump to latest
+        Jump to bottom
       </button>
 
       <!-- Remote control mode (covers the transcript while active) -->
