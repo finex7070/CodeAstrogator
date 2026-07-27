@@ -451,6 +451,32 @@ button:focus { outline: none; }
    carry the brand color (--msg-assistant-bg / --msg-assistant-fg). */
 .msg-system .msg-body { color: var(--text-dim); }
 
+/* "Copy as Markdown" in the top-right of an assistant bubble. A real flex child (third, after the
+   gutter and the content) rather than an absolute overlay — the bubble tint is a translucent rgba, so
+   an overlay would have the prose showing through the button. Faint until the bubble is hovered. */
+.msg-copy-btn {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin: -1px -4px 0 2px;   /* pull to the bubble's padding edge */
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0.3;
+  transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+.msg-assistant .msg-body:hover .msg-copy-btn { opacity: 1; }
+.msg-copy-btn:hover { color: var(--accent); background: var(--bg-elevated); opacity: 1; }
+.msg-copy-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
+.msg-copy-btn.copied { opacity: 1; }   /* the check icon carries its own --ok color */
+
 /* markdown */
 .md p { margin: 0 0 8px; }
 .md p:last-child { margin-bottom: 0; }
@@ -1665,22 +1691,32 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .q-option.sel { border-color: var(--accent); background: var(--accent-faint); }
 .q-option-label { font-size: 12.5px; font-weight: 600; }
 .q-option-desc { font-size: 11px; color: var(--text-dim); }
+/* A textarea (multi-line answers), auto-grown from JS and capped here — same pattern as the composer:
+   resize:none because the JS sets an inline height on every keystroke and would fight a manual drag. */
 .q-other-input {
+  display: block;
   margin-top: 5px; width: 100%; box-sizing: border-box;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 5px 9px;
   font-size: 12px; font-family: var(--font-ui);
+  line-height: 1.45;
   color: var(--text);
+  resize: none;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .q-other-input:focus { outline: none; border-color: var(--accent); }
+.q-other-hint { margin-top: 4px; margin-bottom: 0; }
 .q-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
 /* answered (decided) — read-only: dim the unchosen options, keep the picks highlighted */
 .q-card.answered .q-options, .q-card.answered .q-other-input { pointer-events: none; }
 .q-card.answered .q-option { cursor: default; opacity: 0.55; }
 .q-card.answered .q-option.sel { opacity: 1; }
-.q-card.answered .q-other-input { opacity: 0.7; }
+/* Answered cards are pointer-events:none, so a capped box could not be scrolled — show the whole
+   answer instead, however many lines it was. */
+.q-card.answered .q-other-input { opacity: 0.7; max-height: none; overflow-y: hidden; }
 
 /* long tool output behind Show more */
 .tool-output {

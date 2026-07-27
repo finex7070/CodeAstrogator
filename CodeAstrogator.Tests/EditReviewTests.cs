@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using CodeAstrogator.Core.EditReview;
 using Newtonsoft.Json.Linq;
@@ -71,6 +72,105 @@ namespace CodeAstrogator.Tests
         {
             var segs = LineDiff.Compute("a\nb", "a\nb");
             Assert.DoesNotContain(segs, s => s.Kind == SegmentKind.Changed);
+        }
+
+        /// <summary>Regression: a handful of edits scattered across a file far larger than the LCS cap
+        /// used to blow the whole span between the first and last edit into ONE hunk (the real case was a
+        /// 6.5k-line JSON language file reporting "+5108 -5108" for ~60 changed lines, which then made
+        /// the editor unscrollable). The unique-line anchoring must keep the hunks tight.</summary>
+        [Fact]
+        public void LineDiff_ScatteredEditsInHugeFile_StayGranular()
+        {
+            // 6565 lines, matching the file that triggered the bug. Every line is distinct, as in a JSON
+            // language file where each line carries its own key.
+            const int lineCount = 6565;
+            var oldLines = new string[lineCount];
+            for (int i = 0; i < lineCount; i++)
+                oldLines[i] = "\"Node" + i + "\" : \"value " + i + "\",";
+
+            // 20 edits spread from line 1126 to line 6200 → a differing middle of ~5000 lines, well over
+            // the LCS cap, but only 20 lines actually differ.
+            var newLines = (string[])oldLines.Clone();
+            var editedIndices = new List<int>();
+            for (int i = 1126; i <= 6200; i += 267)
+            {
+                newLines[i] = "\"Node" + i + "\" : \"EDITED " + i + "\",";
+                editedIndices.Add(i);
+            }
+
+            var segs = LineDiff.Compute(string.Join("\n", oldLines), string.Join("\n", newLines));
+            var changed = segs.Where(s => s.Kind == SegmentKind.Changed).ToList();
+
+            // One hunk per edited line, each exactly one line wide — not one giant hunk.
+            Assert.Equal(editedIndices.Count, changed.Count);
+            Assert.All(changed, c =>
+            {
+                Assert.Single(c.OldLines);
+                Assert.Single(c.NewLines);
+            });
+            // The counts the review UI reports must match the real edit, not the file size.
+            Assert.Equal(editedIndices.Count, changed.Sum(c => c.NewLines.Count));
+            Assert.Equal(editedIndices.Count, changed.Sum(c => c.OldLines.Count));
+        }
+
+        /// <summary>The partition invariant (concatenating the segments reproduces both inputs verbatim)
+        /// is what lets accept/reject reconstruct the file byte-for-byte — it must survive the
+        /// over-cap anchoring path too, not just the plain LCS path.</summary>
+        [Fact]
+        public void LineDiff_HugeFile_SegmentsStillPartitionBothTexts()
+        {
+            var oldLines = new string[5000];
+            var newLines = new string[5200];
+            for (int i = 0; i < 5000; i++) oldLines[i] = "line " + i;
+            for (int i = 0; i < 5200; i++) newLines[i] = "line " + i;   // 200 appended
+            newLines[10] = "changed near the top";
+            newLines[2500] = "changed in the middle";
+            newLines[4990] = "changed near the end";
+
+            var oldText = string.Join("\n", oldLines);
+            var newText = string.Join("\n", newLines);
+            var segs = LineDiff.Compute(oldText, newText);
+
+            Assert.Equal(oldText, string.Join("\n", segs.SelectMany(s => s.OldLines)));
+            Assert.Equal(newText, string.Join("\n", segs.SelectMany(s => s.NewLines)));
+        }
+
+        /// <summary>A large region with no line unique to both sides has no anchors to split on; the
+        /// fallback single hunk must still be produced (correct, just not granular) rather than looping
+        /// or throwing.</summary>
+        [Fact]
+        public void LineDiff_HugeFileWithNoUniqueLines_FallsBackToOneHunk()
+        {
+            var oldText = string.Join("\n", Enumerable.Repeat("same", 4000));
+            var newText = string.Join("\n", Enumerable.Repeat("other", 4000));
+            var segs = LineDiff.Compute(oldText, newText);
+
+            var changed = Assert.Single(segs, s => s.Kind == SegmentKind.Changed);
+            Assert.Equal(4000, changed.OldLines.Count);
+            Assert.Equal(4000, changed.NewLines.Count);
+            Assert.Equal(oldText, string.Join("\n", segs.SelectMany(s => s.OldLines)));
+            Assert.Equal(newText, string.Join("\n", segs.SelectMany(s => s.NewLines)));
+        }
+
+        /// <summary>Anchoring keys on the \r-trimmed line, so mismatched line endings must not read as
+        /// "every line changed" on the over-cap path either. Two edits far apart force the differing
+        /// middle over the cap so the anchoring path is the one under test.</summary>
+        [Fact]
+        public void LineDiff_HugeFile_CrlfVsLf_OnlyRealEditsAreHunks()
+        {
+            var oldLines = new string[4000];
+            for (int i = 0; i < 4000; i++) oldLines[i] = "line " + i;
+            var newLines = (string[])oldLines.Clone();
+            newLines[10] = "edited near the top";
+            newLines[3990] = "edited near the end";
+
+            // Old side CRLF, new side LF → every line differs byte-wise, only two differ logically.
+            var segs = LineDiff.Compute(string.Join("\r\n", oldLines), string.Join("\n", newLines));
+            var changed = segs.Where(s => s.Kind == SegmentKind.Changed).ToList();
+
+            Assert.Equal(2, changed.Count);
+            Assert.Equal(new[] { "edited near the top" }, changed[0].NewLines);
+            Assert.Equal(new[] { "edited near the end" }, changed[1].NewLines);
         }
 
         // ── FindStartLine ─────────────────────────────────────────────────────────

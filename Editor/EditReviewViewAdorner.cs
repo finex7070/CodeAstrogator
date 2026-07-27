@@ -397,9 +397,14 @@ namespace CodeAstrogator.Editor
             bool rejected = hunk.State == HunkState.Rejected;
             bool accepted = hunk.State == HunkState.Accepted;
 
-            // 1) red highlight on the to-be-deleted buffer lines
+            // 1) red highlight on the to-be-deleted buffer lines (only the on-screen ones — VisibleLine
+            //    would return null for the rest anyway, but probing every line of a huge hunk on every
+            //    layout pass is itself too slow)
             ITextViewLine? firstDelLine = null;
-            for (int d = 0; d < delCount; d++)
+            GetVisibleLineRange(out int firstVisible, out int lastVisible);
+            int dFrom = Math.Max(0, firstVisible - anchor0);
+            int dTo = Math.Min(delCount, lastVisible - anchor0 + 1);
+            for (int d = dFrom; d < dTo; d++)
             {
                 var tvl = VisibleLine(anchor0 + d, snapshot);
                 if (tvl == null) continue;
@@ -434,6 +439,7 @@ namespace CodeAstrogator.Editor
                 for (int i = 0; i < addCount; i++)
                 {
                     double y = phantomTop + i * _view.LineHeight;
+                    if (!YVisible(y)) continue; // off-screen phantom row → nothing to draw
                     // to-be-added: rejected → faint (edit won't apply), accepted → strong, undecided → normal
                     AddRect(_above!, anchorSpan, y, _view.LineHeight,
                         rejected ? AddFillDim : accepted ? AddFillStrong : AddFill);
@@ -462,9 +468,12 @@ namespace CodeAstrogator.Editor
             bool rejected = hunk.State == HunkState.Rejected;
             bool accepted = hunk.State == HunkState.Accepted;
 
-            // 1) green highlight over the real (buffer) added lines
+            // 1) green highlight over the real (buffer) added lines — on-screen ones only (see DrawHunk)
             ITextViewLine? firstAddLine = null;
-            for (int a = 0; a < addCount; a++)
+            GetVisibleLineRange(out int firstVisible, out int lastVisible);
+            int aFrom = Math.Max(0, firstVisible - newAnchor0);
+            int aTo = Math.Min(addCount, lastVisible - newAnchor0 + 1);
+            for (int a = aFrom; a < aTo; a++)
             {
                 var tvl = VisibleLine(newAnchor0 + a, snapshot);
                 if (tvl == null) continue;
@@ -485,6 +494,7 @@ namespace CodeAstrogator.Editor
                 for (int i = 0; i < delCount; i++)
                 {
                     double y = ghostTop + i * _view.LineHeight;
+                    if (!YVisible(y)) continue; // off-screen ghost row → nothing to draw
                     // old text (ghost): kept → faint (discarded), reverted → strong (it'll come back), undecided → normal
                     AddRect(_above!, anchorSpan, y, _view.LineHeight,
                         accepted ? DeleteFillDim : rejected ? DeleteFillStrong : DeleteFill);
@@ -678,6 +688,13 @@ namespace CodeAstrogator.Editor
             catch { }
             return 12.0;
         }
+
+        /// <summary>True when a phantom/ghost row drawn at <paramref name="y"/> would land inside the
+        /// viewport. Phantom rows sit in reserved space, so they have no buffer line to cull them by —
+        /// without this check a hunk spanning thousands of lines built thousands of rects + TextBlocks on
+        /// EVERY layout pass (i.e. every scroll tick), which made the editor unscrollable.</summary>
+        private bool YVisible(double y) =>
+            y + _view.LineHeight >= _view.ViewportTop && y <= _view.ViewportBottom;
 
         private ITextViewLine? VisibleLine(int bufferLine0, ITextSnapshot snapshot)
         {
