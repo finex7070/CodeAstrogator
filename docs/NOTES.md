@@ -487,6 +487,24 @@ compact_boundary evaluation) — details in the respective sections below.
   for headless `-p` turns (see the memory note / `usage-polling-plan.md`); `/usage` stays the only
   channel. Poll interval unchanged (1 min); reset times still parsed to a DateTimeOffset with
   graceful fallback (not the raw-string approach the plan floated).
+- **`/usage` poll runs hook-free (2026-08-17) — no more console flash.** `-p /usage` is internally a
+  regular CLI session, so user hooks (`SessionStart`/`UserPromptSubmit`/`Stop`, e.g. a Hindsight-memory
+  integration) fired on **every** poll, and Claude Code spawns hook commands on Windows **without**
+  `CREATE_NO_WINDOW` — a console window flashed up and stole focus once a minute plus after every turn
+  (upstream bug: anthropics/claude-code #61051, #51867, #64163, #17230). Our own process is already
+  `CreateNoWindow = true`, so the flash came from the hook children. Fix: `RunUsageCommandAsync` appends
+  **`--settings "%LOCALAPPDATA%\CodeAstrogator\no-hooks-settings.json"`**, a file containing
+  `{ "disableAllHooks": true }` that `ClaudeUsageClient.EnsureNoHooksSettingsFile()` writes **once,
+  lazily** (cached in a static; existing file is not rewritten, so no I/O per poll). If the write fails
+  (no permissions …) the flag is **omitted** and the fetch runs as before — best-effort, never break the
+  chat over the usage display. There is no native `--no-hooks` flag (open request #48840) and `--bare`
+  would force API-key auth, so `--settings` is the only viable lever. `~/.claude/settings.json` is
+  **untouched** — hooks still fire for real chat turns. `--settings` does not change `/usage` output, so
+  the parser stays as-is. **Verified against CLI 2.1.224:** `/usage` returns the identical report with and
+  without the flag (`Current session: … / Current week (all models): …` both present), and a marker-writing
+  `SessionStart` hook fires without the flag and **not** with it — both when the hook lives in the same
+  settings file and when it comes from another scope (project `.claude/settings.json`), i.e. `disableAllHooks`
+  is global, not file-local. Re-test on a CLI update.
 
 ## Persistent CLI mode (Roadmap #2, 2026-06-04 — opt-in, default off)
 - **What:** Instead of one process per turn, a **long-lived** `claude -p --input-format stream-json
