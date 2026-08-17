@@ -44,6 +44,13 @@ namespace CodeAstrogator.Core
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
 
         /// <summary>
+        /// Cached result of <see cref="EnsureNoHooksSettingsFile"/>: the settings path once written,
+        /// or "" when creating it failed (don't retry on every poll). Null = not yet attempted.
+        /// </summary>
+        private static string? _noHooksSettingsPath;
+        private static readonly object NoHooksSettingsLock = new object();
+
+        /// <summary>
         /// Fetches the current utilization via <c>claude -p /usage</c>; null on any
         /// failure (CLI not found, API-key mode, offline, timeout …).
         /// </summary>
@@ -71,17 +78,66 @@ namespace CodeAstrogator.Core
         }
 
         /// <summary>
+        /// Writes (once, lazily) a minimal settings file that disables all hooks and returns its
+        /// path, or null when it could not be created. Rationale: <c>-p /usage</c> is internally a
+        /// regular CLI session, so user hooks (<c>SessionStart</c>/<c>UserPromptSubmit</c>/<c>Stop</c>)
+        /// fire on every poll — and Claude Code spawns those hook commands on Windows without
+        /// <c>CREATE_NO_WINDOW</c>, flashing a console window that steals focus (upstream bug,
+        /// anthropics/claude-code #61051, #51867, #64163, #17230; no <c>--no-hooks</c> flag exists,
+        /// and <c>--bare</c> would force API-key auth). Passing this file via <c>--settings</c>
+        /// suppresses the hooks for the status poll only — the real <c>~/.claude/settings.json</c>
+        /// stays untouched, so hooks keep firing for actual chat turns.
+        /// </summary>
+        private static string? EnsureNoHooksSettingsFile()
+        {
+            var cached = _noHooksSettingsPath;
+            if (cached != null)
+                return cached.Length == 0 ? null : cached;
+
+            lock (NoHooksSettingsLock)
+            {
+                cached = _noHooksSettingsPath;
+                if (cached != null)
+                    return cached.Length == 0 ? null : cached;
+
+                try
+                {
+                    var dir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "CodeAstrogator");
+                    Directory.CreateDirectory(dir);
+                    var path = Path.Combine(dir, "no-hooks-settings.json");
+                    if (!File.Exists(path))
+                        File.WriteAllText(path, "{ \"disableAllHooks\": true }", Encoding.UTF8);
+                    _noHooksSettingsPath = path;
+                    return path;
+                }
+                catch
+                {
+                    _noHooksSettingsPath = ""; // best-effort: run without --settings from now on
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>
         /// Runs <c>claude -p /usage --output-format json</c> and returns its raw stdout.
         /// stdin is closed immediately (the slash command takes no prompt) so the CLI
-        /// does not wait on its "no stdin received" grace period.
+        /// does not wait on its "no stdin received" grace period. A <c>--settings</c> file
+        /// disabling all hooks is passed when available (see <see cref="EnsureNoHooksSettingsFile"/>).
         /// </summary>
         private static async Task<string?> RunUsageCommandAsync(
             string exe, string? workingDirectory, CancellationToken ct)
         {
+            var noHooksSettings = EnsureNoHooksSettingsFile();
+            var arguments = "-p /usage --output-format json";
+            if (!string.IsNullOrEmpty(noHooksSettings))
+                arguments += " --settings \"" + noHooksSettings + "\"";
+
             var psi = new ProcessStartInfo
             {
                 FileName = exe,
-                Arguments = "-p /usage --output-format json",
+                Arguments = arguments,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
