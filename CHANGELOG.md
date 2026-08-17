@@ -4,6 +4,13 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.6] – 2026-08-17
+
+### Fixed
+- **No more console window flashing up while the chat window is open.** The session/weekly usage meters are refreshed by running the CLI's own `/usage` command in the background — once a minute and again after every turn. That call is internally a regular CLI session, so any hooks configured in `~/.claude/settings.json` (`SessionStart`, `UserPromptSubmit`, `Stop`) fired on every single poll, and Claude Code currently launches hook commands on Windows without suppressing their console window. The result was a black window blinking up roughly once a minute and stealing the keyboard focus. The usage poll now runs with hooks disabled, via its own settings file (`%LOCALAPPDATA%\CodeAstrogator\no-hooks-settings.json`, written once). Your own `~/.claude/settings.json` is left untouched — hooks still run normally for real chat turns — and the usage numbers are read exactly as before. If the settings file cannot be written, the poll simply runs as it did previously.
+
+---
+
 ## [0.6.5] – 2026-07-27
 
 ### Added
