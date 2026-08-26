@@ -1224,6 +1224,12 @@
       const img = el("img", "att-img");
       img.alt = "";
       img.src = m.dataUri;
+      // Click → lightbox. The inline preview is capped at 320px high, which is too small to judge a
+      // screenshot; the overlay shows it big and zoomable without leaving the chat.
+      const nameEl = item.querySelector(".att-name");
+      const imgName = nameEl ? nameEl.textContent : "";
+      img.title = "Click to enlarge";
+      img.addEventListener("click", () => openImageLightbox(m.dataUri, imgName));
       previewEl.appendChild(img);
     } else {
       const pre = el("pre", "att-pre");
@@ -3036,6 +3042,7 @@
     closeSlashAutocomplete();
     closeAtAutocomplete();
     closeModal();
+    closeImageLightbox();
   }
 
   function openPopover(anchor, contentEl, opts) {
@@ -3137,6 +3144,118 @@
   }
 
   // (copyText lives next to buildCodeBlock — a second declaration here used to shadow it.)
+
+  // -------------------------------------------------------------------------
+  // Image lightbox — click an image preview to view it large, with zoom + pan
+  // -------------------------------------------------------------------------
+  let lightboxEl = null;
+
+  function closeImageLightbox() {
+    if (lightboxEl) { lightboxEl.remove(); lightboxEl = null; }
+  }
+
+  /**
+   * Opens `src` (a data: URI from attachment.preview) as a full-window overlay. Zoom: wheel at the
+   * pointer, the −/+ buttons, +/-/0 keys, double-click toggles fit↔200%. Pan: drag once zoomed in.
+   * Closed by Esc (global handler → closeAllOverlays), the ✕ button, or a click on the backdrop.
+   */
+  function openImageLightbox(src, name) {
+    if (!src) return;
+    closeAllOverlays();
+    const MIN = 0.1, MAX = 8, STEP = 1.25;
+    let scale = 1, tx = 0, ty = 0;
+
+    const back = el("div", "lb-backdrop");
+    back.setAttribute("role", "dialog");
+    back.setAttribute("aria-label", name ? "Image: " + name : "Image");
+    back.tabIndex = -1; // focusable so the +/-/0 keys reach it without stealing composer typing
+
+    const bar = el("div", "lb-bar");
+    bar.appendChild(el("span", "lb-name", name || ""));
+    const zoomOut = el("button", "lb-btn", "−");
+    zoomOut.title = "Zoom out (−)";
+    const pct = el("span", "lb-zoom", "100%");
+    const zoomIn = el("button", "lb-btn", "+");
+    zoomIn.title = "Zoom in (+)";
+    const resetBtn = el("button", "lb-btn lb-btn-text", "Reset");
+    resetBtn.title = "Fit to window (0)";
+    const closeBtn = el("button", "lb-btn lb-close", "✕");
+    closeBtn.title = "Close (Esc)";
+    [zoomOut, pct, zoomIn, resetBtn, closeBtn].forEach((n) => bar.appendChild(n));
+
+    const stage = el("div", "lb-stage");
+    const img = el("img", "lb-img");
+    img.alt = name || "";
+    img.src = src;
+    stage.appendChild(img);
+    back.appendChild(bar);
+    back.appendChild(stage);
+
+    function apply() {
+      img.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")";
+      pct.textContent = Math.round(scale * 100) + "%";
+      stage.classList.toggle("zoomed", scale > 1.001);
+    }
+    /** Sets the zoom, keeping the point under (cx, cy) put when those are given (wheel zoom). */
+    function setScale(next, cx, cy) {
+      next = Math.min(MAX, Math.max(MIN, next));
+      if (cx != null) {
+        const r = stage.getBoundingClientRect();
+        // offset of the cursor from the image's (translated) centre, in screen px
+        const ox = cx - r.left - r.width / 2 - tx;
+        const oy = cy - r.top - r.height / 2 - ty;
+        const k = next / scale;
+        tx -= ox * (k - 1);
+        ty -= oy * (k - 1);
+      }
+      scale = next;
+      apply();
+    }
+    function reset() { scale = 1; tx = 0; ty = 0; apply(); }
+
+    zoomOut.addEventListener("click", () => setScale(scale / STEP));
+    zoomIn.addEventListener("click", () => setScale(scale * STEP));
+    resetBtn.addEventListener("click", reset);
+    closeBtn.addEventListener("click", closeImageLightbox);
+    stage.addEventListener("wheel", (e) => {
+      e.preventDefault(); // no page scroll behind the overlay
+      setScale(scale * (e.deltaY < 0 ? STEP : 1 / STEP), e.clientX, e.clientY);
+    }, { passive: false });
+    img.addEventListener("dblclick", (e) => {
+      if (scale > 1.001) reset(); else setScale(2, e.clientX, e.clientY);
+    });
+    // click the empty stage (not the image) or the backdrop → close
+    stage.addEventListener("mousedown", (e) => { if (e.target === stage) closeImageLightbox(); });
+
+    // drag to pan — pointer events so a drag that leaves the window still ends cleanly
+    let dragging = false, lastX = 0, lastY = 0;
+    img.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      dragging = true; lastX = e.clientX; lastY = e.clientY;
+      try { img.setPointerCapture(e.pointerId); } catch (_) { /* older WebView2 */ }
+      e.preventDefault();
+    });
+    img.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      tx += e.clientX - lastX; ty += e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      apply();
+    });
+    const endDrag = () => { dragging = false; };
+    img.addEventListener("pointerup", endDrag);
+    img.addEventListener("pointercancel", endDrag);
+
+    back.addEventListener("keydown", (e) => {
+      if (e.key === "+" || e.key === "=") { e.preventDefault(); setScale(scale * STEP); }
+      else if (e.key === "-" || e.key === "_") { e.preventDefault(); setScale(scale / STEP); }
+      else if (e.key === "0") { e.preventDefault(); reset(); }
+    });
+
+    overlayLayer.appendChild(back);
+    lightboxEl = back;
+    apply();
+    back.focus();
+  }
 
   // -------------------------------------------------------------------------
   // Rename modal (session.rename, §5.1)
@@ -4047,6 +4166,25 @@
           { path: "src/Program.cs", isDir: false },
           { path: "docs/NOTES.md", isDir: false },
         ] }, 150);
+        // Mock preview payloads so the inline image/text previews (and the image lightbox) can be
+        // exercised in index.html. The image is a generated SVG — zooming it shows crisp edges, which
+        // makes it obvious whether the lightbox transform is applied.
+        case "attachment.preview": {
+          const isImg = /\.(png|jpe?g|gif|bmp|webp|svg|ico|apng|avif)$/i.test(String(msg.path || ""));
+          if (isImg) {
+            const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400">' +
+              '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+              '<stop offset="0" stop-color="#8d5fc7"/><stop offset="1" stop-color="#2b6cb0"/></linearGradient></defs>' +
+              '<rect width="640" height="400" fill="url(#g)"/>' +
+              '<circle cx="200" cy="150" r="70" fill="none" stroke="#fff" stroke-width="6"/>' +
+              '<text x="320" y="360" fill="#fff" font-family="sans-serif" font-size="28" text-anchor="middle">' +
+              'mock preview 640×400</text></svg>';
+            return sendIn("attachment.preview", { token: msg.token, ok: true, kind: "image",
+              dataUri: "data:image/svg+xml;base64," + btoa(svg) }, 200);
+          }
+          return sendIn("attachment.preview", { token: msg.token, ok: true, kind: "text",
+            text: "// mock preview of " + msg.path + "\nline 1\nline 2\nline 3\n", truncated: true }, 200);
+        }
         case "slash.run": return onSlash(msg.command);
         case "editor.insert": return;
         // Mock: exercise the notification stack (real host opens the file / reveals the folder).
@@ -4152,7 +4290,9 @@
         sessionId: s.id, title: s.title,
         messages: [
           { role: "user", id: "u1", text: "Can you explain the parser?", ts: Date.now(),
-            attachments: [{ name: "NdjsonParser.cs", path: "C:/repo/Core/NdjsonParser.cs" }, { name: "GameManager.cs:42-58", path: "C:/repo/Assets/GameManager.cs#L42-58" }] },
+            attachments: [{ name: "NdjsonParser.cs", path: "C:/repo/Core/NdjsonParser.cs" }, { name: "GameManager.cs:42-58", path: "C:/repo/Assets/GameManager.cs#L42-58" },
+              // image attachment → inline preview + clickable lightbox
+              { name: "screenshot.png", path: "C:/repo/docs/screenshot.png" }] },
           { role: "assistant", id: "a1", text: "Sure! It reads **NDJSON** and emits domain events.\n\n| Event | Maps to | Streamed |\n| --- | --- | :-: |\n| `text_delta` | assistant.delta | yes |\n| `tool_use` | tool.use | no |\n| `result` | turn.result | no |\n\n```json\n{ \"type\": \"text_delta\", \"text\": \"hi\" }\n```", ts: Date.now() },
         ],
       }, 100);
