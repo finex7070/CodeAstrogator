@@ -219,6 +219,24 @@ compact_boundary evaluation) — details in the respective sections below.
   the Windows username like "Jan Huels" dragged the path along). Quoted: `@"C:\a b\f.png"`;
   the `#L` line suffix (active file) sits **outside** the quotes: `@"…\f.cs"#L10-20`.
   Verified against the CLI (quoted paths are expanded, unquoted ones with a space are not).
+- **Images > 256 KiB are dropped by the CLI → explicit Read hint (2026-08-26).** The CLI expands an
+  `@`-referenced image into a real image block **only up to 262144 bytes (256 KiB)**; a bigger file is
+  dropped **without any warning or error** and the model receives the path as plain text. Symptom the
+  user reported: "the two images did not arrive — I only see the file names, no content". Measured
+  against CLI 2.1.224 with `--disallowed-tools Read` (so only the expansion counts): 262074 bytes →
+  arrives, 281505 bytes → gone; real pasted screenshots 220234 → arrives, 406454 / 1558864 / 2091689 →
+  gone. It is a **per-file** limit, not per prompt (1 small + 1 large → the model sees exactly 1), and
+  independent of the pixel size (the failing shots are only ~1900×1000, far below the API's image
+  limits). Since pasted screenshots are routinely 0.4–2.4 MB, nearly every screenshot was affected.
+  **What still works:** the model sees such a file when it opens it with the **Read tool** (verified on a
+  2 MB PNG), and a base64 `image` block over `--input-format stream-json` is delivered directly
+  (verified, `num_turns: 1`, no Read needed). **Chosen fix (user's call):** `PromptSend` appends
+  `Core/CliAttachmentHint.BuildReadHint(...)` after the "Attached files:" block whenever an attached
+  image exceeds the limit — a "Note: … NOT part of this prompt … Open them with the Read tool before
+  answering:" line followed by the full paths. Verified end-to-end: the same prompt that produced
+  "COUNT=0" now yields two Read calls (`num_turns: 4`) and correct descriptions of both screenshots.
+  The image-block route (`stream-json` input) stays the deterministic long-term option if the hint ever
+  proves too soft. Re-test the 256 KiB limit on a CLI update — if it rises, the hint simply stops firing.
 - **`system.note` (host → web)** `{ id, text }` — dimmed one-liners in the transcript
   (session start, the turn footer source is `turn.result`, "Turn stopped", "Context compacted",
   "Permission denied by user"). Stored as role `system` in the history. (Auto-approved edits are
@@ -691,6 +709,18 @@ compact_boundary evaluation) — details in the respective sections below.
     ≤ 16 MB → base64 data-URI, text ≤ 200k chars w/ `truncated` flag) and replies **`attachment.preview`
     (host→web)** `{ path, token, ok, kind, dataUri?|text?, truncated?, reason? }`. `onAttachmentPreview`
     matches by `token` (registry `attPreviewReg`) and fills the panel.
+  - **Image lightbox (2026-08-26):** the inline `<img class="att-img">` is capped at 320px, too small to
+    judge a screenshot, so clicking it (`cursor: zoom-in`, title "Click to enlarge") opens
+    **`openImageLightbox(dataUri, name)`** — a `.lb-backdrop` overlay in `#overlay-layer` with a bar
+    (name · − · zoom % · + · Reset · ✕) over a clipped `.lb-stage`. Zoom: wheel **at the pointer** (the
+    translation is compensated so the point under the cursor stays put), the −/+ buttons, `+`/`-`/`0`
+    keys (the backdrop takes focus, `tabIndex=-1`, so keys don't reach the composer), double-click toggles
+    fit↔200%; pan by dragging (pointer events + `setPointerCapture`) once zoomed, `cursor: grab`. Closed by
+    the ✕, a click on the empty stage, or Esc — `closeAllOverlays()` calls `closeImageLightbox()`, which is
+    also how opening one dismisses any other overlay. The mock answers `attachment.preview` with a
+    generated SVG (and the history transcript carries a `screenshot.png` attachment), so the whole path is
+    testable in `index.html`. Verified there via DevTools: buttons 100→80→125%, wheel 156% with matching
+    translate, `0` resets, drag pans, and all three close paths.
   - **Missing / unreadable / non-previewable → plain chip:** on history load the host stamps
     `attachments[].exists` (`MarkAttachmentExistence`, called in `SendTranscript`) so a deleted file renders
     as a non-expandable name chip up front. A late failure (`ok:false`, or the file vanished between load and
@@ -1250,10 +1280,46 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   system note. The button's click `stopPropagation()`s so it doesn't toggle the card's collapse state.
 - **Non-text / binary files (2026-07-15):** `Read` can target images/PDF/`.ipynb`, and Edit/Write paths
   are arbitrary, so `OpenDocument` uses **`LOGVIEWID_Primary`** (VS picks the right editor per file type —
-  image viewer, notebook editor, …) rather than forcing `LOGVIEWID_TextView` (which rendered a PNG as
+  notebook editor, …) rather than forcing `LOGVIEWID_TextView` (which rendered a PNG as
   binary garbage). Files VS has no editor for (`.exe`/`.dll`/unregistered binaries) throw on open → we
   fall back to **selecting the file in Explorer** (`explorer /select,"path"`, `RevealInExplorer`) and only
   surface an error if that also fails.
+- **Only VS-owned types open in VS (2026-08-26) — `Core/FileOpenRouter.cs`.** `LOGVIEWID_Primary` still
+  meant a PNG opened in **VS's** image editor; the user wants the file type's **default program** (image
+  viewer, PDF reader, Office) for anything that is not really a VS file. `FileOpenRouter.Decide(path)`
+  returns `VisualStudio` / `DefaultProgram` / `Explorer`:
+  - directory → `Explorer` (unchanged);
+  - extension (or bare name) in the **VS whitelist** → `VisualStudio`. Deliberately broad: source, project
+    /build (`csproj`, `props`, `slnx`, `vsixmanifest`, …), config/data-as-text (`json`, `xml`, `yml`,
+    `resx`, `jsonl`, …), docs (`md`, `txt`, `log`), plus extensionless names (`Makefile`, `LICENSE`, …).
+    A wrong "VS" only opens the file in the IDE, whereas a wrong "default program" could hand a source
+    file to an unrelated app — hence the asymmetry;
+  - **runnable types → `Explorer`** (`RunnableExtensions`: `exe`, `dll`, `com`, `msi`/`msix`/`appx`,
+    `vbs`, `jse`, `wsf`, `hta`, `jar`, `lnk`, `reg`, `inf`, `scr`, `cpl`, …). "Open with the default
+    program" would **run** them, and a click in the transcript must never execute what a turn just
+    produced or downloaded — they are revealed in Explorer instead. Script types VS edits as *text*
+    (`bat`, `cmd`, `ps1`, `js`, …) are in the VS whitelist and open in the IDE, which is safe;
+  - otherwise ask the shell whether the extension has a real handler → `DefaultProgram`
+    (`Process.Start` + `UseShellExecute`, `OpenWithDefaultProgram`). A handler that resolves to
+    `OpenWith.exe`/`rundll32.exe` counts as **none** (we would rather not pop Windows' "How do you want
+    to open this file?" chooser), as does an unknown extension → falls back to `VisualStudio`, then
+    Explorer. `svg` is treated as an image (default program), not as XML.
+  - **Packaged (UWP/MSIX) default apps — the bug the first version shipped with (fixed same day).**
+    `HasDefaultProgram` originally asked only for **`ASSOCSTR_EXECUTABLE`**, which is **empty for
+    `.png`/`.jpg`/`.gif`/`.mp4`** when a packaged app owns the type: with Photos as the default,
+    `AssocQueryString` returns `0x80070483 ERROR_NO_ASSOCIATION` and no exe path exists at all
+    (measured on Win10 22H2 — `.pdf`→Acrobat, `.txt`→Notepad++, `.zip`→7-Zip all *do* report a path,
+    which is why it looked fine in the unit tests). Images therefore counted as "unassociated" and kept
+    opening in VS — exactly the symptom the user reported. The probe now consults **`ASSOCSTR_COMMAND` +
+    `ASSOCSTR_EXECUTABLE` first and falls back to `ASSOCSTR_FRIENDLYAPPNAME`** when both are empty
+    (a packaged handler still reports one, e.g. "Windows-Fotoanzeige" / "Medienwiedergabe"). Verified on
+    this machine: `png`/`jpg`/`gif`/`mp4` → associated, `.qqq`/`.zzz9` (→ `OpenWith.exe`) → not.
+    Regression tests: `HasDefaultProgram_PackagedImageHandler_IsRecognized`,
+    `HasDefaultProgram_OpenWithPickerCountsAsNone`.
+  `HandleOpenFile` switches on `Decide`: `Explorer` → `RevealInExplorer` (error banner only if that
+  fails), `DefaultProgram` → shell launch and, if it throws, fall through to the VS/Explorer path — so no
+  route is a dead end. Tests: `CodeAstrogator.Tests/FileOpenRouterTests.cs` (injectable
+  association probe, so the expectations don't depend on the machine's registry).
 - **Composer attachment chips (2026-07-15):** the file chips above the input (`renderAttachments`) reuse
   the same `openFileButton(a.path)` — an open button appears per chip when it has a path, and the chip's
   `title` is the full path. The chip's remove `.chip-x` was made more visible (solid neutral bg, red hover).

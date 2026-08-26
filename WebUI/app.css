@@ -1084,6 +1084,57 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .att-item.expanded .att-preview { display: block; }
 .att-preview-loading { padding: 8px 10px; font-size: 11px; color: var(--text-dim); }
 .att-img { display: block; max-width: 100%; max-height: 320px; height: auto; object-fit: contain; }
+.att-img { cursor: zoom-in; }
+.att-img:hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* Image lightbox — click an inline image preview to view it large (zoom + pan). Lives in
+   #overlay-layer (pointer-events:none), so the backdrop re-enables pointer events itself. */
+.lb-backdrop {
+  position: fixed; inset: 0; pointer-events: auto;
+  background: rgba(0, 0, 0, 0.86);
+  display: flex; flex-direction: column;
+  animation: popIn 100ms ease both;
+  outline: none;
+}
+.lb-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-chrome);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-ui); font-size: 12px;
+}
+.lb-name {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lb-zoom { min-width: 44px; text-align: center; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.lb-btn {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.lb-btn:hover { border-color: var(--accent); background: var(--accent-faint); }
+.lb-btn-text { width: auto; padding: 0 8px; font-size: 11.5px; }
+.lb-close { margin-left: 4px; }
+/* The stage clips the zoomed image; the image itself is transformed from its centre. */
+.lb-stage {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.lb-img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  cursor: zoom-in;
+  user-select: none; -webkit-user-drag: none;
+}
+.lb-stage.zoomed .lb-img { cursor: grab; }
+.lb-stage.zoomed .lb-img:active { cursor: grabbing; }
 .att-pre {
   margin: 0; padding: 8px 10px; max-height: 320px; overflow: auto;
   font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5;
