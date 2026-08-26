@@ -4,6 +4,14 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.7] – 2026-08-26
+
+### Fixed
+- **You can now un-pick an option on Claude's questions.** On a question that takes a single answer, clicking the option you had already selected did nothing — the only way onwards was picking a *different* option, so once you had clicked anything there was no way back to "no option at all, just my own text in the Other… field". Clicking the selected option now clears it. Questions that take several answers keep toggling each option on and off as before, and both kinds now say so under the question ("click it again to deselect" / "click a selected option to remove it").
+- **A completely empty answer is no longer sent.** With nothing selected and nothing typed, Submit (and Enter) used to send a blank answer that told Claude only "(no selection)" — easy to trigger now that an option can be un-picked. The card now says "Pick an option or type an answer." and puts the cursor in the text field instead. Submitting also locks the text fields, which stayed editable on a freshly answered card.
+
+---
+
 ## [0.6.6] – 2026-08-17
 
 ### Fixed
