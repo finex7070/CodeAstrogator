@@ -456,6 +456,13 @@ namespace CodeAstrogator.Bridge
                 sb.Append("\n\nAttached files:");
                 foreach (var r in references)
                     sb.Append('\n').Append(Core.CliReferenceFormatter.FormatFileReference(r.path, r.suffix));
+                // The CLI expands an @-referenced image into an image block only up to 256 KiB and
+                // drops bigger ones without a word (a pasted screenshot is usually 0.4-2.4 MB), so the
+                // model saw the path as text and nothing else. It can still see the file via Read - say so.
+                var hint = Core.CliAttachmentHint.BuildReadHint(
+                    references.Select(r => r.path).Where(Core.CliAttachmentHint.IsOversizedImage));
+                if (hint != null)
+                    sb.Append("\n\n").Append(hint);
                 text = sb.ToString();
             }
 
@@ -2179,11 +2186,30 @@ namespace CodeAstrogator.Bridge
                 PostNotify("File not found: " + path, autoCloseMs: 10000);
                 return;
             }
+            // Only file types VS owns (source, project, config, text) open as VS documents. Anything
+            // Windows has a default program for — images, PDFs, Office docs, media — goes to that
+            // program: a PNG belongs in the user's image viewer, not in VS's image editor
+            // (FileOpenRouter.Decide). Unassociated/unknown types still land in VS, and executables /
+            // installers / scripting hosts are only revealed in Explorer — a click in the transcript
+            // must never *run* something a turn produced.
+            var target = FileOpenRouter.Decide(path);
+            if (target == FileOpenTarget.Explorer)
+            {
+                if (!RevealInExplorer(path))
+                    PostNotify("Could not show the file in Explorer: " + path, autoCloseMs: 10000);
+                return;
+            }
+            if (target == FileOpenTarget.DefaultProgram)
+            {
+                if (OpenWithDefaultProgram(path))
+                    return;
+                // No handler after all (association vanished, ShellExecute refused) → try VS, then Explorer.
+            }
             try
             {
                 // LOGVIEWID_Primary lets VS pick the appropriate editor for the file type
-                // (text editor for code, image viewer for images, notebook editor for .ipynb, …)
-                // instead of forcing the text view onto binary files like a PNG or PDF.
+                // (text editor for code, notebook editor for .ipynb, …) instead of forcing
+                // the text view onto a file it has a real editor for.
                 VsShellUtilities.OpenDocument(_package, path, VSConstants.LOGVIEWID_Primary,
                     out _, out _, out IVsWindowFrame frame);
                 frame?.Show();
@@ -2194,6 +2220,23 @@ namespace CodeAstrogator.Bridge
                 // opened as a document — fall back to selecting the file in Windows Explorer.
                 if (!RevealInExplorer(path))
                     PostNotify("Could not open the file in Visual Studio: " + ex.Message, autoCloseMs: 10000);
+            }
+        }
+
+        /// <summary>Opens <paramref name="path"/> with its registered default program. False when the
+        /// shell refused (no handler), so the caller can fall back to a VS editor.</summary>
+        private static bool OpenWithDefaultProgram(string path)
+        {
+            try
+            {
+                var proc = System.Diagnostics.Process.Start(
+                    new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+                proc?.Dispose();
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
