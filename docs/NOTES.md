@@ -1309,6 +1309,21 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
     option was clicked (guarded only by "no free text typed *yet*"). That stole the chance to pick an
     option **and then** add a note in the "Other…" field — by the time you reached for it, the answer was
     already gone. Do not reintroduce a one-click fast path here.
+  - **Options are clearable toggles (2026-08-26):** clicking the **already selected** option of a
+    single-select question **deselects** it (it used to be a no-op — the only escape from a stray click
+    was picking a *different* option, so "no option, just my own text" was unreachable once anything was
+    clicked). Single-select is therefore a *radio that can be cleared*, multiSelect toggles each label on
+    and off as before; both go through `setOptionSelected(btn, on)`, which also maintains
+    **`aria-pressed`** (the options are toggle buttons, not links). The per-question hint line states it
+    ("Select one · click it again to deselect" / "Select one or more · click a selected option to remove
+    it") and is only built for unanswered cards (`.q-card.answered .q-hint` is `display:none` for the
+    in-place collapse after Submit).
+  - **Empty submit is refused (2026-08-26):** with nothing selected anywhere **and** no free text, Submit
+    (or Enter) shows `.q-warn` "Pick an option or type an answer." and focuses the first textarea instead
+    of sending — the host would otherwise format `(no selection)` and the model would just ask again.
+    Reachable much more easily now that an option can be deselected. Submitting also **disables** the
+    textareas (a card built interactively kept them enabled after collapsing; history cards are built
+    disabled).
   - **The free-text field is a `<textarea>` (2026-07-27),** not a single-line input — answers are sometimes
     several lines. Key handling **mirrors the composer**: `if (e.key === "Enter" && !e.shiftKey)` →
     **Enter submits, Shift+Enter inserts a newline**, one convention for both multi-line inputs in the UI
@@ -1338,8 +1353,12 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
     represents the call). Covers both orderings and hardens the permission race too. History was already
     correct (`RecordQuestionMessage` replaces the `tool` record by id). Mock now fires `question.request`
     **before** the racing `tool.use` and emits the errored `tool.result` to reproduce/verify.
-- **CSS:** `.q-card`/`.q-option`/`.q-other-input`/`.q-actions` (+ `.answered` read-only style) in
-  `app.css` (replaces the old `.ask-*`). The mock posts `tool.use`+`question.request` in the demo turn.
+- **CSS:** `.q-card`/`.q-option`/`.q-other-input`/`.q-actions`/`.q-warn` (+ `.answered` read-only style)
+  in `app.css` (replaces the old `.ask-*`). The mock posts `tool.use`+`question.request` in the demo turn —
+  since 2026-08-26 with **two** questions, one single-select and one `multiSelect`, so both paths (toggle
+  off, several picks in the summary) can be exercised in `index.html` without VS. Verified there via
+  DevTools: pick → repick → click-again-clears for single-select, add/remove for multiSelect, blank submit
+  refused, free-text-only answer submits and summarizes ("Framework: own answer only · Suites: —").
 - **Modes:** works in **"Ask", "Auto-accept" AND "Plan"** — the hook is wired for all modes except
   `bypass` (`ClaudeSessionService`, `PermissionMode != "bypass"`); AskUserQuestion is
   not an edit, so it prompts even with acceptEdits, and in Plan empirically confirmed (CLI 2.1.165: the hook
