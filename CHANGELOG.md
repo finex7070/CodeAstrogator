@@ -4,6 +4,19 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.6.8] – 2026-08-26
+
+### Changed
+- **The open button now uses your default program for anything that isn't a Visual Studio file.** Opening a PNG from a card or an attachment chip put it into Visual Studio's own image editor; it now opens in whatever program Windows uses for that file type — your image viewer for pictures, the PDF reader for PDFs, Word/Excel for documents, and so on. Files that belong to Visual Studio (source code, projects and solutions, config and data files read as text, Markdown, plain text, and extensionless files such as `Makefile` or `LICENSE`) still open in the IDE as before. If a file type has no program associated with it, it opens in Visual Studio rather than making Windows ask you which app to use, and folders are still revealed in Explorer. This also works when the default app is one of the Windows Store apps such as Photos or Media Player, which report no program path at all. Executables, installers and script hosts (`.exe`, `.dll`, `.msi`, `.vbs`, `.jar`, `.lnk`, `.reg`, …) are deliberately *not* launched — they are shown in Explorer, so a click in the chat can never run something a turn just produced. Batch/PowerShell/JS files still open as text in the IDE.
+
+### Fixed
+- **Large attached images reach Claude again.** Attached files are handed to the CLI as path references, and the CLI turns an image into something Claude can actually see only while the file stays under 256 KiB — anything bigger it drops without a word, which is why Claude sometimes answered that the images had not arrived and it only saw the file names. Pasted screenshots are usually between 0.4 MB and 2.4 MB, so this hit nearly every screenshot. The prompt now tells Claude explicitly to open those files with its Read tool (which does handle them), and lists them by full path. Small images are unaffected and still arrive directly.
+
+### Added
+- **Click an image preview in the chat to view it large.** The inline preview under an attached image is small by design, so a screenshot was hard to read. Clicking it now opens the image as a popup over the chat: zoom with the mouse wheel (it zooms towards the cursor), the − / + buttons or the `+`, `-` and `0` keys, double-click to toggle between fit and 200%, and drag the image to pan once it's zoomed in. The bar shows the file name and the current zoom level. Close it with ✕, Escape, or a click next to the image.
+
+---
+
 ## [0.6.7] – 2026-08-26
 
 ### Fixed
