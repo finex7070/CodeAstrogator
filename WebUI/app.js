@@ -1872,6 +1872,13 @@
   // The chosen option(s)/free text go back as question.answer; the host returns
   // them to the CLI as the tool result. Same card is reused read-only for history.
   // -------------------------------------------------------------------------
+  // Selection state of one option button — class drives the styling, aria-pressed keeps screen
+  // readers in sync (the buttons are toggles, not links).
+  function setOptionSelected(btn, on) {
+    btn.classList.toggle("sel", !!on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
   function buildQuestionCard(requestId, questions, prefilled) {
     const answered = !!prefilled;
     const card = el("div", "q-card");
@@ -1907,7 +1914,10 @@
       if (q.header) block.appendChild(el("span", "q-header", q.header));
       block.appendChild(el("div", "q-question", q.question || ""));
       const multi = !!q.multiSelect;
-      if (multi) block.appendChild(el("div", "q-hint", "Select one or more"));
+      if (!answered)
+        block.appendChild(el("div", "q-hint", multi
+          ? "Select one or more · click a selected option to remove it"
+          : "Select one · click it again to deselect"));
 
       const st = { q: q, selected: new Set(preSel), customEl: null };
       const optsEl = el("div", "q-options");
@@ -1916,15 +1926,20 @@
         const btn = el("button", "q-option");
         btn.appendChild(el("span", "q-option-label", label));
         if (o && o.description) btn.appendChild(el("span", "q-option-desc", o.description));
-        if (st.selected.has(label)) btn.classList.add("sel");
+        setOptionSelected(btn, st.selected.has(label));
         if (!answered) btn.addEventListener("click", () => {
+          const wasSel = st.selected.has(label);
           if (multi) {
-            if (st.selected.has(label)) { st.selected.delete(label); btn.classList.remove("sel"); }
-            else { st.selected.add(label); btn.classList.add("sel"); }
+            if (wasSel) st.selected.delete(label); else st.selected.add(label);
+            setOptionSelected(btn, !wasSel);
           } else {
+            // Single-select is a RADIO THAT CAN BE CLEARED: clicking the selected option deselects it
+            // instead of being a no-op, so a free-text-only answer stays reachable after a stray click
+            // (previously the only way out was picking a different option — you could never get back to
+            // "no option, just my own text").
             st.selected.clear();
-            optsEl.querySelectorAll(".q-option.sel").forEach((e) => e.classList.remove("sel"));
-            st.selected.add(label); btn.classList.add("sel");
+            optsEl.querySelectorAll(".q-option").forEach((e) => setOptionSelected(e, false));
+            if (!wasSel) { st.selected.add(label); setOptionSelected(btn, true); }
             // NO auto-submit here. A single-question, single-select card used to answer the moment an
             // option was clicked, which stole the chance to still type something into the "Other…" field
             // (the guard only checked whether text was ALREADY there). Answering is always an explicit
@@ -1968,8 +1983,11 @@
       body.appendChild(block);
     });
 
+    let warnEl = null;
     if (!answered) {
       const actions = el("div", "q-actions");
+      warnEl = el("span", "q-warn", "");
+      actions.appendChild(warnEl);
       const submitBtn = el("button", "btn-approve", "Submit");
       submitBtn.addEventListener("click", submit);
       actions.appendChild(submitBtn);
@@ -1978,6 +1996,20 @@
 
     function submit() {
       if (card.classList.contains("answered")) return;
+      // Nothing picked anywhere and no text: the model would get "(no selection)" and have to ask
+      // again. Since a single-select option can now be deselected, an empty card is easy to reach
+      // (and Enter in the empty textarea would send it), so say so instead of burning a turn.
+      const isEmpty = states.every((s) =>
+        s.selected.size === 0 && !((s.customEl && s.customEl.value || "").trim()));
+      if (isEmpty) {
+        if (warnEl) warnEl.textContent = "Pick an option or type an answer.";
+        if (states[0] && states[0].customEl) states[0].customEl.focus();
+        return;
+      }
+      if (warnEl) warnEl.textContent = "";
+      // Freeze the inputs: this card was built interactive, so unlike a card restored from history
+      // its textareas are still enabled and could be typed into after the answer went out.
+      states.forEach((s) => { if (s.customEl) s.customEl.disabled = true; });
       const answers = states.map((s) => {
         const custom = (s.customEl && s.customEl.value || "").trim();
         return {
@@ -4251,6 +4283,10 @@
         handle({ type: "question.request", requestId: askId, questions: [
           { question: "Which test framework should the fixtures use?", header: "Framework", multiSelect: false,
             options: [ { label: "xUnit", description: "Already referenced by the test project." }, { label: "NUnit", description: "Adds a new dependency." } ] },
+          // second question, multiSelect — exercises the multi path (toggle on/off, several picks in
+          // the summary) next to the single-select one in the same card
+          { question: "Which suites should run in CI?", header: "Suites", multiSelect: true,
+            options: [ { label: "Unit", description: "Fast, runs on every push." }, { label: "Integration", description: "Needs a CLI on the runner." }, { label: "UI smoke" } ] },
         ] });
       }, delay + 690);
       sched(() => { if (stopped) return; handle({ type: "tool.use", id: askId, name: "AskUserQuestion", status: "running", input: { questions: [{ question: "Which test framework should the fixtures use?" }] } }); }, delay + 740);
