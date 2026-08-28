@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 
 namespace CodeAstrogator.Options
 {
@@ -111,6 +112,67 @@ namespace CodeAstrogator.Options
         /// <summary>Auto-delete pasted-image files (…\CodeAstrogator\pasted) older than this many days.
         /// Runs on VS startup and whenever the settings are saved. <c>0</c> = keep forever. Default 30.</summary>
         public int PastedRetentionDays { get; set; } = 30;
+
+        /// <summary>When on, a file snapshot ("checkpoint") is taken before every prompt and at the end
+        /// of every turn, so any message can be rewound to — Claude's edits <em>and</em> whatever its bash
+        /// commands and scripts changed. Snapshots live in a shadow git repo outside the project (see
+        /// <c>Core/GitCheckpointService</c>); the user's own repo is never touched. Requires git on PATH.
+        /// On by default (like the Claude desktop app); asked in the first-run consent popup and
+        /// toggleable in the gear popover.</summary>
+        public bool CheckpointsEnabled { get; set; } = true;
+
+        /// <summary>Whether the user has answered the checkpoint question (consent popup or settings
+        /// window). While false — as for the notice/update opt-ins — the consent popup is shown.</summary>
+        public bool CheckpointsDecided { get; set; } = false;
+
+        /// <summary>Auto-delete file checkpoints older than this many days (swept on VS startup and on
+        /// every settings save). <c>0</c> = keep forever. Default 30 — same window the CLI uses, and
+        /// deliberately shorter than <see cref="HistoryRetentionDays"/>: snapshots cost disk space,
+        /// chat history barely any, so a checkpoint may expire before the chat it belongs to.</summary>
+        public int CheckpointRetentionDays { get; set; } = 30;
+
+        /// <summary>Largest file (MB) a checkpoint snapshot includes. Big binaries are what makes a
+        /// snapshot expensive, and a rewind is meant for source recovery. <c>0</c> = no limit.
+        /// Default 10.</summary>
+        public int CheckpointMaxFileMb { get; set; } = 10;
+        public const int MaxCheckpointFileMb = 4096;
+
+        /// <summary>How <see cref="CheckpointExtensions"/> is read: <c>false</c> (default) = blacklist,
+        /// those extensions are skipped; <c>true</c> = whitelist, only those are snapshotted.</summary>
+        public bool CheckpointExtensionsAreWhitelist { get; set; } = false;
+
+        /// <summary>File extensions for the checkpoint filter (normalized to lowercase with a leading
+        /// dot). Persisted as a JSON array, like <see cref="AutoApprovePatterns"/>.</summary>
+        public List<string> CheckpointExtensions { get; set; } = new List<string>(DefaultCheckpointExtensions);
+
+        /// <summary>Default blacklist: build output, binaries, archives, media, captures and databases —
+        /// the things that blow up a snapshot without ever being worth rewinding.</summary>
+        public static readonly string[] DefaultCheckpointExtensions =
+        {
+            ".exe", ".dll", ".lib", ".so", ".bin", ".dat", ".zip", ".7z", ".rar", ".gz", ".tar", ".iso", ".msi",
+            ".cache", ".apk", ".aab", ".pak", ".pdb", ".dmp", ".log", ".trace"
+        };
+
+        /// <summary>Clamps the file-size limit to a sane range (negative → 0 = no limit).</summary>
+        public static int ClampCheckpointMaxFileMb(int mb) =>
+            mb < 0 ? 0 : mb > MaxCheckpointFileMb ? MaxCheckpointFileMb : mb;
+
+        /// <summary>Normalizes user input ("EXE", " .Bin ") to lowercase extensions with a leading dot.</summary>
+        public static List<string> NormalizeExtensions(IEnumerable<string>? items)
+        {
+            var result = new List<string>();
+            foreach (var raw in items ?? Enumerable.Empty<string>())
+            {
+                var e = (raw ?? "").Trim().Trim(',', ';').ToLowerInvariant();
+                if (e.Length == 0)
+                    continue;
+                if (e[0] != '.')
+                    e = "." + e;
+                if (e.Length > 1 && !result.Contains(e))
+                    result.Add(e);
+            }
+            return result;
+        }
 
         /// <summary>Retention-days presets offered in the settings window (0 = "Never").</summary>
         public static readonly int[] RetentionDayChoices = { 0, 7, 14, 30, 60, 90, 180, 365 };

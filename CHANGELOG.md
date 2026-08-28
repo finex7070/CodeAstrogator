@@ -4,6 +4,26 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.7.0] – 2026-08-28
+
+### Added
+- **Checkpoints: rewind any message.** Before every prompt — and again at the end of every turn — Code Astrogator takes a snapshot of your workspace files. Hover any message you sent and a small ↩ button appears; it opens a dialog listing exactly what a rewind would change, with `+12 −3` line counts and a checkbox per file. From there: **Rewind selected** puts just the ticked files back and leaves the conversation alone, **Rewind all** restores every listed file and rewinds the conversation to that message as well. Either way the chat gets a line summarising what happened; click its ▸ to see exactly which files were restored, removed or skipped, with the same line counts. A rewind can itself be undone — the state you rewound away from is snapshotted first, so rewinding to that snapshot brings it back.
+- **Discarded turns stay readable, then get out of the way.** After a "Rewind all", everything that came after the message is kept in the chat but shown as discarded: dimmed and struck through (code and diffs stay legible). The prompt of that message goes back into the composer so you can edit and re-send it. As soon as you send the next prompt, the discarded turns fold into a single collapsed line ("3 discarded turns (rewound)") that you can click open again — and it stays that way across reloads.
+- **Changes made by bash commands and scripts are covered too.** Because a snapshot is taken before *and* after each turn, "what Claude changed" is a comparison of the two — so a `sed -i`, an `rm`, a `python fix_all.py` or a formatter that ran as a side effect are all included. The equivalent feature in the Claude desktop app and the VS Code extension can only track Claude's own edit tools and explicitly cannot undo bash changes. Edits *you* make between turns are not preselected, but one switch in the dialog widens the list to every difference in the workspace.
+- **Your own git repository is never touched.** Snapshots live in a separate repository under `%LocalAppData%\CodeAstrogator\Checkpoints`, outside your project. `git status` in your project is unchanged, nothing is ever committed to your branches, and your `.gitignore` is respected so build output stays out of the snapshots. The feature needs Git for Windows on PATH; without it, it stays off and says so.
+- **You decide what goes into a snapshot.** Big binaries are what makes checkpoints expensive — in a real Unity project five snapshots had grown to 2.1 GB, almost entirely one 1.1 GB profiler capture plus a few hundred megabytes of committed DLLs. Settings → "Checkpoints (rewind)" therefore has a **size limit** (default 10 MB, 0 for no limit) and an **extension filter**: by default a blacklist pre-filled with the usual suspects (`.exe`, `.dll`, `.pdb`, `.zip`, `.iso`, `.msi`, `.apk`, `.dmp`, `.log`, …), which you can extend — or flip into a whitelist, so that only the extensions you list are snapshotted at all. Files excluded this way are never restored by a rewind, and a file that drops below the size limit is picked up again automatically. On top of that, snapshot objects are now packed as they accumulate instead of being left as tens of thousands of individual files.
+- **Configurable retention.** Settings → "Checkpoints (rewind)" lets you keep checkpoints for 7 to 365 days or forever ("Never"), shows how much disk they use, and offers a "delete all checkpoints now" button. The default is 30 days — deliberately shorter than the chat history, since snapshots cost disk space and chats barely any. Expired checkpoints are recognised on load, and their rewind button is greyed out with a note instead of failing.
+- **On by default, asked once.** The first-run dialog that asks about announcements and update notifications now has a third checkbox for checkpoints, pre-ticked. You can turn them off again in the settings window at any time.
+- **After a rewind, Claude is told about it.** The next prompt carries a note saying which point the files were rolled back to, how many files were written back, and that the later turns are to be treated as discarded. Without it Claude would keep reasoning about file contents that no longer exist. Note that the conversation rewind marks those turns rather than deleting them: they still sit in the CLI session's context, so they still cost tokens.
+
+### Changed
+- **The settings window is now two columns.** With the checkpoint options added, a single column had grown taller than most screens. The window is wider instead, with the sections split left and right; the buttons stay at the bottom across both.
+
+### Fixed
+- **"Review all edits at end of turn" no longer switches itself off.** The setting is toggled in the Model·Mode popover, but saving the settings window rebuilt the option set without carrying it over, so every Save silently reset it to off.
+
+---
+
 ## [0.6.8] – 2026-08-26
 
 ### Changed

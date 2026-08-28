@@ -76,15 +76,17 @@ namespace CodeAstrogator
             RunRetentionCleanup(); // prune old history / pasted files per the retention settings
         }
 
-        /// <summary>Kicks off the best-effort on-disk cleanup (old chat history + pasted images) on a
-        /// background thread, using the current retention settings. No-op when both are "keep forever".</summary>
+        /// <summary>Kicks off the best-effort on-disk cleanup (old chat history, pasted images and file
+        /// checkpoints) on a background thread, using the current retention settings. No-op when all of
+        /// them are "keep forever".</summary>
         private void RunRetentionCleanup()
         {
             var historyDays = _options.HistoryRetentionDays;
             var pastedDays = _options.PastedRetentionDays;
-            if (historyDays <= 0 && pastedDays <= 0)
+            var checkpointDays = _options.CheckpointRetentionDays;
+            if (historyDays <= 0 && pastedDays <= 0 && checkpointDays <= 0)
                 return;
-            _ = Task.Run(() => RetentionService.Cleanup(historyDays, pastedDays));
+            _ = Task.Run(() => RetentionService.Cleanup(historyDays, pastedDays, checkpointDays));
         }
 
         private void ShowChatWindow(object sender, EventArgs e)
@@ -234,6 +236,12 @@ namespace CodeAstrogator
             to.ReviewEditsAtTurnEnd = from.ReviewEditsAtTurnEnd;
             to.HistoryRetentionDays = AstrogatorOptions.ClampRetentionDays(from.HistoryRetentionDays);
             to.PastedRetentionDays = AstrogatorOptions.ClampRetentionDays(from.PastedRetentionDays);
+            to.CheckpointsEnabled = from.CheckpointsEnabled;
+            to.CheckpointsDecided = from.CheckpointsDecided;
+            to.CheckpointRetentionDays = AstrogatorOptions.ClampRetentionDays(from.CheckpointRetentionDays);
+            to.CheckpointMaxFileMb = AstrogatorOptions.ClampCheckpointMaxFileMb(from.CheckpointMaxFileMb);
+            to.CheckpointExtensionsAreWhitelist = from.CheckpointExtensionsAreWhitelist;
+            to.CheckpointExtensions = AstrogatorOptions.NormalizeExtensions(from.CheckpointExtensions);
         }
 
         private void RecordSettingsError(string message)

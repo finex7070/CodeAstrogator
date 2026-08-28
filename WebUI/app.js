@@ -46,6 +46,9 @@
     pendingPermissions: new Set(), // requestIds of open permission/question cards (parallel tool use)
     tasks: [],               // task tracker: [{id, subject, activeForm, status}] from Task* tool calls
     tasksDismissed: false,   // user closed the tasks banner (re-shown when a NEW task is created)
+    // File checkpoints (rewind): {enabled, gitAvailable, decided, retentionDays} from session.init.
+    checkpoints: { enabled: false, gitAvailable: false, decided: true, retentionDays: 30 },
+    expiredCheckpoints: new Set(), // shas the host reported as pruned → button greyed out
   };
 
   // Ordered strongest → lightest: Fable 5 (most capable) first, then the Opus tier, Sonnet, Haiku.
@@ -409,7 +412,9 @@
     if (bannersEvaluated) return;
     bannersEvaluated = true;
     appVersion = s.appVersion || appVersion;
-    if (!s.noticeDecided || !s.updateDecided) {
+    // The same popup also carries the checkpoint opt-in, so an undecided checkpoint setting opens it
+    // as well (existing installs therefore see the dialog once more).
+    if (!s.noticeDecided || !s.updateDecided || !s.checkpointsDecided) {
       openConsentPopup(s);
       return;
     }
@@ -417,19 +422,20 @@
     if (s.updateEnabled) loadUpdate();
   }
 
-  // First-run consent popup — asks about announcements AND update notifications in one dialog.
+  // First-run consent popup — announcements, update notifications AND file checkpoints in one dialog.
   function openConsentPopup(s) {
     if (!overlayLayer) return;
     const backdrop = el("div", "modal-backdrop");
     const modal = el("div", "modal");
     modal.setAttribute("role", "dialog");
-    modal.setAttribute("aria-label", "Notifications");
-    modal.appendChild(el("div", "modal-title", "Notifications"));
+    modal.setAttribute("aria-label", "Getting started");
+    modal.appendChild(el("div", "modal-title", "Getting started"));
 
     const body = el("div", "modal-body");
     body.textContent =
-      "Code Astrogator can check the project's GitHub when this window opens. Choose what "
-      + "you'd like — this makes a small network request and can be changed anytime in the settings.";
+      "Choose what Code Astrogator should do for you. The first two check the project's GitHub when "
+      + "this window opens (a small network request); the third is local only. All of them can be "
+      + "changed anytime in the settings.";
     modal.appendChild(body);
 
     // Pre-fill: reflect a previously-decided choice, otherwise suggest "on".
@@ -440,11 +446,32 @@
     modal.appendChild(ann.row);
     modal.appendChild(upd.row);
 
+    // Checkpoints: needs git, so the row is disabled (and forced off) when the host reports none.
+    const cpAvailable = !!s.checkpointsGitAvailable;
+    const cp = consentRow(
+      "Create a file checkpoint before each prompt, so any message can be rewound from its hover "
+      + "menu (local only, no network; kept for " + (s.checkpointsRetentionDays || 30) + " days)",
+      cpAvailable && (s.checkpointsDecided ? !!s.checkpointsEnabled : true));
+    if (!cpAvailable) {
+      cp.input.checked = false;
+      cp.input.disabled = true;
+      cp.row.title = "Git was not found on PATH — checkpoints are unavailable.";
+      cp.row.classList.add("consent-row-off");
+    }
+    modal.appendChild(cp.row);
+
     const actions = el("div", "modal-actions");
     const save = el("button", "modal-btn primary", "Save");
     save.addEventListener("click", () => {
       const noticeEnabled = ann.input.checked, updateEnabled = upd.input.checked;
-      post("consent.set", { noticeEnabled: noticeEnabled, updateEnabled: updateEnabled });
+      const checkpointsEnabled = cp.input.checked;
+      post("consent.set", {
+        noticeEnabled: noticeEnabled,
+        updateEnabled: updateEnabled,
+        checkpointsEnabled: checkpointsEnabled,
+      });
+      state.checkpoints.enabled = checkpointsEnabled;
+      state.checkpoints.decided = true;
       if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
       if (noticeEnabled) loadNotice();
       if (updateEnabled) loadUpdate();
@@ -546,6 +573,12 @@
       case "activeFile": return applyActiveFile(m);
       case "composer.append": return appendToComposer(m.text);
       case "banner.settings": return applyBannerSettings(m);
+      case "checkpoint.settings": return applyCheckpointSettings(m);
+      case "checkpoint.created": return checkpointCreated(m);
+      case "checkpoint.expired": return checkpointExpired(m.shas || []);
+      case "checkpoint.preview": return checkpointPreview(m);
+      case "checkpoint.restored": return checkpointRestored(m);
+      case "rewind.note": return appendNode(buildRewindNote(m.text || "", m.files || []));
       case "error": return errorMessage(m.message);
       case "notify": return showNotify(m);
     }
@@ -669,6 +702,10 @@
     state.activeAssistant = null;
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
     resetTasks(); // new session → clear the tasks banner
+    if (m.checkpoints) state.checkpoints = m.checkpoints;
+    refreshRewindButtons();
+    state.expiredCheckpoints.clear();
+    lastUserRow = null;
     transcriptInner.innerHTML = "";
     curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
@@ -684,6 +721,10 @@
       noticeDecided: !!m.noticeFetchDecided,
       updateEnabled: !!m.updateCheckEnabled,
       updateDecided: !!m.updateCheckDecided,
+      checkpointsEnabled: !!state.checkpoints.enabled,
+      checkpointsDecided: !!state.checkpoints.decided,
+      checkpointsGitAvailable: !!state.checkpoints.gitAvailable,
+      checkpointsRetentionDays: state.checkpoints.retentionDays,
       appVersion: m.appVersion || "",
     });
   }
@@ -695,6 +736,8 @@
     state.activeAssistant = null;
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
     resetTasks(); // rebuilt below from the loaded tool messages
+    state.expiredCheckpoints.clear(); // host re-reports pruned snapshots after this load
+    lastUserRow = null;
     transcriptInner.innerHTML = "";
     curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
@@ -704,8 +747,382 @@
       renderEmptyOrSignin();
     } else {
       msgs.forEach(renderHistoricMessage);
+      collapseRewoundRuns(true); // discarded turns the conversation already moved past
     }
     scrollToBottom(true);
+  }
+
+  // -------------------------------------------------------------------------
+  // File checkpoints / rewind
+  // A snapshot is taken host-side before each prompt and at the end of each turn. Hovering a user
+  // message reveals a rewind button; its menu offers the same three scopes as the Claude desktop
+  // app (code / conversation / both), with a diff preview and per-file selection first.
+  // -------------------------------------------------------------------------
+  let lastUserRow = null;   // most recently rendered user bubble — receives checkpoint.created
+  let cpPreview = null;     // open rewind modal: {sha, scope, backdrop, listEl, files, selected}
+
+  function applyCheckpointSettings(m) {
+    state.checkpoints = {
+      enabled: !!m.enabled,
+      gitAvailable: !!m.gitAvailable,
+      decided: m.decided !== undefined ? !!m.decided : state.checkpoints.decided,
+      retentionDays: m.retentionDays !== undefined ? m.retentionDays : state.checkpoints.retentionDays,
+    };
+    refreshRewindButtons();
+  }
+
+  /** Turning checkpoints off hides every rewind button; existing snapshots stay usable when back on. */
+  function refreshRewindButtons() {
+    root.classList.toggle("no-checkpoints", !state.checkpoints.enabled);
+  }
+
+  /** Adds (or updates) the hover rewind button on a user bubble. */
+  function attachRewindButton(row, sha) {
+    if (!row || !sha) return;
+    row.dataset.checkpoint = sha;
+    const bubble = row.querySelector(".msg-body");
+    if (!bubble || bubble.querySelector(".msg-rewind-btn")) {
+      markExpiredRewind(row);
+      return;
+    }
+    const btn = el("button", "msg-rewind-btn");
+    btn.type = "button";
+    btn.title = "Rewind to here";
+    btn.setAttribute("aria-label", "Rewind to this message");
+    btn.appendChild(iconRewind());
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      openRewindModal(sha, row);
+    });
+    bubble.appendChild(btn);
+    markExpiredRewind(row);
+  }
+
+  function markExpiredRewind(row) {
+    const sha = row && row.dataset ? row.dataset.checkpoint : "";
+    if (!sha || !state.expiredCheckpoints.has(sha)) return;
+    const btn = row.querySelector(".msg-rewind-btn");
+    if (!btn) return;
+    btn.disabled = true;
+    btn.classList.add("expired");
+    btn.title = "Checkpoint expired (retention: "
+      + (state.checkpoints.retentionDays ? state.checkpoints.retentionDays + " days" : "off") + ")";
+  }
+
+  function checkpointCreated(m) {
+    if (!m.sha || !lastUserRow) return;
+    if (m.messageId) lastUserRow.dataset.msgId = m.messageId;
+    attachRewindButton(lastUserRow, m.sha);
+  }
+
+  function checkpointExpired(shas) {
+    shas.forEach((s) => state.expiredCheckpoints.add(s));
+    Array.prototype.forEach.call(
+      transcriptInner.querySelectorAll(".msg-user[data-checkpoint]"), markExpiredRewind);
+  }
+
+  /** Rewind dialog: asks the host what a rewind would change, then offers the three scopes. */
+  function openRewindModal(sha, row) {
+    closeAllOverlays();
+    const backdrop = el("div", "modal-backdrop");
+    const modal = el("div", "modal cp-modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-label", "Rewind to this point");
+    modal.appendChild(el("div", "modal-title", "Rewind to this point"));
+    const body = el("div", "modal-body", "Checking what changed since this message…");
+    modal.appendChild(body);
+    const list = el("div", "cp-files");
+    modal.appendChild(list);
+    const actions = el("div", "modal-actions cp-actions");
+    modal.appendChild(actions);
+
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeModal(); });
+    modal.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closeModal(); } });
+    overlayLayer.appendChild(backdrop);
+    openModalEl = backdrop;
+
+    cpPreview = {
+      sha: sha, scope: "turns", row: row, backdrop: backdrop,
+      bodyEl: body, listEl: list, actionsEl: actions, files: [], selected: null,
+    };
+    post("checkpoint.previewRequest", { sha: sha, scope: "turns" });
+  }
+
+  function checkpointPreview(m) {
+    if (!cpPreview || cpPreview.sha !== m.sha) return;
+    if (!cpPreview.backdrop.parentNode) { cpPreview = null; return; } // dialog was closed meanwhile
+    cpPreview.files = m.files || [];
+    cpPreview.scope = m.scope === "all" ? "all" : "turns";
+    cpPreview.selected = new Set(); // nothing preselected — "Rewind all" doesn't need the ticks
+    renderRewindModal(m);
+  }
+
+  function renderRewindModal(m) {
+    const p = cpPreview;
+    const files = p.files;
+    const showingAll = p.scope === "all";
+    p.bodyEl.innerHTML = "";
+    p.bodyEl.appendChild(el("div", null, files.length === 0
+      ? (showingAll
+        ? "Nothing in the workspace differs from this checkpoint."
+        : "Claude changed no files after this message.")
+      : (showingAll
+        ? "Every workspace file that differs from this checkpoint — including your own manual edits."
+        : "Files Claude changed in the turns after this message (bash commands and scripts included).")));
+    if (m && m.postMissing) {
+      p.bodyEl.appendChild(el("div", "cp-warn",
+        "A turn ended unexpectedly, so this list can also contain edits you made yourself."));
+    }
+    if (m && m.truncated) {
+      p.bodyEl.appendChild(el("div", "cp-warn", "Only the first 400 files are listed."));
+    }
+
+    // File list with per-file checkboxes (all preselected).
+    p.listEl.innerHTML = "";
+    files.forEach((f) => {
+      const rowEl = el("div", "cp-file");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = p.selected.has(f.path);
+      function sync() {
+        if (cb.checked) p.selected.add(f.path);
+        else p.selected.delete(f.path);
+        updateRewindActions();
+      }
+      cb.addEventListener("click", (e) => e.stopPropagation());
+      cb.addEventListener("change", sync);
+      // Clicking anywhere in the row toggles it (the "open in VS" button stops propagation itself).
+      rowEl.addEventListener("click", () => { cb.checked = !cb.checked; sync(); });
+      rowEl.appendChild(cb);
+      const nameEl = el("span", "cp-file-name", f.path);
+      nameEl.title = f.path;
+      rowEl.appendChild(nameEl);
+      rowEl.appendChild(el("span", "cp-file-status", f.status === "A" ? "new" : f.status === "D" ? "deleted" : ""));
+      if (f.binary) {
+        rowEl.appendChild(el("span", "cp-file-bin", "binary"));
+      } else {
+        rowEl.appendChild(el("span", "cp-file-add", "+" + (f.added || 0)));
+        rowEl.appendChild(el("span", "cp-file-del", "−" + (f.removed || 0)));
+      }
+      const openBtn = openFileButton(joinCwd(f.path));
+      if (openBtn) rowEl.appendChild(openBtn);
+      p.listEl.appendChild(rowEl);
+    });
+
+    // Scope switch: the default list is what Claude touched; "all" also covers manual edits.
+    const scopeRow = el("label", "consent-row cp-scope");
+    const scopeInput = document.createElement("input");
+    scopeInput.type = "checkbox";
+    scopeInput.checked = showingAll;
+    scopeInput.addEventListener("change", () => {
+      p.scope = scopeInput.checked ? "all" : "turns";
+      p.bodyEl.textContent = "Checking…";
+      p.listEl.innerHTML = "";
+      post("checkpoint.previewRequest", { sha: p.sha, scope: p.scope });
+    });
+    scopeRow.appendChild(scopeInput);
+    scopeRow.appendChild(el("span", "consent-label", "Include all workspace changes"));
+    p.listEl.appendChild(scopeRow);
+
+    // Three actions: close, files-only (chat untouched), or everything incl. the conversation.
+    p.actionsEl.innerHTML = "";
+    const cancel = el("button", "modal-btn", "Cancel");
+    cancel.addEventListener("click", closeModal);
+    p.actionsEl.appendChild(cancel);
+
+    const selBtn = el("button", "modal-btn", "Rewind selected");
+    selBtn.addEventListener("click", () => sendRewind("code"));
+    p.actionsEl.appendChild(selBtn);
+    p.selectedButton = selBtn;
+    updateRewindActions();
+
+    const allBtn = el("button", "modal-btn primary", "Rewind all");
+    allBtn.title = files.length === 0
+      ? "Rewind the conversation to this message (there are no file changes to undo)."
+      : "Restore every file listed above and rewind the conversation to this message.";
+    allBtn.addEventListener("click", () => sendRewind("both"));
+    p.actionsEl.appendChild(allBtn);
+    allBtn.focus();
+  }
+
+  /** "Rewind selected" needs at least one ticked file — everything else stays available. */
+  function updateRewindActions() {
+    const p = cpPreview;
+    if (!p || !p.selectedButton) return;
+    const none = !p.selected || p.selected.size === 0;
+    p.selectedButton.disabled = none;
+    p.selectedButton.title = none
+      ? (p.files.length === 0 ? "There are no file changes to undo." : "Tick at least one file.")
+      : "Restore only the ticked files. The conversation stays exactly as it is.";
+  }
+
+  /**
+   * mode "code" = only the ticked files, conversation untouched.
+   * mode "both" = every file the preview lists (so the "include all workspace changes" switch
+   * decides how wide that is) plus the conversation.
+   */
+  function sendRewind(mode) {
+    const p = cpPreview;
+    if (!p) return;
+    const paths = mode === "both"
+      ? p.files.map((f) => f.path)
+      : (p.selected ? Array.from(p.selected) : []);
+    post("checkpoint.restore", {
+      sha: p.sha,
+      scope: mode,
+      paths: paths,
+      // With the wider scope every difference is meant, so the host can skip the path filter.
+      allFiles: mode === "both" && p.scope === "all" && paths.length > 0,
+    });
+    closeModal();
+  }
+
+  function checkpointRestored(m) {
+    if (!m.ok) return; // the host already showed the failure as a banner
+    if (m.scope === "both" || m.scope === "conversation") applyConversationRewind(m.sha);
+  }
+
+  /**
+   * Greys out the rewound turn and everything after it, and puts its prompt back into the composer.
+   * The checkpoint on a message is the state BEFORE that turn ran, so the message itself counts as
+   * discarded too — that is why its prompt goes back into the composer to be re-sent.
+   */
+  function applyConversationRewind(sha) {
+    // Flatten any existing collapse first, so rewinding to a message inside one behaves the same as
+    // rewinding to a top-level one; the runs are re-wrapped with the next prompt.
+    unwrapRewoundGroups();
+    const target = transcriptInner.querySelector('.msg-user[data-checkpoint="' + sha + '"]');
+    if (!target) return;
+    let seen = false;
+    Array.prototype.forEach.call(transcriptInner.children, (node) => {
+      if (node === target) seen = true;
+      if (seen && node !== workingEl) node.classList.add("rewound");
+    });
+    if (!target.previousSibling || !target.previousSibling.classList
+      || !target.previousSibling.classList.contains("cp-rewind-marker")) {
+      const marker = el("div", "cp-rewind-marker", "Rewound to here — the turns below are discarded");
+      transcriptInner.insertBefore(marker, target);
+    }
+    const prompt = target.dataset.prompt || "";
+    if (prompt) {
+      input.value = prompt;
+      autoGrow();
+      updateSendEnabled();
+      input.focus();
+    }
+  }
+
+  /**
+   * Folds each run of discarded (rewound) messages into one collapsed block. Called when the next
+   * prompt is sent — right after the rewind the block stays open so you can see what was dropped,
+   * and once the conversation moves on it gets out of the way. `onlyIfFollowed` (transcript load)
+   * leaves a run that nothing follows expanded, so a reload right after a rewind looks the same.
+   */
+  function collapseRewoundRuns(onlyIfFollowed) {
+    const nodes = Array.prototype.slice.call(transcriptInner.children);
+    let i = 0;
+    while (i < nodes.length) {
+      const node = nodes[i];
+      if (!node.classList || !node.classList.contains("rewound")
+        || node.classList.contains("rewound-group")) {
+        i++;
+        continue;
+      }
+      const run = [];
+      while (i < nodes.length && nodes[i].classList && nodes[i].classList.contains("rewound")) {
+        run.push(nodes[i]);
+        i++;
+      }
+      if (onlyIfFollowed && i >= nodes.length)
+        break; // nothing after this run yet → keep it open
+      wrapRewoundRun(run);
+    }
+  }
+
+  /** Moves every collapsed run's nodes back to the top level and drops the wrappers. */
+  function unwrapRewoundGroups() {
+    Array.prototype.forEach.call(transcriptInner.querySelectorAll(".rewound-group"), (group) => {
+      const body = group.querySelector(".rewound-body");
+      if (body) {
+        while (body.firstChild) transcriptInner.insertBefore(body.firstChild, group);
+      }
+      if (group.parentNode) group.parentNode.removeChild(group);
+    });
+  }
+
+  function wrapRewoundRun(run) {
+    if (!run.length) return;
+    const first = run[0];
+    // The "Rewound to here" marker directly above the run becomes the collapse header.
+    const marker = first.previousSibling;
+    const group = el("div", "rewound-group collapsed");
+    const turns = run.filter((n) => n.classList.contains("msg-user")).length;
+    const toggle = el("button", "rewound-toggle");
+    toggle.type = "button";
+    toggle.appendChild(el("span", "rewound-chev", "▸"));
+    toggle.appendChild(el("span", "rewound-toggle-label",
+      turns === 1 ? "1 discarded turn (rewound)" : turns + " discarded turns (rewound)"));
+    toggle.addEventListener("click", () => group.classList.toggle("collapsed"));
+    const body = el("div", "rewound-body");
+
+    transcriptInner.insertBefore(group, first);
+    group.appendChild(toggle);
+    group.appendChild(body);
+    run.forEach((n) => body.appendChild(n));
+    if (marker && marker.classList && marker.classList.contains("cp-rewind-marker"))
+      marker.parentNode.removeChild(marker);
+  }
+
+  /**
+   * The "Rewound to checkpoint …" line in the transcript. Reads like a system note, but a chevron
+   * reveals which files the rewind touched — with the same `+n/−m` figures the dialog showed.
+   */
+  function buildRewindNote(text, files) {
+    const wrap = el("div", "sys-note rewind-note collapsed");
+    if (!files.length) {
+      wrap.appendChild(el("span", "rewind-note-text", text));
+      return wrap;
+    }
+    const head = el("button", "rewind-note-head");
+    head.type = "button";
+    head.appendChild(el("span", "rewound-chev", "▸"));
+    head.appendChild(el("span", "rewind-note-text", text));
+    head.addEventListener("click", () => wrap.classList.toggle("collapsed"));
+    wrap.appendChild(head);
+
+    const list = el("div", "rewind-note-files");
+    files.forEach((f) => {
+      const row = el("div", "cp-file cp-file-static");
+      const nameEl = el("span", "cp-file-name", f.path);
+      nameEl.title = f.path;
+      row.appendChild(nameEl);
+      row.appendChild(el("span", "cp-file-status",
+        f.action === "skipped" ? "skipped" : f.action === "deleted" ? "removed" : "restored"));
+      if (f.action !== "skipped") {
+        if (f.binary) {
+          row.appendChild(el("span", "cp-file-bin", "binary"));
+        } else {
+          row.appendChild(el("span", "cp-file-add", "+" + (f.added || 0)));
+          row.appendChild(el("span", "cp-file-del", "−" + (f.removed || 0)));
+        }
+      }
+      const openBtn = openFileButton(joinCwd(f.path));
+      if (openBtn) row.appendChild(openBtn);
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  /** Absolute path for a repo-relative checkpoint path (so "open in VS" works). */
+  function joinCwd(rel) {
+    if (!rel) return "";
+    if (!state.cwd) return rel;
+    const sep = state.cwd.indexOf("/") >= 0 && state.cwd.indexOf("\\") < 0 ? "/" : "\\";
+    const normalized = sep === "\\" ? String(rel).replace(/\//g, "\\") : String(rel);
+    return state.cwd.replace(/[\\/]+$/, "") + sep + normalized;
   }
 
   // -------------------------------------------------------------------------
@@ -1096,12 +1513,18 @@
   // -------------------------------------------------------------------------
   // User message
   // -------------------------------------------------------------------------
-  function renderUserMessage(text, attachments) {
+  function renderUserMessage(text, attachments, meta) {
     const { row, body } = makeMsgRow("user", "›");
     body.classList.add("md");
     body.appendChild(renderMarkdown(text));
     appendMsgAttachments(body, attachments);
+    // Kept verbatim so a conversation rewind can put this prompt back into the composer.
+    row.dataset.prompt = text || "";
+    if (meta && meta.rewound) row.classList.add("rewound");
+    lastUserRow = row;                                  // receives checkpoint.created
+    if (meta && meta.checkpointSha) attachRewindButton(row, meta.checkpointSha);
     appendNode(row);
+    return row;
   }
 
   // Attachment previews: an attachment whose file still exists AND is an image or text file gets an
@@ -2305,12 +2728,29 @@
   // Historic messages (transcript.load)
   // -------------------------------------------------------------------------
   function renderHistoricMessage(msg) {
+    // Everything this message renders is greyed out when it was rewound past (host sets `rewound`).
+    const before = transcriptInner.lastChild;
+    renderHistoricMessageInner(msg);
+    if (!msg.rewound) return;
+    let node = before ? before.nextSibling : transcriptInner.firstChild;
+    while (node) {
+      if (node.classList) node.classList.add("rewound");
+      node = node.nextSibling;
+    }
+  }
+
+  function renderHistoricMessageInner(msg) {
     switch (msg.role) {
       case "user": {
         const { row, body } = makeMsgRow("user", "›");
         body.classList.add("md");
         body.appendChild(renderMarkdown(msg.text || ""));
         appendMsgAttachments(body, msg.attachments);
+        row.dataset.prompt = msg.text || "";
+        if (msg.id) row.dataset.msgId = msg.id;
+        if (msg.rewound) row.classList.add("rewound");
+        lastUserRow = row;
+        if (msg.checkpointSha) attachRewindButton(row, msg.checkpointSha);
         transcriptInner.appendChild(row);
         break;
       }
@@ -2384,6 +2824,10 @@
       }
       case "system": {
         transcriptInner.appendChild(el("div", "sys-note", msg.text || ""));
+        break;
+      }
+      case "rewind": {
+        transcriptInner.appendChild(buildRewindNote(msg.text || "", msg.files || []));
         break;
       }
       default: {
@@ -2696,6 +3140,8 @@
   function iconTrash() { return svg('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/>', { width: 14, height: 14, "stroke-width": 1.8 }); }
   // two offset sheets — the conventional "copy" glyph
   function iconCopy() { return svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M14 5.5A1.5 1.5 0 0012.5 4H6a2 2 0 00-2 2v6.5A1.5 1.5 0 005.5 14"/>', { width: 13, height: 13 }); }
+  // counter-clockwise arrow — "rewind to here"
+  function iconRewind() { return svg('<path d="M4 5v6h6"/><path d="M4.5 11a8 8 0 1 1 2.3 7"/>', { width: 13, height: 13 }); }
   function toolIcon(name) {
     // MCP tools (mcp__server__Tool) get one consistent "plug" icon — the substring heuristic
     // below would otherwise misclassify them by their long names (e.g. "...ManageEditor" → edit).
@@ -2793,6 +3239,7 @@
 
   function sendPrompt() {
     if (!canSend()) return;
+    collapseRewoundRuns(false); // the conversation moves on → fold away what a rewind discarded
     const text = input.value;
     const attachments = state.attachments.slice();
     // also surface the auto-attached active editor file (host appends it as an @-reference),
@@ -3574,6 +4021,9 @@
     pop.appendChild(el("div", "appearance-title appearance-title-2", "Accent color"));
     pop.appendChild(buildAccentPicker());
 
+    // NOTE: no checkpoint toggle here — checkpoints (on/off, retention, disk usage) live in the
+    // settings window under "Checkpoints (rewind)"; a change there arrives as checkpoint.settings.
+
     // Footer: opens the host-side settings window (all options) via options.open
     pop.appendChild(el("div", "appearance-divider"));
     const optBtn = el("button", "menu-item appearance-options-link", "Advanced options…");
@@ -3833,21 +4283,22 @@
     return svg('<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>', { width: 14, height: 14, "stroke-width": 1.6 });
   }
 
+  // A small "?" badge that shows an option's description as a hover tooltip, so a popover stays
+  // compact instead of carrying a full description line under every option. Module scope — the
+  // Model·Mode popover and the gear popover both use it.
+  function helpBadge(desc) {
+    const b = el("span", "mm-help", "?");
+    b.title = desc;
+    b.setAttribute("aria-label", desc);
+    b.addEventListener("click", (e) => e.stopPropagation()); // clicking the badge must not toggle/select the row
+    return b;
+  }
+
   // -------------------------------------------------------------------------
   // Model·Mode popover
   // -------------------------------------------------------------------------
   modelModeBtn.addEventListener("click", function () {
     const pop = el("div", "popover mm-pop");
-
-    // A small "?" badge that shows an option's description as a hover tooltip, so the popover stays
-    // compact instead of carrying a full description line under every option.
-    function helpBadge(desc) {
-      const b = el("span", "mm-help", "?");
-      b.title = desc;
-      b.setAttribute("aria-label", desc);
-      b.addEventListener("click", (e) => e.stopPropagation()); // clicking the badge must not toggle/select the row
-      return b;
-    }
 
     // Model
     const s1 = el("div", "mm-section");
@@ -4134,6 +4585,37 @@
         case "permission.set": return;
         case "autoAcceptCommands.set": return;
         case "reviewEditsInEditor.set": return;
+        case "checkpoint.previewRequest":
+          // Fake diff so the rewind dialog can be exercised in index.html.
+          return sendIn("checkpoint.preview", {
+            sha: msg.sha,
+            scope: msg.scope,
+            filtered: msg.scope !== "all",
+            postMissing: false,
+            truncated: false,
+            files: msg.scope === "all"
+              ? [{ path: "src/Program.cs", added: 12, removed: 3, status: "M" },
+                 { path: "docs/NOTES.md", added: 4, removed: 0, status: "M" },
+                 { path: "scratch.txt", added: 1, removed: 0, status: "A" }]
+              : [{ path: "src/Program.cs", added: 12, removed: 3, status: "M" },
+                 { path: "src/Generated.cs", added: 40, removed: 0, status: "A" }],
+          }, 250);
+        case "checkpoint.restore": {
+          const restored = (msg.paths || []).map((p, i) => ({
+            path: p, added: 12 - i, removed: 3, status: "M", action: "restored",
+          }));
+          sendIn("checkpoint.restored", {
+            sha: msg.sha, scope: msg.scope, ok: true,
+            restoredCount: restored.length, deletedCount: 0, skipped: [],
+          }, 300);
+          return sendIn("rewind.note", {
+            id: nid("rewind"),
+            text: "(mock) Rewound to checkpoint " + String(msg.sha).slice(0, 8) + " — "
+              + restored.length + " file(s) restored"
+              + (msg.scope === "both" ? "; conversation marked as discarded from this point." : "."),
+            files: restored,
+          }, 320);
+        }
         case "editReview.open":
           // No real editor in the mock — simulate the user accepting the edit inline.
           sendIn("system.note", { id: nid("note"), text: "(mock) Would open the file for inline review" }, 60);
@@ -4262,6 +4744,7 @@
         verbosity: "normal",
         cwd: "C:/Users/Jan/source/repos/CodeAstrogator",
         tokens: 0, limits: mockLimits(12, 34), plan: "Team Plan",
+        checkpoints: { enabled: true, gitAvailable: true, decided: true, retentionDays: 30 },
       }, 20);
       // CLI-reported slash commands (bare names, like system/init.slash_commands)
       sendIn("slash.commands", { commands: [
@@ -4341,6 +4824,13 @@
       stopped = false;
       const aId = nid("a");
       sendIn("status", { state: "working" }, 0);
+      // the host snapshots before the turn → the user bubble gets its rewind button
+      sendIn("checkpoint.created", {
+        messageId: nid("m"),
+        sha: "mock" + Math.random().toString(16).slice(2, 10).padEnd(36, "0"),
+        shortSha: "mock1234",
+        createdAt: new Date().toISOString(),
+      }, 30);
 
       // session-start note, once (host does this on the first system/init)
       if (!announced) {
