@@ -82,7 +82,8 @@ found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout
   `WorkspaceFileLister` (@-mention file list), `IPermissionBridge` + `McpPermissionBridge`
   (in-process MCP server for `--permission-prompt-tool`, Phase 1, see "Permission hook"),
   `CliSessionReader` (CLI session discovery + transcript import, see "Remote Control";
-  remote control itself now lives in `Services/RemoteTerminalLauncher` — interactive console, see "Remote Control").
+  remote control itself now lives in `Services/RemoteTerminalLauncher` — interactive console, see "Remote Control"),
+  `GitCheckpointService` (shadow-repo file checkpoints per turn + rewind, see "File checkpoints / rewind").
 - `Bridge/WebViewBridge.cs` — complete §3 message contract host-side, thread marshaling.
 - `Services/` — `ThemeService` (VS colors → CSS vars), `SessionHistoryStore`
   (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file).
@@ -205,6 +206,18 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **Checkpoints / rewind (web ↔ host, 2026-08-28)** — see section "File checkpoints / rewind".
+  host→web: `session.init.checkpoints { enabled, gitAvailable, decided, retentionDays }`,
+  `checkpoint.settings` (same payload, live update), `checkpoint.created { messageId, sha, shortSha,
+  createdAt }`, `checkpoint.expired { shas[] }`, `checkpoint.preview { sha, scope, filtered,
+  postMissing, truncated, files[{path, added, removed, binary, status}] }`,
+  `checkpoint.restored { sha, scope, ok, restoredCount, deletedCount, skipped[], error? }`.
+  web→host: `checkpoint.previewRequest { sha, scope: "turns"|"all" }`,
+  `checkpoint.restore { sha, scope: "code"|"conversation"|"both", paths[], allFiles }`,
+  and `consent.set` gained `checkpointsEnabled`. Plus `rewind.note` (host→web) / history role
+  `rewind` for the expandable "Rewound to checkpoint …" transcript line.
+  Persisted per user message in the history: `checkpointSha`, `checkpointShortSha`,
+  `checkpointPostSha`, `rewound`.
 - **`attach.added` (host → web)** — not defined in the plan, but necessary: on
   `attach.files`/`attach.context`/`attach.browse` the host opens a picker and returns the result as
   `{ type: "attach.added", attachments: [{ name, path }] }`; the UI renders chips.
@@ -387,8 +400,8 @@ compact_boundary evaluation) — details in the respective sections below.
 - On store errors: `RecordSettingsError` → `%LocalAppData%\CodeAstrogator\settings-error.log`
   + the bridge shows a ⚠ system note on `ready`; defaults still apply.
 
-## Retention / on-disk cleanup (2026-07-13)
-- **What:** optional auto-cleanup of the two data areas under `%LocalAppData%\CodeAstrogator`:
+## Retention / on-disk cleanup (2026-07-13, checkpoints added 2026-08-28)
+- **What:** optional auto-cleanup of the data areas under `%LocalAppData%\CodeAstrogator`:
   chat **history** sessions (per-workspace `history\<key>.json`) and pasted-**image** files (`pasted\`).
   Two independent settings, `AstrogatorOptions.HistoryRetentionDays` (default **90**) /
   `PastedRetentionDays` (default **30**) (int days, **`0` = keep forever**). Presets in
@@ -398,9 +411,11 @@ compact_boundary evaluation) — details in the respective sections below.
   to the day ints. Persisted as `Int32` in the store; copied in `CodeAstrogatorPackage.Copy`.
 - **When it runs:** `CodeAstrogatorPackage.RunRetentionCleanup()` — on **VS startup** (after `LoadSettings`)
   and after **every settings Save** (`UpdateOptions`) so a shortened window takes effect at once. Runs on a
-  background thread (`Task.Run`), no-op when both are 0.
+  background thread (`Task.Run`), no-op when all of them are 0.
 - **`Services/RetentionService` (best-effort, all try/catch):**
   - *Pasted:* deletes files in `pasted\` with `LastWriteTimeUtc` older than the cutoff.
+  - *Checkpoints:* `GitCheckpointService.PruneAllAsync` — third window
+    `CheckpointRetentionDays` (default **30**); see the "File checkpoints / rewind" section.
   - *History:* rewrites each `history\*.json`, dropping sessions whose `updatedAt` is older than the cutoff
     (unparseable timestamps are **kept** — never delete on ambiguity); a file emptied of sessions is deleted.
     Only rewrites when something was actually removed.
@@ -409,6 +424,144 @@ compact_boundary evaluation) — details in the respective sections below.
   in-memory view + next `Save()` match the sweep regardless of ordering/races. `WebViewBridge` passes
   `GetOptions().HistoryRetentionDays`. (Deleting an old pasted image is fine for the attachment-preview
   feature — a missing file already renders as a plain, non-expandable chip.)
+
+## File checkpoints / rewind (2026-08-28)
+Desktop-app parity feature: every message can be rewound to. Plan + research on how Claude Desktop /
+the VS Code extension behave: `docs/git-checkpoints-plan.md`.
+
+- **Storage = shadow repo.** A git dir at
+  `%LocalAppData%\CodeAstrogator\Checkpoints\<sha1(workspace path)>\.git` whose **work-tree is the
+  solution directory** (`git --git-dir=… --work-tree=… …`). Created lazily as `git init --bare` +
+  `core.bare=false` (so the `--work-tree` we always pass is accepted), `core.logAllRefUpdates=false`
+  (no reflogs → a deleted ref really releases its objects), `core.autocrlf=false`, `gc.auto=0`,
+  local `user.name`/`user.email` (commits without a global git identity) and `commit.gpgsign=false`.
+  A `meta.json` next to it records the original workspace path.
+  The user's own `.git` is never touched — git always excludes a directory called `.git` from
+  `add -A`; the project's `.gitignore` files apply automatically, and a project **without** one gets
+  a default exclude list in `info/exclude` (bin/obj/.vs/node_modules/…).
+- **A snapshot is a parentless commit behind its own ref.**
+  `GIT_INDEX_FILE=<gitdir>\ca-index git add -A` → `write-tree` → `commit-tree <tree>` (no `-p`) →
+  `update-ref refs/ca-checkpoints/<session>/<messageId>-pre|-post`. Consequences that drove the
+  design: pruning is `update-ref -d` + `gc --prune=now` (no history rewrite), and a snapshot's sha
+  never changes, so the shas persisted in the chat history stay valid forever. Objects are
+  content-addressed, so an unchanged repo costs ~nothing per snapshot. Our own index file keeps the
+  repo's default index (and therefore all diffs) independent of anything else.
+- **Two snapshots per turn — the reason bash changes are covered.** `-pre` is taken **before** the
+  CLI starts (awaited, so an edit made during the turn can't land in its own "before" state); `-post`
+  in `OnTurnCompleted` (also after Stop/error). "What did Claude change in turn k" is therefore the
+  **diff `pre(k)..post(k)`**, which includes `Bash` (`sed -i`, `rm`, `mv`), scripts Claude started
+  (`python fix_all.py`), subagent edits and formatter side effects. The desktop app can't do this —
+  it tracks only Write/Edit/NotebookEdit. Edits the *user* makes between turns fall between
+  `post(k)` and `pre(k+1)` and are thus **not** in the default restore scope.
+  Missing `-post` (crash/kill) → `pre(k+1)` is the fallback bound and the preview says so
+  (`postMissing`).
+- **Size control (measured 2026-08-28).** A Unity workspace produced **2.14 GiB in 24 758 loose
+  objects from just five snapshots** — 26 232 tracked files, of which a single 1.1 GB profiler capture
+  and ~600 MB of committed Bakery/OptiX DLLs were nearly everything. The number of snapshots was
+  never the problem; one full snapshot of such a project is. Two measures:
+  - **A configurable filter (`CheckpointFilter`) decides what goes in:** a size limit
+    (`CheckpointMaxFileMb`, default **10**, `0` = no limit) plus an extension list
+    (`CheckpointExtensions`) read either as a **blacklist** (default, seeded with
+    `DefaultCheckpointExtensions`: binaries and build output, archives, installers, dumps and logs)
+    or as a **whitelist** (`CheckpointExtensionsAreWhitelist`). All three live in the settings window;
+    `WebViewBridge.BuildCheckpointFilter` assigns them to the service in the ctor and in
+    `OnOptionsChanged`, so a change applies to the next snapshot.
+  - **Enforced in two places, and both are needed.** The rules go into `info/exclude` as patterns
+    (blacklist → `*.exe`; whitelist → the `*` / `!*/` / `!*.cs` idiom), rewritten before every
+    `add -A` so untracked files are never staged. And `ApplyFilterAsync` re-checks the freshly written
+    tree (`ls-tree -rl` knows every blob's size — no directory walk) and drops offenders from our
+    index with `update-index --force-remove`, then writes the tree again. Without that second step a
+    path that was tracked *before* the filter changed would stay in, because an ignore rule doesn't
+    untrack anything. Size-based drops are additionally recorded as literal paths in `info/exclude`
+    (no pattern can express a size) and are re-included automatically once a file shrinks.
+    A rewind never touches filtered files.
+  - **Objects get packed.** `gc.auto=256` (instead of the earlier `0`) plus `MaintainAsync`
+    (`gc --auto --quiet`, fire-and-forget after the post-turn snapshot). `gc.pruneExpire=1.hour.ago`
+    cleans up the one orphan the oversized path leaves behind on its *first* snapshot, where the blob
+    is written before we know its size — otherwise git would keep it for two weeks.
+  - Existing oversized objects stay reachable through the snapshots that already reference them, so
+    only retention or "Delete all checkpoints now" reclaims them.
+- **Nothing heavy on the UI thread.** The settings window measures the repo size and deletes it via
+  `_package.JoinableTaskFactory` on a background thread (button shows "measuring…"/"Deleting…").
+  Stat-ing 25 000 loose objects synchronously delayed the window's opening noticeably.
+- **Restore is non-destructive.** `RestoreAsync` first snapshots the current state to
+  `…/safety-<utc>`, then diffs target..safety (`--no-renames`, so a rename is an add + a delete):
+  status `A` → delete the file, everything else → `git checkout <sha> -- <path>` (pathspecs chunked
+  to stay under the Windows command-line limit). "Redo" = restore the safety snapshot.
+- **Skipped paths.** Symlinks/junctions (also a file under one) and **hard-linked** files are never
+  written through; they are counted and reported as "restored the code, but skipped N files" (same
+  behaviour as the CLI). Hard links are detected via `GetFileInformationByHandle`.
+  **`BY_HANDLE_FILE_INFORMATION` must be declared `Pack = 4`** — with the default 8-byte alignment
+  the two-DWORD FILETIME members shift everything after them, `NumberOfLinks` reads garbage and a
+  rewind silently skips *every* file (this cost a debugging round; the tests now cover restore).
+- **No git command reads stdin.** `cat-file --batch-check` and `update-ref --stdin` were replaced by
+  `rev-list --no-walk --ignore-missing <shas…>` (existence check for the "expired" state) and one
+  `update-ref -d` per ref. Argument-based calls only — simpler and it removed a whole failure mode.
+- **Settings.** `CheckpointsEnabled` (**default on**, like the desktop app — but gated on git being
+  on PATH), `CheckpointsDecided`, `CheckpointRetentionDays` (**default 30**, `0` = Never = keep
+  forever; reuses `RetentionDayChoices` + the retention combo helpers). Asked in the **first-run
+  consent popup** as a third checkbox next to announcements/updates (`openConsentPopup`; an
+  undecided checkpoint setting re-opens the dialog once for existing installs). Everything else lives
+  in the settings window under "Checkpoints (rewind)" (on/off, size limit, extension filter with its
+  own Add/Remove grid — `MakeItemGrid`/`GridButtons` are shared with the auto-approve list —,
+  retention, disk usage, "Delete all checkpoints now"). The window is **two-column** (960+ wide)
+  since these sections made a single column far too tall. — there is deliberately **no** gear-popover toggle (it was removed as redundant),
+  so `OnOptionsChanged` pushes `checkpoint.settings` to keep the UI in sync after a Save.
+- **Retention.** `RetentionService.Cleanup(history, pasted, checkpoints)` →
+  `GitCheckpointService.PruneAllAsync(days)` walks **every** workspace repo under `Checkpoints\`,
+  deletes refs whose committer date is older than the window, `gc --prune=now`, and drops the whole
+  repo dir when no ref is left. Runs on VS startup and after every settings Save. Because a pruned
+  sha stays in the chat history, `transcript.load` batch-checks the shas (`FilterExistingAsync`) and
+  posts `checkpoint.expired` → the UI greys the button out with "Checkpoint expired".
+  Checkpoints deliberately expire **before** the chat history (30 vs. 90 days).
+- **UI.** Hovering a user bubble reveals a rewind button (`.msg-rewind-btn`, hidden until
+  `:hover`/`:focus-visible`). It opens a dialog with the diff preview — file list with `+n/−m` and a
+  checkbox per file (all preselected), plus an "Include all workspace changes" switch (scope `turns`
+  → `all`). Three actions:
+  - **Cancel** — just closes.
+  - **Rewind selected** (`scope: "code"`) — restores only the ticked files, the conversation is left
+    alone (nothing is dimmed). Disabled while nothing is ticked. The transcript still gets a note
+    **naming the restored files**, and the next prompt still carries the hint for Claude.
+  - **Rewind all** (`scope: "both"`) — every file the preview lists (so the "include all workspace
+    changes" switch decides how wide that is) **plus** the conversation.
+  The desktop app's separate "rewind conversation only" option is deliberately not offered.
+- **`paths` semantics on `checkpoint.restore`:** absent or `allFiles: true` → restore everything that
+  changed; present with entries → exactly those; **present but empty** → skip the file part (the
+  preview was empty or every file was deselected). Widening an empty selection to the whole work-tree
+  would revert the user's own edits, so that case is explicitly not "unrestricted".
+  "Rewind all" therefore sends the full preview path list, plus `allFiles: true` when the wide scope
+  is active (which lets the host drop the filter entirely).
+- **`RestoreResult` names what moved** (`Restored`/`Deleted` path lists plus `Applied` = the diff
+  entries it acted on, counts derived). The `[System]` hint for Claude lists the paths (capped at 40
+  via `FormatPathList`), so a files-only rewind is visible to it too.
+- **The transcript's rewind line is its own message role.** `PostRewindNote` records
+  `{ role: "rewind", text, files[{path, added, removed, binary, status, action}] }` and posts
+  `rewind.note`; the UI renders a dim system-note-like line whose **chevron reveals the file list**
+  with the same `+n/−m` figures the dialog showed (`buildRewindNote`, collapsed by default).
+  A plain `system.note` couldn't carry the file data through a reload.
+- **Nothing is preselected in the dialog.** Ticks exist for "Rewind selected" only; "Rewind all"
+  ignores them, so preselecting everything just invited accidental partial rewinds.
+- **The rewound turn is discarded too — off-by-one worth remembering.** A message's checkpoint is the
+  state *before* that turn ran, so `rewound` is set from the target message **inclusive** (host:
+  `MarkConversationRewound`; UI: `applyConversationRewind`) and its prompt is what goes back into the
+  composer. Marking only the messages *after* it left the target un-dimmed and outside the collapse,
+  which then reported "0 discarded turns".
+- **Discarded turns fold away.** Rewound nodes get `.rewound` (dimmed + desaturated + struck through
+  for every card type; `pre`/`code`/`.diff-line` keep their normal text so diffs stay readable).
+  They stay expanded right after the rewind so you can see what was dropped; **`collapseRewoundRuns`
+  wraps each consecutive run into a collapsed `.rewound-group`** ("N discarded turns (rewound)",
+  click to expand) when the **next prompt is sent** (`sendPrompt`) and on `transcript.load` — there
+  with `onlyIfFollowed: true`, so a run that nothing follows yet stays open and a reload right after
+  a rewind looks unchanged. Rewinding to a message that already sits inside a collapsed group calls
+  `unwrapRewoundGroups()` first, so the flat-list logic always applies.
+- **Conversation rewind is a marking, not a truncation.** There is no headless way to shorten a CLI
+  conversation (`--rewind-files` covers files only; the feature requests for a headless
+  conversation rewind are closed as "not planned"), and the transcript JSONL format is documented as
+  internal/unstable. So: the later messages get `rewound: true` (persisted → survives reload), the
+  selected prompt goes back into the composer, and the **next prompt is prefixed with a `[System]`
+  note** telling Claude where the files were rolled back to and that the later turns are discarded.
+  The CLI session still carries those turns in its context — that is the accepted trade-off, and the
+  UI says so.
 
 ## Startup behavior & defaults
 - **Restore last session** (Settings → Code Astrogator, default on): When the
