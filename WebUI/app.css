@@ -477,6 +477,153 @@ button:focus { outline: none; }
 .msg-copy-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
 .msg-copy-btn.copied { opacity: 1; }   /* the check icon carries its own --ok color */
 
+/* ── Checkpoints / rewind ────────────────────────────────────────────────────
+   "Rewind to here" on a user bubble — same flex-child trick as the copy button, but hidden until
+   the bubble is hovered or the button is focused (keyboard reachable). */
+.msg-rewind-btn {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin: -1px -4px 0 2px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+.msg-user .msg-body:hover .msg-rewind-btn,
+.msg-rewind-btn:focus-visible { opacity: 1; }
+.msg-rewind-btn:hover { color: var(--accent); background: var(--bg-elevated); }
+.msg-rewind-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.msg-rewind-btn.expired { cursor: default; }
+.msg-rewind-btn.expired:hover { color: var(--text-dim); background: transparent; }
+.no-checkpoints .msg-rewind-btn { display: none; }
+
+/* Everything after a rewind stays visible but reads as discarded: dimmed, desaturated and struck
+   through — for every card type, not just message bubbles. */
+.rewound {
+  opacity: 0.45;
+  filter: saturate(0.6);
+}
+.rewound .msg-body,
+.rewound .tool-head,
+.rewound .tool-body,
+.rewound .perm-head,
+.rewound .perm-body,
+.rewound.sys-note,
+.rewound.error-block,
+.rewound .q-head,
+.rewound .turn-footer {
+  text-decoration: line-through solid rgba(150, 150, 150, 0.5);
+}
+/* Keep code/diff blocks readable — a strike-through over a diff is just noise. */
+.rewound pre,
+.rewound code,
+.rewound .diff-line { text-decoration: none; }
+
+/* Once the conversation moves on, a run of discarded turns folds into one collapsed block. */
+.rewound-group {
+  margin: 8px 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.rewound-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.rewound-toggle:hover { color: var(--text); }
+.rewound-chev { display: inline-block; transition: transform 120ms ease; }
+.rewound-group:not(.collapsed) .rewound-chev { transform: rotate(90deg); }
+.rewound-group.collapsed .rewound-body { display: none; }
+.rewound-body { padding-bottom: 4px; }
+
+.cp-rewind-marker {
+  margin: 10px 8px;
+  padding: 3px 0;
+  border-top: 1px dashed var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: 0.3px;
+}
+
+/* Rewind dialog — file list with per-file selection. */
+.cp-modal { width: 560px; max-width: 92vw; }
+.cp-files {
+  max-height: 260px;
+  overflow: auto;
+  margin-top: 10px;
+}
+.cp-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cp-file:hover { background: var(--bg-elevated); }
+.cp-file input { flex: 0 0 auto; accent-color: var(--accent); }
+.cp-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;            /* keep the file name visible when the path is truncated */
+  text-align: left;
+}
+.cp-file-status { flex: 0 0 auto; color: var(--text-dim); font-size: 10.5px; }
+.cp-file-add { flex: 0 0 auto; color: #3FB950; font-variant-numeric: tabular-nums; }
+.cp-file-del { flex: 0 0 auto; color: #F85149; font-variant-numeric: tabular-nums; }
+.cp-file-bin { flex: 0 0 auto; color: var(--text-dim); font-size: 10.5px; }
+.cp-warn { margin-top: 6px; color: #E3B341; font-size: 11.5px; }
+/* Read-only file rows (the transcript's rewind note) — no checkbox, no hover affordance. */
+.cp-file-static { cursor: default; }
+.cp-file-static:hover { background: transparent; }
+
+/* "Rewound to checkpoint …" transcript line: summary always visible, file list behind a chevron. */
+.rewind-note-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rewind-note-head:hover .rewind-note-text { color: var(--text); }
+.rewind-note-head .rewound-chev { flex: 0 0 auto; }
+.rewind-note:not(.collapsed) .rewound-chev { transform: rotate(90deg); }
+.rewind-note.collapsed .rewind-note-files { display: none; }
+.rewind-note-files { margin: 4px 0 0 14px; }
+.cp-scope { margin-top: 10px; }
+.cp-actions { flex-wrap: wrap; }
+.consent-row-off { opacity: 0.55; cursor: default; }
+
 /* markdown */
 .md p { margin: 0 0 8px; }
 .md p:last-child { margin-bottom: 0; }

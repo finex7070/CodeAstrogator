@@ -66,6 +66,18 @@ namespace CodeAstrogator.Services
                     GetInt(nameof(AstrogatorOptions.HistoryRetentionDays), d.HistoryRetentionDays)),
                 PastedRetentionDays = AstrogatorOptions.ClampRetentionDays(
                     GetInt(nameof(AstrogatorOptions.PastedRetentionDays), d.PastedRetentionDays)),
+                CheckpointsEnabled = GetBool(nameof(AstrogatorOptions.CheckpointsEnabled), d.CheckpointsEnabled),
+                CheckpointsDecided = GetBool(nameof(AstrogatorOptions.CheckpointsDecided), d.CheckpointsDecided),
+                CheckpointRetentionDays = AstrogatorOptions.ClampRetentionDays(
+                    GetInt(nameof(AstrogatorOptions.CheckpointRetentionDays), d.CheckpointRetentionDays)),
+                CheckpointMaxFileMb = AstrogatorOptions.ClampCheckpointMaxFileMb(
+                    GetInt(nameof(AstrogatorOptions.CheckpointMaxFileMb), d.CheckpointMaxFileMb)),
+                CheckpointExtensionsAreWhitelist = GetBool(
+                    nameof(AstrogatorOptions.CheckpointExtensionsAreWhitelist), d.CheckpointExtensionsAreWhitelist),
+                CheckpointExtensions = _store.PropertyExists(Collection, nameof(AstrogatorOptions.CheckpointExtensions))
+                    ? AstrogatorOptions.NormalizeExtensions(
+                        ParsePatterns(_store.GetString(Collection, nameof(AstrogatorOptions.CheckpointExtensions), "")))
+                    : d.CheckpointExtensions,
             };
         }
 
@@ -102,6 +114,16 @@ namespace CodeAstrogator.Services
                 AstrogatorOptions.ClampRetentionDays(o.HistoryRetentionDays));
             _store.SetInt32(Collection, nameof(AstrogatorOptions.PastedRetentionDays),
                 AstrogatorOptions.ClampRetentionDays(o.PastedRetentionDays));
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.CheckpointsEnabled), o.CheckpointsEnabled);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.CheckpointsDecided), o.CheckpointsDecided);
+            _store.SetInt32(Collection, nameof(AstrogatorOptions.CheckpointRetentionDays),
+                AstrogatorOptions.ClampRetentionDays(o.CheckpointRetentionDays));
+            _store.SetInt32(Collection, nameof(AstrogatorOptions.CheckpointMaxFileMb),
+                AstrogatorOptions.ClampCheckpointMaxFileMb(o.CheckpointMaxFileMb));
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.CheckpointExtensionsAreWhitelist),
+                o.CheckpointExtensionsAreWhitelist);
+            _store.SetString(Collection, nameof(AstrogatorOptions.CheckpointExtensions),
+                JsonConvert.SerializeObject(AstrogatorOptions.NormalizeExtensions(o.CheckpointExtensions)));
         }
 
         private string GetString(string name, string fallback) =>

@@ -48,6 +48,22 @@ namespace CodeAstrogator.Bridge
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
+        // ── file checkpoints (rewind) ────────────────────────────────────────────
+        // A snapshot of the work-tree is taken before each prompt and at the end of each turn, so
+        // "what changed during Claude's turn" is a tree-to-tree diff (covers bash/scripts, not just
+        // the edit tools). The shas ride along on the user message in the history.
+        private readonly GitCheckpointService _checkpoints = new GitCheckpointService();
+        private JObject? _checkpointTurnMessage;      // user message of the turn about to start (UI thread)
+        private CheckpointTurnState? _checkpointTurn; // in-flight turn: where to put the "after" snapshot
+        private string? _pendingRestoreNote;          // prepended to the next prompt after a rewind
+
+        /// <summary>Checkpoint bookkeeping for the turn currently running.</summary>
+        private sealed class CheckpointTurnState
+        {
+            public string Cwd = "";
+            public string PostRef = "";
+            public JObject? Message; // null for slash-command turns (no user bubble → no rewind button)
+        }
         private readonly EditReviewController _editReview; // inline edit-review adornments (opt-in)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission> _pendingPermissions
             = new System.Collections.Concurrent.ConcurrentDictionary<string, PendingPermission>();
@@ -112,6 +128,7 @@ namespace CodeAstrogator.Bridge
             _session.Settings.ReviewEditsAtTurnEnd = opt.ReviewEditsAtTurnEnd;
             _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
             _activeFileSessionEnabled = opt.ActiveFileOnByDefault; // initial per-session toggle = option default
+            _checkpoints.Filter = BuildCheckpointFilter(opt);      // size limit + extension black/whitelist
 
             // In-process MCP permission server (Teil A §A5). Best-effort: if it fails to start,
             // IsAvailable stays false and edits fall back to the CLI default (no prompt flags).
@@ -317,13 +334,23 @@ namespace CodeAstrogator.Bridge
                     HandleDiscardAllTurnReviews();
                     break;
                 case "consent.set":
-                    // first-run consent popup answered (announcements + updates) → persist both
-                    // choices and that they were made (so the popup never re-appears).
+                    // first-run consent popup answered (announcements + updates + checkpoints) →
+                    // persist the choices and that they were made (so the popup never re-appears).
                     _package.GetOptions().NoticeFetchEnabled = msg.Value<bool?>("noticeEnabled") ?? false;
                     _package.GetOptions().NoticeFetchDecided = true;
                     _package.GetOptions().UpdateCheckEnabled = msg.Value<bool?>("updateEnabled") ?? false;
                     _package.GetOptions().UpdateCheckDecided = true;
+                    _package.GetOptions().CheckpointsEnabled =
+                        (msg.Value<bool?>("checkpointsEnabled") ?? false) && GitCheckpointService.IsGitAvailable();
+                    _package.GetOptions().CheckpointsDecided = true;
                     _package.SaveOptions();
+                    SendCheckpointSettings();
+                    break;
+                case "checkpoint.previewRequest":
+                    HandleCheckpointPreview(msg.Value<string>("sha") ?? "", msg.Value<string>("scope") ?? "turns");
+                    break;
+                case "checkpoint.restore":
+                    HandleCheckpointRestore(msg);
                     break;
                 case "theme.setMode":
                     HandleThemeSetMode(msg.Value<string>("mode") ?? "auto");
@@ -478,6 +505,9 @@ namespace CodeAstrogator.Bridge
             RecordMessage(userMsg);
             if (_history.Current.Title == "Untitled")
                 _history.Current.Title = typedText.Length > 48 ? typedText.Substring(0, 48) + "…" : typedText;
+            // This message owns the turn's checkpoints (RunPrompt takes the "before" snapshot and
+            // stores its sha here; OnTurnCompleted adds the "after" one).
+            _checkpointTurnMessage = userMsg;
 
             PostStatus("working");
             RunPrompt(text);
@@ -494,9 +524,43 @@ namespace CodeAstrogator.Bridge
 
             _turnHadAssistantOutput = false;
             ResetTurnReviewState(); // fresh turn → drop the previous turn's captured baselines/reviews
+
+            // Checkpoint bookkeeping for this turn (UI-thread reads; the snapshot itself runs below,
+            // off-thread, before the CLI starts). A slash-command turn has no user message, so it
+            // gets a snapshot but no rewind button.
+            var checkpointMessage = _checkpointTurnMessage;
+            _checkpointTurnMessage = null;
+            var checkpointsOn = options.CheckpointsEnabled
+                && !string.IsNullOrEmpty(cwd)
+                && GitCheckpointService.IsGitAvailable();
+            var turnKey = checkpointMessage?.Value<string>("id") ?? Guid.NewGuid().ToString("n");
+            var sessionKey = _history.Current.Id;
+            _checkpointTurn = checkpointsOn
+                ? new CheckpointTurnState
+                {
+                    Cwd = cwd!,
+                    PostRef = GitCheckpointService.BuildRefName(sessionKey, turnKey + "-post"),
+                    Message = checkpointMessage,
+                }
+                : null;
+
+            // A rewind since the last prompt → tell Claude where the files were rolled back to, so it
+            // doesn't keep reasoning about a file state that no longer exists. Consumed once.
+            var restoreNote = _pendingRestoreNote;
+            _pendingRestoreNote = null;
+            if (!string.IsNullOrEmpty(restoreNote))
+                text = restoreNote + "\n\n" + text;
+
             _package.JoinableTaskFactory.RunAsync(async () =>
             {
                 await TaskScheduler.Default;
+                if (checkpointsOn)
+                {
+                    // ConfigureAwait(false): inside a JoinableTask the default would resume on the
+                    // main thread, and the turn must keep running off it.
+                    await TakePreTurnCheckpointAsync(cwd!, sessionKey, turnKey, checkpointMessage)
+                        .ConfigureAwait(false);
+                }
                 try
                 {
                     await _session.RunTurnAsync(text, options.ClaudeExecutablePath, cwd);
@@ -1525,6 +1589,7 @@ namespace CodeAstrogator.Bridge
 
         private void SendTranscript(SessionRecord record)
         {
+            ThreadHelper.ThrowIfNotOnUIThread(); // every caller re-inits the session on the UI thread first
             JArray messages;
             lock (_history)
             {
@@ -1541,6 +1606,7 @@ namespace CodeAstrogator.Bridge
                 ["title"] = record.Title,
                 ["messages"] = messages,
             });
+            PostCheckpointExpiry(record); // grey out rewind buttons whose snapshot the retention sweep took
         }
 
         private void HandleThemeSetMode(string mode)
@@ -2536,6 +2602,7 @@ namespace CodeAstrogator.Bridge
                 PostStatus("ready");
             }
             RefreshUsage(); // the turn just consumed quota — update the meters
+            TakePostTurnCheckpoint(); // "after" snapshot → this turn's diff is pre..post
             SaveHistory();
         }
 
@@ -2648,6 +2715,8 @@ namespace CodeAstrogator.Bridge
             SendTheme();
             SendActiveFile(); // the auto-add-active-file toggle may have changed
             SendBannerSettings(); // announcement/update opt-in may have changed in the settings window
+            SendCheckpointSettings(); // checkpoints are only configured there → push the new state
+            _checkpoints.Filter = BuildCheckpointFilter(_package.GetOptions()); // applies to the next snapshot
             var promptTimeoutMs = PromptTimeoutMs(_package.GetOptions());
             _session.Settings.McpToolTimeoutMs = promptTimeoutMs;       // env-var fallback, applies next turn
             _permission.UpdateToolTimeout(promptTimeoutMs);            // config `timeout` (the value the CLI prefers)
@@ -2737,6 +2806,474 @@ namespace CodeAstrogator.Bridge
             }
         }
 
+        // ── file checkpoints / rewind ─────────────────────────────────────────
+        // A snapshot is taken before each prompt ("-pre") and at the end of each turn ("-post"), so a
+        // turn's changes are the diff pre..post — which covers bash commands, scripts and subagents,
+        // not only the Write/Edit tools. See docs/git-checkpoints-plan.md.
+
+        private const int CheckpointSnapshotTimeoutMs = 30_000;
+        /// <summary>Upper bound on how many past turns a restore scope walks (one diff each).</summary>
+        private const int CheckpointScopeMaxTurns = 200;
+
+        /// <summary>
+        /// Snapshot taken BEFORE the CLI starts — deliberately awaited, since an edit made during the
+        /// turn must not end up inside that turn's own "before" state. Best-effort: on failure the turn
+        /// just runs without a rewind point for this message.
+        /// </summary>
+        private async Task TakePreTurnCheckpointAsync(string cwd, string sessionKey, string turnKey, JObject? message)
+        {
+            PostStatus("working", "Creating checkpoint…");
+            var info = await _checkpoints.SnapshotAsync(cwd,
+                GitCheckpointService.BuildRefName(sessionKey, turnKey + "-pre"),
+                "before turn · " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                CheckpointSnapshotTimeoutMs).ConfigureAwait(false);
+            PostStatus("working");
+            if (info == null || message == null)
+                return;
+
+            lock (_history)
+            {
+                message["checkpointSha"] = info.Sha;
+                message["checkpointShortSha"] = info.ShortSha;
+            }
+            Post(new JObject
+            {
+                ["type"] = "checkpoint.created",
+                ["messageId"] = message.Value<string>("id") ?? "",
+                ["sha"] = info.Sha,
+                ["shortSha"] = info.ShortSha,
+                ["createdAt"] = info.CreatedUtc.ToString("o"),
+            });
+        }
+
+        /// <summary>End-of-turn snapshot (fire-and-forget; also runs after a stop or an error, so the
+        /// turn's diff is always bounded). Without it the next prompt's "-pre" acts as the fallback.</summary>
+        private void TakePostTurnCheckpoint()
+        {
+            var turn = _checkpointTurn;
+            _checkpointTurn = null;
+            if (turn == null)
+                return;
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var info = await _checkpoints.SnapshotAsync(turn.Cwd, turn.PostRef,
+                    "after turn · " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                    CheckpointSnapshotTimeoutMs).ConfigureAwait(false);
+                // Pack loose objects once enough have accumulated — cheap no-op otherwise, and it keeps
+                // the shadow repo from turning into tens of thousands of small files.
+                await _checkpoints.MaintainAsync(turn.Cwd).ConfigureAwait(false);
+                if (info == null || turn.Message == null)
+                    return;
+                lock (_history)
+                    turn.Message["checkpointPostSha"] = info.Sha;
+                SaveHistory();
+            }).Task.Forget();
+        }
+
+        /// <summary>Snapshot filter from the settings (0 MB = no size limit).</summary>
+        private static CheckpointFilter BuildCheckpointFilter(AstrogatorOptions o) => new CheckpointFilter
+        {
+            MaxFileBytes = (long)AstrogatorOptions.ClampCheckpointMaxFileMb(o.CheckpointMaxFileMb) * 1024 * 1024,
+            Whitelist = o.CheckpointExtensionsAreWhitelist,
+            Extensions = AstrogatorOptions.NormalizeExtensions(o.CheckpointExtensions),
+        };
+
+        /// <summary>Checkpoint state for session.init / live updates.</summary>
+        private JObject BuildCheckpointsState()
+        {
+            var options = _package.GetOptions();
+            var gitAvailable = GitCheckpointService.IsGitAvailable();
+            return new JObject
+            {
+                ["enabled"] = options.CheckpointsEnabled && gitAvailable,
+                ["gitAvailable"] = gitAvailable,
+                ["decided"] = options.CheckpointsDecided,
+                ["retentionDays"] = options.CheckpointRetentionDays,
+            };
+        }
+
+        private void SendCheckpointSettings()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var state = BuildCheckpointsState();
+            state["type"] = "checkpoint.settings";
+            Post(state);
+        }
+
+        /// <summary>After a transcript load: any checkpoint whose snapshot the retention sweep already
+        /// removed is reported so the UI can grey out its rewind button ("Checkpoint expired").</summary>
+        private void PostCheckpointExpiry(SessionRecord record)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!_package.GetOptions().CheckpointsEnabled || !GitCheckpointService.IsGitAvailable())
+                return;
+            var cwd = _package.GetSolutionDirectory();
+            if (string.IsNullOrEmpty(cwd))
+                return;
+
+            var shas = new List<string>();
+            lock (_history)
+            {
+                foreach (var m in record.Messages)
+                {
+                    var sha = m.Value<string>("checkpointSha");
+                    if (!string.IsNullOrEmpty(sha))
+                        shas.Add(sha!);
+                }
+            }
+            if (shas.Count == 0)
+                return;
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var alive = await _checkpoints.FilterExistingAsync(cwd!, shas).ConfigureAwait(false);
+                var gone = shas.Where(s => !alive.Contains(s)).Distinct().ToArray();
+                if (gone.Length == 0)
+                    return;
+                Post(new JObject
+                {
+                    ["type"] = "checkpoint.expired",
+                    ["shas"] = new JArray(gone),
+                });
+            }).Task.Forget();
+        }
+
+        /// <summary>The set of files Claude's turns touched since a checkpoint (see class comment).</summary>
+        private sealed class CheckpointScope
+        {
+            public List<string> Paths = new List<string>();
+            public bool PostMissing;  // a turn ended without its "after" snapshot → the diff may include
+                                      // edits the user made between turns
+        }
+
+        /// <summary>
+        /// Walks the turns from the target checkpoint forward and unions each turn's pre..post diff.
+        /// Returns null when the checkpoint isn't in the current transcript (loaded from an older
+        /// history, no post shas at all) — the caller then falls back to the whole work-tree.
+        /// </summary>
+        private async Task<CheckpointScope?> BuildTurnScopeAsync(string cwd, string sha)
+        {
+            var turns = new List<(string Pre, string? Post)>();
+            lock (_history)
+            {
+                var messages = _history.Current.Messages;
+                var start = -1;
+                for (var i = 0; i < messages.Count; i++)
+                {
+                    if (string.Equals(messages[i].Value<string>("checkpointSha"), sha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        start = i;
+                        break;
+                    }
+                }
+                if (start < 0)
+                    return null;
+                for (var i = start; i < messages.Count && turns.Count < CheckpointScopeMaxTurns; i++)
+                {
+                    var pre = messages[i].Value<string>("checkpointSha");
+                    if (string.IsNullOrEmpty(pre))
+                        continue;
+                    turns.Add((pre!, messages[i].Value<string>("checkpointPostSha")));
+                }
+            }
+            if (turns.Count == 0)
+                return null;
+
+            var scope = new CheckpointScope();
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < turns.Count; i++)
+            {
+                var post = turns[i].Post;
+                if (string.IsNullOrEmpty(post))
+                {
+                    // No end-of-turn snapshot (stop/crash). The next turn's "before" snapshot is the
+                    // closest bound; for the newest turn compare against the work-tree (post = null).
+                    var isLast = i == turns.Count - 1;
+                    post = isLast ? null : turns[i + 1].Pre;
+                    scope.PostMissing = true;
+                }
+                var changes = await _checkpoints.DiffAsync(cwd, turns[i].Pre, post, null).ConfigureAwait(false);
+                foreach (var change in changes)
+                    paths.Add(change.Path);
+            }
+            scope.Paths = paths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+            return scope;
+        }
+
+        /// <summary>web→host <c>checkpoint.previewRequest</c>: what a rewind to this point would change.</summary>
+        private void HandleCheckpointPreview(string sha, string scope)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var cwd = _package.GetSolutionDirectory();
+            if (string.IsNullOrEmpty(sha) || string.IsNullOrEmpty(cwd))
+            {
+                Post(new JObject { ["type"] = "checkpoint.preview", ["sha"] = sha, ["files"] = new JArray() });
+                return;
+            }
+            var wantAll = scope == "all";
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var filtered = false;
+                var postMissing = false;
+                IReadOnlyList<CheckpointFileChange> changes;
+                if (wantAll)
+                {
+                    changes = await _checkpoints.DiffAsync(cwd!, sha, null, null).ConfigureAwait(false);
+                }
+                else
+                {
+                    var turnScope = await BuildTurnScopeAsync(cwd!, sha).ConfigureAwait(false);
+                    if (turnScope == null)
+                    {
+                        changes = await _checkpoints.DiffAsync(cwd!, sha, null, null).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        filtered = true;
+                        postMissing = turnScope.PostMissing;
+                        changes = turnScope.Paths.Count == 0
+                            ? new List<CheckpointFileChange>()
+                            : await _checkpoints.DiffAsync(cwd!, sha, null, turnScope.Paths).ConfigureAwait(false);
+                    }
+                }
+
+                var files = new JArray();
+                foreach (var change in changes.Take(400))
+                {
+                    files.Add(new JObject
+                    {
+                        ["path"] = change.Path,
+                        ["added"] = change.Added,
+                        ["removed"] = change.Removed,
+                        ["binary"] = change.Binary,
+                        ["status"] = change.Status,
+                    });
+                }
+                Post(new JObject
+                {
+                    ["type"] = "checkpoint.preview",
+                    ["sha"] = sha,
+                    ["scope"] = wantAll ? "all" : "turns",
+                    ["filtered"] = filtered,
+                    ["postMissing"] = postMissing,
+                    ["truncated"] = changes.Count > 400,
+                    ["files"] = files,
+                });
+            }).Task.Forget();
+        }
+
+        /// <summary>
+        /// web→host <c>checkpoint.restore</c>. Scope "code" writes the selected files back, "conversation"
+        /// marks the later turns as discarded (and tells the next prompt about it), "both" does each.
+        /// Blocked while a turn runs.
+        /// </summary>
+        private void HandleCheckpointRestore(JObject msg)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var sha = msg.Value<string>("sha") ?? "";
+            var scope = msg.Value<string>("scope") ?? "code";
+            if (string.IsNullOrEmpty(sha))
+                return;
+            if (_session.IsBusy || RemoteSessionActive)
+            {
+                PostNotify("Stop the current turn before rewinding.", "warning", 4000);
+                return;
+            }
+
+            var cwd = _package.GetSolutionDirectory();
+            var restoreCode = scope == "code" || scope == "both";
+            var restoreConversation = scope == "conversation" || scope == "both";
+
+            // paths semantics: absent or allFiles → restore everything that changed; present with
+            // entries → exactly those; present but EMPTY → nothing to undo (the preview was empty or
+            // the user deselected every file), so the file part is skipped rather than widened to the
+            // whole work-tree, which would revert the user's own edits too.
+            List<string>? paths = null;
+            if (msg["paths"] is JArray selected && !(msg.Value<bool?>("allFiles") ?? false))
+            {
+                paths = selected.Select(p => p.Value<string>() ?? "").Where(p => p.Length > 0).ToList();
+                if (paths.Count == 0)
+                    restoreCode = false;
+            }
+
+            var turnNumber = restoreConversation ? MarkConversationRewound(sha) : 0;
+
+            if (!restoreCode || string.IsNullOrEmpty(cwd))
+            {
+                FinishCheckpointRestore(sha, scope, new RestoreResult(), turnNumber, restoreConversation);
+                return;
+            }
+
+            PostStatus("working", "Rewinding files…");
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var safetyRef = GitCheckpointService.BuildRefName(
+                    _history.Current.Id, "safety-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
+                var result = await _checkpoints.RestoreAsync(cwd!, sha, paths, safetyRef).ConfigureAwait(false);
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                PostStatus("ready");
+                FinishCheckpointRestore(sha, scope, result, turnNumber, restoreConversation);
+            }).Task.Forget();
+        }
+
+        /// <summary>Reports the outcome, notes it in the transcript and queues the hint for Claude.</summary>
+        private void FinishCheckpointRestore(string sha, string scope, RestoreResult result,
+            int turnNumber, bool restoredConversation)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var ok = result.Error == null;
+            Post(new JObject
+            {
+                ["type"] = "checkpoint.restored",
+                ["sha"] = sha,
+                ["scope"] = scope,
+                ["ok"] = ok,
+                ["restoredCount"] = result.RestoredCount,
+                ["deletedCount"] = result.DeletedCount,
+                ["skipped"] = new JArray(result.Skipped.Cast<object>().ToArray()),
+                ["error"] = result.Error,
+            });
+
+            if (!ok)
+            {
+                PostNotify("Rewind failed: " + result.Error, "error");
+                return;
+            }
+
+            var shortSha = sha.Length >= 8 ? sha.Substring(0, 8) : sha;
+            var parts = new List<string>();
+            if (scope != "conversation")
+                parts.Add(result.RestoredCount + result.DeletedCount == 0
+                    ? "no file changes to undo"
+                    : result.RestoredCount + " file(s) restored"
+                      + (result.DeletedCount > 0 ? ", " + result.DeletedCount + " removed" : ""));
+            if (restoredConversation)
+                parts.Add("conversation marked as discarded from this point");
+            if (result.Skipped.Count > 0)
+                parts.Add("skipped " + result.Skipped.Count + " linked/locked file(s)");
+            // Expandable note: the summary line is always visible, the file list only when opened.
+            PostRewindNote("Rewound to checkpoint " + shortSha + " — " + string.Join("; ", parts) + ".",
+                BuildRewindNoteFiles(result));
+
+            // What the next prompt tells Claude. Files and conversation are worded separately: the CLI
+            // session still HAS the later turns in its context, so it has to be told to ignore them.
+            var turnText = turnNumber > 0 ? "turn " + turnNumber : "the selected turn";
+            var restoredFiles = result.RestoredCount + result.DeletedCount > 0;
+            var note = new System.Text.StringBuilder("[System] ");
+            if (scope != "conversation" && restoredFiles)
+            {
+                note.Append("These files were rewound to their state before ").Append(turnText)
+                    .Append(" (checkpoint ").Append(shortSha).Append("): ")
+                    .Append(FormatPathList(result.Touched, 40));
+                if (result.Skipped.Count > 0)
+                    note.Append(" (").Append(result.Skipped.Count).Append(" linked/locked file(s) were left untouched)");
+                note.Append(". Any change made to them after that point is gone. ");
+            }
+            if (restoredConversation)
+            {
+                note.Append("The conversation was rewound to just before ").Append(turnText)
+                    .Append(restoredFiles ? " as well" : " (checkpoint " + shortSha + ")")
+                    .Append(": treat ").Append(turnText)
+                    .Append(" and everything after it in this conversation as discarded and ignore it. ");
+                if (!restoredFiles)
+                    note.Append("No file changes had to be undone. ");
+            }
+            note.Append("Re-read files before relying on their contents.");
+            _pendingRestoreNote = note.ToString();
+            SaveHistory();
+        }
+
+        /// <summary>File rows for the expandable rewind note — same `+n/−m` figures the preview
+        /// showed, plus what happened to each path.</summary>
+        private static JArray BuildRewindNoteFiles(RestoreResult result)
+        {
+            var deleted = new HashSet<string>(result.Deleted, StringComparer.OrdinalIgnoreCase);
+            var files = new JArray();
+            foreach (var change in result.Applied)
+            {
+                files.Add(new JObject
+                {
+                    ["path"] = change.Path,
+                    ["added"] = change.Added,
+                    ["removed"] = change.Removed,
+                    ["binary"] = change.Binary,
+                    ["status"] = change.Status,
+                    ["action"] = deleted.Contains(change.Path) ? "deleted" : "restored",
+                });
+            }
+            foreach (var path in result.Skipped)
+                files.Add(new JObject { ["path"] = path, ["action"] = "skipped" });
+            return files;
+        }
+
+        /// <summary>Dim transcript line like a system note, but with a chevron that reveals the list of
+        /// files the rewind touched. Persisted as its own message role so it survives a reload.</summary>
+        private void PostRewindNote(string text, JArray files)
+        {
+            var id = "rewind-" + Guid.NewGuid().ToString("n");
+            var message = new JObject
+            {
+                ["role"] = "rewind",
+                ["id"] = id,
+                ["text"] = text,
+                ["files"] = files,
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+            };
+            RecordMessage(message);
+            Post(new JObject
+            {
+                ["type"] = "rewind.note",
+                ["id"] = id,
+                ["text"] = text,
+                ["files"] = files.DeepClone(),
+            });
+        }
+
+        /// <summary>Comma-separated path list, capped so a wide rewind doesn't flood the transcript
+        /// note (or the prompt) — the rest is summarized as "…and N more".</summary>
+        private static string FormatPathList(IEnumerable<string> paths, int max)
+        {
+            var all = paths.ToList();
+            if (all.Count == 0)
+                return "(none)";
+            var shown = string.Join(", ", all.Take(max));
+            return all.Count <= max ? shown : shown + ", …and " + (all.Count - max) + " more";
+        }
+
+        /// <summary>Flags every message after the checkpoint as rewound (persisted, so the greyed-out
+        /// state survives a reload). Returns the 1-based turn number of the target message.</summary>
+        private int MarkConversationRewound(string sha)
+        {
+            lock (_history)
+            {
+                var messages = _history.Current.Messages;
+                var start = -1;
+                var turnNumber = 0;
+                for (var i = 0; i < messages.Count; i++)
+                {
+                    if (messages[i].Value<string>("role") == "user")
+                        turnNumber++;
+                    if (string.Equals(messages[i].Value<string>("checkpointSha"), sha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        start = i;
+                        break;
+                    }
+                }
+                if (start < 0)
+                    return 0;
+                // From the target INCLUSIVE: the checkpoint is the state before that turn ran, so the
+                // prompt itself is discarded as well (the UI puts it back into the composer).
+                for (var i = start; i < messages.Count; i++)
+                    messages[i]["rewound"] = true;
+                return turnNumber;
+            }
+        }
+
         // ── host → web senders ────────────────────────────────────────────────
 
         private void SendTheme()
@@ -2785,6 +3322,7 @@ namespace CodeAstrogator.Bridge
                 ["noticeFetchDecided"] = options.NoticeFetchDecided,
                 ["updateCheckEnabled"] = options.UpdateCheckEnabled,
                 ["updateCheckDecided"] = options.UpdateCheckDecided,
+                ["checkpoints"] = BuildCheckpointsState(),
                 ["appVersion"] = GetInstalledVersion(),
             });
         }

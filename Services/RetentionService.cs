@@ -19,12 +19,26 @@ namespace CodeAstrogator.Services
         private static string BaseDir => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodeAstrogator");
 
-        /// <summary>Runs both sweeps. Safe to call from a background thread; each part is independent
+        /// <summary>Runs all sweeps. Safe to call from a background thread; each part is independent
         /// and best-effort. A non-positive day count skips that sweep entirely.</summary>
-        public static void Cleanup(int historyRetentionDays, int pastedRetentionDays)
+        public static void Cleanup(int historyRetentionDays, int pastedRetentionDays, int checkpointRetentionDays)
         {
             try { PrunePastedFiles(pastedRetentionDays); } catch { /* best-effort */ }
             try { PruneHistorySessions(historyRetentionDays); } catch { /* best-effort */ }
+            try { PruneCheckpoints(checkpointRetentionDays); } catch { /* best-effort */ }
+        }
+
+        /// <summary>Deletes file-checkpoint snapshots older than the cutoff across every workspace and
+        /// reclaims their git objects (see <c>Core.GitCheckpointService.PruneAllAsync</c>). Runs
+        /// synchronously here — the whole sweep is already off the UI thread.</summary>
+        private static void PruneCheckpoints(int days)
+        {
+            if (days <= 0)
+                return;
+            // The sweep is already a background Task with no UI affinity, so blocking here is safe.
+#pragma warning disable VSTHRD002
+            Core.GitCheckpointService.PruneAllAsync(days).GetAwaiter().GetResult();
+#pragma warning restore VSTHRD002
         }
 
         /// <summary>Deletes pasted-image files whose last write time is older than the cutoff.</summary>
