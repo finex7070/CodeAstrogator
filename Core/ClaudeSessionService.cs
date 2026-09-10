@@ -98,6 +98,13 @@ namespace CodeAstrogator.Core
         /// <summary>Raised (on a background thread) for every parsed domain event.</summary>
         public event Action<ClaudeEvent>? EventReceived;
 
+        /// <summary>Value to pass for "ask about every tool", resolved from the installed CLI's
+        /// <c>--help</c> before the first turn (see <see cref="ClaudeCliCapabilities"/>): <c>manual</c>
+        /// on 2.1.2xx+, null (omit the flag) on older builds that have no such value. Omission is NOT
+        /// interchangeable with it on new CLIs — it resolves to <c>auto</c>, where the model decides
+        /// whether to consult the permission hook at all.</summary>
+        internal string? AskPermissionModeArg { get; set; }
+
         /// <summary>Raised when a turn ends; string carries an error description or null.</summary>
         public event Action<ClaudeTurnExit, string?>? TurnCompleted;
 
@@ -136,6 +143,11 @@ namespace CodeAstrogator.Core
                           ?? throw new InvalidOperationException(
                               "Claude Code CLI not found. Install it (npm i -g @anthropic-ai/claude-code) " +
                               "or set the path via the gear menu → Advanced options.");
+
+                // Which value means "ask about everything" depends on the installed CLI — probe it
+                // (cached per executable, hidden process) BEFORE mapping the mode below.
+                AskPermissionModeArg = (await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false))
+                    .AskPermissionModeArg;
 
                 // Pin the mode for this turn: the process below keeps it for its whole lifetime,
                 // even if the UI changes Settings.PermissionMode mid-turn (see LaunchedPermissionMode).
@@ -267,17 +279,23 @@ namespace CodeAstrogator.Core
         {
             if (Settings.PlanMode)
                 return "plan";
-            // "Review edits at end of turn": launch in the CLI default (ask) mode so edits pass through
-            // the permission hook (auto-approved there, with a guaranteed pre-edit baseline) instead of
-            // the CLI's own auto-accept, which would apply the write before we could snapshot it.
+            // "Review edits at end of turn": launch in the ask/manual mode so edits pass through the
+            // permission hook (auto-approved there, with a guaranteed pre-edit baseline) instead of the
+            // CLI's own auto-accept, which would apply the write before we could snapshot it.
+            //
+            // This MUST be the explicit value, not an omitted flag: omitting it means the CLI's default
+            // mode, which on 2.1.2xx+ is `auto` — and there the model decides whether to consult the
+            // permission hook. Measured against 2.1.263 (2026-09-10, same project, same flags, only the
+            // model swapped): Opus 5 applied an Edit without ever calling the hook, Haiku called it. The
+            // review then had no baseline and silently produced nothing.
             if (Settings.ReviewEditsAtTurnEnd && Settings.PermissionMode == "acceptEdits")
-                return null;
+                return AskPermissionModeArg;
             return Settings.PermissionMode switch
             {
                 "acceptEdits" => "acceptEdits",
                 "plan" => "plan",
                 "bypass" => "bypassPermissions",
-                _ => null, // "ask" → CLI default
+                _ => AskPermissionModeArg, // "ask" — same reasoning: must be explicit, else `auto` wins
             };
         }
     }

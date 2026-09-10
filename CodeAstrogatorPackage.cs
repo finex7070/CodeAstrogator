@@ -49,6 +49,14 @@ namespace CodeAstrogator
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
 
+            // FIRST: the persisted settings must be in _options before anything that can create a
+            // WebViewBridge runs. VS restores an open tool window during package load, and the bridge
+            // seeds its per-session settings (permission mode, "Review edits at end of turn", model,
+            // effort) from GetOptions() in its constructor — loading them later left the session on the
+            // DEFAULTS while the UI rendered the persisted values (a silently dead toggle).
+            // WebViewBridge re-syncs per turn as a second line of defence.
+            LoadSettings();
+
             if (await GetServiceAsync(typeof(IMenuCommandService)) is OleMenuCommandService commandService)
             {
                 commandService.AddCommand(new MenuCommand(
@@ -72,7 +80,6 @@ namespace CodeAstrogator
                 commandService.AddCommand(addSelection);
             }
 
-            LoadSettings();
             RunRetentionCleanup(); // prune old history / pasted files per the retention settings
         }
 
