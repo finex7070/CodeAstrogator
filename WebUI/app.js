@@ -2262,6 +2262,12 @@
   function applyModeUpdate(m) {
     if (m.permissionMode) state.permissionMode = m.permissionMode;
     state.planMode = !!m.planMode;
+    // Sub-toggles ride along when the host re-pushes the popover state after a settings change
+    // (absent on the plan-approval update, which only flips the mode) — so the popover can never
+    // show a toggle the host is not actually running with.
+    if (m.autoAcceptCommands !== undefined) state.autoAcceptCommands = !!m.autoAcceptCommands;
+    if (m.reviewEditsInEditor !== undefined) state.reviewEditsInEditor = !!m.reviewEditsInEditor;
+    if (m.reviewEditsAtTurnEnd !== undefined) state.reviewEditsAtTurnEnd = !!m.reviewEditsAtTurnEnd;
     updateModelModeLabel();
   }
 
