@@ -70,6 +70,35 @@ array (now **28** entries, skills listed first → see "Slash commands" popover-
 found & fixed:** the MCP tool-call **timeout deliverer** — the config `timeout` field now takes
 **precedence** over `MCP_TOOL_TIMEOUT` (see "Prompt timeout too short").
 
+**CLI 2.1.263 spot re-verification (2026-09-10, driven by "no end-of-turn review any more"):** the whole
+permission-hook path is ✓ **unchanged and healthy** — a stand-in server replaying `McpPermissionBridge`
+byte for byte (`X-Auth`, `protocolVersion 2025-11-25` echoed, tools/call arg **`input`**, allow with
+`updatedInput`, result delivered as an **SSE** `data:` event after keep-alives) was accepted by the CLI,
+and `Edit`/`Write` still reach the hook when `--permission-mode` is **omitted** (the mode
+`MapPermissionMode` returns for "Review edits at end of turn"). The **pre-edit baseline guarantee also
+still holds**: measured at `tools/call` time, `old_string` was still on disk and the new text was not
+(the CLI really does block on our reply before writing). One change to know about:
+- **`--permission-mode` choices were renamed/extended:** now `acceptEdits | auto | bypassPermissions |
+  manual | dontAsk | plan`. **`default` is gone; the old "ask" is `manual`, and omitting the flag now
+  resolves to `auto`** (or to whatever `permissions.defaultMode` in `~/.claude/settings.json` says).
+- **`auto` mode consults `--permission-prompt-tool` only when the MODEL decides to — this broke the
+  end-of-turn review (2026-09-10).** Measured in the same project, with the same flags, `--permission-mode`
+  omitted and the hook wired, changing **only the model**: `--model claude-haiku-4-5` → hook called for
+  `Edit`; `--model claude-opus-5 --effort high` → `initialize` + `tools/list` only, **no `tools/call`**,
+  and the edit applied anyway. So "omit the flag ⇒ every edit reaches the blocking hook" — the assumption
+  the whole baseline capture rests on — is **no longer true**, and with Opus 5 the review silently had
+  nothing to build from. `--permission-mode manual` + Opus 5 ✓ calls the hook. Same trap for plain
+  **"Ask before edits"**: on `auto` the CLI may apply an edit without ever prompting.
+- **Therefore the ask-mode value is now passed explicitly — and probed, not assumed.** No single literal
+  works on both versions (2.1.178 has no `manual`, 2.1.263 has no `default`), so
+  **`ClaudeCliCapabilities`** runs `claude --help` **once per executable** (cached, hidden process, same
+  shape as `ClaudeUsageClient` so no console flash), parses the `--permission-mode` choice list and
+  yields `AskPermissionModeArg` = `"manual"` when offered, else **null** (omit the flag = the old
+  behaviour, which is correct on those CLIs). `ClaudeSessionService` resolves it before mapping the mode
+  and `MapPermissionMode` returns it for both the review case and UI "ask"; a failed probe reports
+  "unknown" and keeps the legacy behaviour. `OnOptionsChanged` invalidates the cache (the exe path may
+  have changed). Covered by `CliCapabilitiesTests` (both help shapes + unreadable output).
+
 ## Structure / code map
 - By request, **everything in one project** (`CodeAstrogator.csproj`) instead of the four
   projects named in the plan. Tests separately in `CodeAstrogator.Tests` (xUnit, net472, NDJSON fixtures).
@@ -726,11 +755,14 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   `onConfirm` runs the actual switch (`applyMode` → `permission.set`); Cancel leaves
   `state.permissionMode` untouched. Guarded by `state.permissionMode !== "bypass"` so re-selecting
   the already-active mode (and every non-bypass mode) still switches instantly with no prompt.
-- **`mode.update` (host→web, contract addition, v0.3.6):** `{ permissionMode, planMode }`. The host
+- **`mode.update` (host→web, contract addition, v0.3.6):** `{ permissionMode, planMode }` plus the
+  **optional** sub-toggles `{ autoAcceptCommands, reviewEditsInEditor, reviewEditsAtTurnEnd }`. The host
   uses it to push a host-side mode change into the UI selector, **without** wiping the transcript
   (unlike `session.init`). Used on plan approve: `ApplyPlanApprovedMode` switches to
   `acceptEdits` and sends `mode.update`; the UI (`applyModeUpdate`) sets `state.permissionMode`/
-  `state.planMode` and calls `updateModelModeLabel()`.
+  `state.planMode` and calls `updateModelModeLabel()`. The sub-toggles are **absent** there and only
+  sent by `SendModeState()` on an options change; `applyModeUpdate` applies each one only when it is
+  present, so the plan-approval update cannot clear them.
 - **Ultracode toggle** (contract addition): web→host `ultracode.set { enabled }`;
   `session.init` additionally carries `ultracode: bool`. With the toggle active, the host appends
   the keyword `ultracode` to every prompt (opt-in for multi-agent workflows in the
@@ -1359,7 +1391,9 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
 - **Baseline is captured via the permission hook, NOT a `tool.use` read.** A `tool.use` stream event and the
   CLI's disk write race across two processes — reading the file then can lose the race (baseline already edited,
   or an empty read → revert-to-empty = **data loss**). So when the toggle is on + mode `acceptEdits`,
-  `MapPermissionMode` returns **null** (CLI default/ask) so `Edit/Write/MultiEdit` reach the blocking hook;
+  `MapPermissionMode` returns the **explicit** ask-mode value (`manual` on 2.1.2xx+, null on legacy CLIs
+  where omission still means ask — see the CLI-version notes at the top; passing nothing on a current CLI
+  means `auto`, and Opus 5 then never calls the hook) so `Edit/Write/MultiEdit` reach the blocking hook;
   `ClaudeSessionService.EditsRouteThroughHook` is pinned per-turn. In `HandlePermissionRequestedAsync` a new
   branch (before the "Auto-accept commands" short-circuit) reads the whole file **before** replying (the CLI
   blocks on us ⇒ guaranteed pre-image), auto-`allow`s, and posts the pre-decided green card. The `tool.use`
@@ -1373,6 +1407,26 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   `_turnReviews` (path→`{Session,Baseline,IsNew}`, present ⇒ next prompt gated). Reset at **next-turn start**
   (`RunPrompt`) + `session.new`/`load` — **NOT** `OnTurnCompleted` (it runs *after* `TurnResultEvent` in the same
   turn and would wipe the just-built list).
+- **The options are the single source of truth for the popover state (fix 2026-09-10).** The WebUI renders
+  mode + sub-toggles from `AstrogatorOptions`, while the turn is driven by `ClaudeSessionService.Settings`.
+  Those were only ever aligned in the `WebViewBridge` constructor and in the individual `*.set` handlers:
+  `OnOptionsChanged` re-synced the MCP timeout **only**, and nothing re-pushed the popover state to the
+  UI (`session.init` would, but it clears the transcript). Any drift therefore showed a control that
+  lies — most sharply here: the toggle read **on** while the turn ran with `ReviewEditsAtTurnEnd == false`,
+  so `EditsRouteThroughHook` was false, the CLI got `--permission-mode acceptEdits` and applied the edits
+  itself, no baseline was captured and **no review appeared** — while the `tool.use` pre-render
+  (decision #19) still showed the *same* green auto-approved card, so the UI looked identical to the
+  working feature. Now: `SyncSessionSettingsFromOptions()` mirrors model/effort/ultracode/permission
+  mode/`ReviewEditsAtTurnEnd`/MCP timeout (**not** `PlanMode` — session-only) and runs in the
+  constructor, in `OnOptionsChanged`, and **before every turn** in `RunPrompt`; `SendModeState()` pushes
+  the values back to the UI via `mode.update`. `LoadSettings()` also moved to the **top** of
+  `InitializeAsync`, so no bridge can be constructed before the persisted options are in `_options`.
+- **The feature no longer fails silently.** Every remaining way to end a turn with nothing to review used
+  to be a `return` with no user-visible trace. Two dim system notes now cover them: (a) the option is on
+  and the process was launched in `acceptEdits`, but the turn was **not armed** (`EditsRouteThroughHook`
+  false) → "not armed for this turn … switch it off and on again to re-arm"; (b) `_turnBaselineSkip` is
+  non-empty → "N changed file(s) could not be reviewed: pre-edit baseline not readable". Both are posted
+  **outside** `_turnReviewLock` (`PostSystemNote` takes the history lock — do not nest the two).
 - **Reuses `EditReviewSession`** by modelling each file as a **Write** (`old`=baseline, `content`=current disk);
   `BuildUpdatedInput` reconstructs (accept→disk line, reject→baseline line; all-rejected→null ⇒ host writes the
   baseline back, or deletes the file if `isNew`).
