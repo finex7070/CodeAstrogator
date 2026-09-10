@@ -121,12 +121,7 @@ namespace CodeAstrogator.Bridge
             // seed the session from the persisted Model·Mode popover state (sticky across new
             // chats + VS restarts); the popover writes these back via SaveOptions on each change
             var opt = package.GetOptions();
-            _session.Settings.Model = string.IsNullOrEmpty(opt.DefaultModel) ? null : opt.DefaultModel;
-            _session.Settings.Effort = opt.DefaultEffortString;
-            _session.Settings.Ultracode = opt.UltracodeEnabled;
-            _session.Settings.PermissionMode = opt.PermissionModeString;
-            _session.Settings.ReviewEditsAtTurnEnd = opt.ReviewEditsAtTurnEnd;
-            _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
+            SyncSessionSettingsFromOptions();
             _activeFileSessionEnabled = opt.ActiveFileOnByDefault; // initial per-session toggle = option default
             _checkpoints.Filter = BuildCheckpointFilter(opt);      // size limit + extension black/whitelist
 
@@ -203,6 +198,24 @@ namespace CodeAstrogator.Bridge
         /// Applies the UsePersistentCli option by swapping the process host when it changed.
         /// Only swaps while idle; otherwise the change takes effect on the next tool-window open.
         /// </summary>
+        /// <summary>Mirrors every persisted Model·Mode popover value onto the live session settings.
+        /// The WebUI renders these from the OPTIONS, so any drift between the two shows a control that
+        /// lies (most sharply "Review all edits at end of turn": the toggle read on while the turn ran
+        /// with it off, so no baseline was captured and no end-of-turn review ever appeared). Called
+        /// from the constructor, on every options change, and before each turn.
+        /// <see cref="SessionSettings.PlanMode"/> is deliberately NOT synced — it is per-session state
+        /// with no option behind it.</summary>
+        private void SyncSessionSettingsFromOptions()
+        {
+            var opt = _package.GetOptions();
+            _session.Settings.Model = string.IsNullOrEmpty(opt.DefaultModel) ? null : opt.DefaultModel;
+            _session.Settings.Effort = opt.DefaultEffortString;
+            _session.Settings.Ultracode = opt.UltracodeEnabled;
+            _session.Settings.PermissionMode = opt.PermissionModeString;
+            _session.Settings.ReviewEditsAtTurnEnd = opt.ReviewEditsAtTurnEnd;
+            _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
+        }
+
         private void ApplyProcessHostOption()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -519,8 +532,10 @@ namespace CodeAstrogator.Bridge
 
             var options = _package.GetOptions();
             var cwd = _package.GetSolutionDirectory();
-            if (string.IsNullOrEmpty(_session.Settings.Model) && !string.IsNullOrEmpty(options.DefaultModel))
-                _session.Settings.Model = options.DefaultModel;
+            // The options are the source of truth for everything the popover shows; re-mirror them here
+            // so a turn can never run with settings the UI does not display (see
+            // SyncSessionSettingsFromOptions). RunTurnAsync pins the mode right after this.
+            SyncSessionSettingsFromOptions();
 
             _turnHadAssistantOutput = false;
             ResetTurnReviewState(); // fresh turn → drop the previous turn's captured baselines/reviews
@@ -1034,15 +1049,34 @@ namespace CodeAstrogator.Bridge
         private void BuildAndPostTurnReviewList()
         {
             if (!_session.EditsRouteThroughHook)
+            {
+                // The toggle is on, yet this turn did NOT route edits through the hook — so the CLI
+                // applied them itself and no pre-edit baseline exists. Every failure below used to be
+                // silent ("the option does nothing"), which is the hardest kind to diagnose: say it.
+                if (_package.GetOptions().ReviewEditsAtTurnEnd
+                    && _session.LaunchedPermissionMode == "acceptEdits")
+                {
+                    PostSystemNote("End-of-turn edit review was not armed for this turn — the CLI applied "
+                        + "the edits itself, so there is no pre-edit baseline to review. Switch \"Review all "
+                        + "edits at end of turn\" off and on again to re-arm it.");
+                }
                 return; // feature off / not acceptEdits this turn
+            }
 
-            System.Collections.Generic.Dictionary<string, string> baselines;
+            // Snapshot the state under the lock; the notes are posted outside it (PostSystemNote takes
+            // the history lock, and nesting the two in one order only would be a trap for later edits).
+            System.Collections.Generic.Dictionary<string, string>? baselines = null;
+            int skipped;
             lock (_turnReviewLock)
             {
-                if (_turnEditBaselines.Count == 0)
-                    return;
-                baselines = new System.Collections.Generic.Dictionary<string, string>(_turnEditBaselines, StringComparer.OrdinalIgnoreCase);
+                skipped = _turnBaselineSkip.Count;
+                if (_turnEditBaselines.Count > 0)
+                    baselines = new System.Collections.Generic.Dictionary<string, string>(_turnEditBaselines, StringComparer.OrdinalIgnoreCase);
             }
+            if (skipped > 0)
+                PostBaselineSkipNote(skipped);
+            if (baselines == null)
+                return;
 
             var files = new JArray();
             var built = new System.Collections.Generic.Dictionary<string, TurnReview>(StringComparer.OrdinalIgnoreCase);
@@ -1134,6 +1168,15 @@ namespace CodeAstrogator.Bridge
                 ["allDecided"] = session.AllDecided, // chip's Finish button is enabled only when true
             };
         }
+
+        /// <summary>Reports files whose pristine content could not be captured (the write had already
+        /// landed, or the read failed). Those are deliberately never reviewed — reverting against an
+        /// untrustworthy baseline would destroy content — but staying quiet about it made the feature
+        /// look broken instead of partial.</summary>
+        private void PostBaselineSkipNote(int skipped) =>
+            PostSystemNote(skipped == 1
+                ? "1 changed file could not be reviewed: its pre-edit baseline was not readable."
+                : skipped + " changed files could not be reviewed: their pre-edit baselines were not readable.");
 
         /// <summary>Clears all captured baselines and pending reviews (new turn / session change).</summary>
         private void ResetTurnReviewState()
@@ -2716,9 +2759,11 @@ namespace CodeAstrogator.Bridge
             SendActiveFile(); // the auto-add-active-file toggle may have changed
             SendBannerSettings(); // announcement/update opt-in may have changed in the settings window
             SendCheckpointSettings(); // checkpoints are only configured there → push the new state
+            SendModeState();          // popover state may have changed → keep the UI and the host in step
             _checkpoints.Filter = BuildCheckpointFilter(_package.GetOptions()); // applies to the next snapshot
+            SyncSessionSettingsFromOptions(); // incl. the MCP timeout below (options are the source of truth)
+            ClaudeCliCapabilities.Invalidate();  // the executable path may have changed → re-probe its --help
             var promptTimeoutMs = PromptTimeoutMs(_package.GetOptions());
-            _session.Settings.McpToolTimeoutMs = promptTimeoutMs;       // env-var fallback, applies next turn
             _permission.UpdateToolTimeout(promptTimeoutMs);            // config `timeout` (the value the CLI prefers)
             ApplyProcessHostOption(); // persistent-CLI toggle may have changed
         }
@@ -3324,6 +3369,25 @@ namespace CodeAstrogator.Bridge
                 ["updateCheckDecided"] = options.UpdateCheckDecided,
                 ["checkpoints"] = BuildCheckpointsState(),
                 ["appVersion"] = GetInstalledVersion(),
+            });
+        }
+
+        /// <summary>Re-pushes the Model·Mode popover state (mode + its sub-toggles) after an options
+        /// change. Uses <c>mode.update</c> rather than <c>session.init</c> on purpose: session.init
+        /// clears the transcript view. Without this the popover kept rendering whatever it was last told
+        /// while the host had moved on — the toggle looked on while the turn ran with it off.</summary>
+        private void SendModeState()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = _package.GetOptions();
+            Post(new JObject
+            {
+                ["type"] = "mode.update",
+                ["permissionMode"] = _session.Settings.PermissionMode,
+                ["planMode"] = _session.Settings.PlanMode,
+                ["autoAcceptCommands"] = options.AutoAcceptCommands,
+                ["reviewEditsInEditor"] = options.ReviewEditsInEditor,
+                ["reviewEditsAtTurnEnd"] = options.ReviewEditsAtTurnEnd,
             });
         }
 
