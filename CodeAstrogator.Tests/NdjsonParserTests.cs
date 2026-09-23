@@ -111,6 +111,56 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void QueuedTaskNotification_ResultIsNotTheTurnEnd()
+        {
+            // Shape measured against CLI 2.1.280 (2026-09-23): a background task from the previous
+            // turn reported back, so the run opens with task_notification → init → a zero-turn result
+            // for the notification, and only then runs the user's prompt behind a second init.
+            var events = ParseFixture("turn-task-notification.ndjson");
+
+            var notification = events.OfType<NotificationTurnResultEvent>().Single();
+            Assert.Equal("sess-bg", notification.SessionId);
+            Assert.Equal(59, notification.DurationMs);
+
+            // exactly one real turn end — the user's prompt, not the notification
+            var result = events.OfType<TurnResultEvent>().Single();
+            Assert.Equal(1, result.NumTurns);
+            Assert.Equal(7906, result.DurationMs);
+            Assert.Equal("Not yet.", result.ResultText);
+
+            // and it comes after the streamed answer, i.e. at the real end of the turn
+            var kinds = events.Select(e => e.GetType().Name).ToList();
+            Assert.True(kinds.IndexOf(nameof(NotificationTurnResultEvent)) < kinds.IndexOf(nameof(AssistantStartEvent)));
+            Assert.Equal(nameof(TurnResultEvent), kinds.Last());
+        }
+
+        [Fact]
+        public void ZeroTurnResult_WithoutNotification_StillEndsTheTurn()
+        {
+            // Local slash commands (/help, /usage …) legitimately end with num_turns 0 — only a result
+            // that answers a queued task notification may be diverted.
+            var events = ParseFixture("turn-local-slash.ndjson");
+            Assert.Empty(events.OfType<NotificationTurnResultEvent>());
+            Assert.Equal(0, events.OfType<TurnResultEvent>().Single().NumTurns);
+        }
+
+        [Fact]
+        public void Notification_OnlyDivertsTheNextResult()
+        {
+            // A notification must not swallow a later real result that happens to report 0 turns.
+            var parser = new NdjsonParser();
+            var events = new[]
+            {
+                "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"t1\",\"status\":\"completed\"}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":0,\"result\":\"\",\"session_id\":\"s\",\"duration_ms\":10}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":0,\"result\":\"local\",\"session_id\":\"s\",\"duration_ms\":20}",
+            }.SelectMany(parser.ParseLine).ToList();
+
+            Assert.Single(events.OfType<NotificationTurnResultEvent>());
+            Assert.Equal("local", events.OfType<TurnResultEvent>().Single().ResultText);
+        }
+
+        [Fact]
         public void Result_AggregatesUsageIncludingCacheTokens()
         {
             var result = ParseFixture("turn-success.ndjson").OfType<TurnResultEvent>().Single();

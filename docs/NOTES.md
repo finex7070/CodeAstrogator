@@ -620,7 +620,7 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
 |---|---|
 | Slash/result-only turns (`result.result` without stream) | full assistant block (fallback) |
 | Session start, turn footer (time·cost·tokens), Stop, Compact, Auto-Approve, Deny | system line |
-| Thinking | transient "✻ Thinking…" line (without token counter; the Print CLI redacts the text — empty `thinking_delta`s); disappears on thinking.end. Once text arrives per item (future CLI), upgrade to a collapsible card (Detailed: open) |
+| Thinking | transient "✻ Thinking…" line (without token counter; the Print CLI redacts the text — empty `thinking_delta`s); disappears on thinking.end. Once text arrives per item, upgrade to a collapsible card (Detailed: open). The card (`.thinking-card`) has the **tool-card footprint** — flush left, `margin: 6px 0`, `--bg-elevated` — with a neutral grey `--border` and no status colour (2026-09-23; it used to be indented 22 px with a near-black `--border-subtle` edge) |
 | Task/Agent tool | tool card with accent edge + description |
 | TodoWrite | checklist card (☐/◐/☑, open, collapsible) |
 | ExitPlanMode | plan card (Markdown, accent border). **When a permission prompt follows** (plan mode → the MCP hook fires), the perm-card renders the plan as Markdown too and the standalone `.plan-card` is dropped, so the plan shows **once** (not Markdown card + raw-JSON approval card). Dedup handles both arrival orders: `permissionRequest` removes any `.tool-card`/`.plan-card` with the same id; `planCard` skips if a `.perm-card` for the id already exists. |
@@ -630,6 +630,24 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
 ## CLI integration (Part A §A3)
 - The prompt is passed to `claude -p` via **stdin** (not argv) — robust against
   multiline prompts and the npm `claude.cmd` shim.
+- **Queued background-task notification = its own zero-turn `result` (CLI 2.1.280, 2026-09-23).**
+  When a `run_in_background` task from an earlier turn has reported back, the next `-p` run opens with
+  `system/task_notification` → `system/init` → **`result`** (`num_turns: 0`, `result: ""`,
+  `duration_ms` ≈ 60, `total_cost_usd` = the unchanged session total) and only then runs the user's
+  prompt behind a **second** `system/init`, ending with the real `result`. Treated as the turn end, that
+  first result drew a **"0s · $x" footer the moment the prompt was sent** (user report on Opus 5.5 —
+  model-independent) and ran the whole turn-end bookkeeping early: `BuildAndPostTurnReviewList` (the
+  end-of-turn review), usage refresh, `taskBatchClosed`. **Fix:** `NdjsonParser` remembers a
+  `task_notification` and emits the next zero-turn, non-subagent result as
+  **`NotificationTurnResultEvent`**, which bridge and session service ignore. A zero-turn result
+  **without** a preceding notification (`/help`, `/usage` …) still ends the turn; the flag is consumed by
+  the first result either way. Fixture `turn-task-notification.ndjson`. The doubled `system/init` is
+  harmless (the "Session started" note is announced once). Re-verify on a CLI update.
+- **Background tasks do not survive the turn.** The notification above reads `"status": "stopped"`,
+  `"summary": "Background shell command didn't finish before the previous session ended"`: every turn is
+  its own `claude -p` process, and a `run_in_background` shell still running when that process exits is
+  stopped with it. So "the deploy keeps running in the background, I'll report back" cannot work in this
+  extension — the model does not know that. Open point, not addressed yet.
 - **Effort:** 5 levels instead of the 3 from §5.4 — the CLI (checked against 2.1.161) knows
   `--effort low|medium|high|xhigh|max`; passed through per turn
   (default **high**, configurable in Tools → Options).
