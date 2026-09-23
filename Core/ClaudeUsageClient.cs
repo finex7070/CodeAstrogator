@@ -87,8 +87,10 @@ namespace CodeAstrogator.Core
         /// and <c>--bare</c> would force API-key auth). Passing this file via <c>--settings</c>
         /// suppresses the hooks for the status poll only — the real <c>~/.claude/settings.json</c>
         /// stays untouched, so hooks keep firing for actual chat turns.
+        /// Shared with <see cref="ClaudeModelCatalog"/>, whose <c>/model</c> probe is the same kind
+        /// of short-lived headless session.
         /// </summary>
-        private static string? EnsureNoHooksSettingsFile()
+        internal static string? EnsureNoHooksSettingsFile()
         {
             var cached = _noHooksSettingsPath;
             if (cached != null)

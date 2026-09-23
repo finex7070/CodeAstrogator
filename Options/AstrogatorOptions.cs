@@ -56,6 +56,18 @@ namespace CodeAstrogator.Options
         /// While false (for either this or <see cref="NoticeFetchDecided"/>), the popup is shown.</summary>
         public bool UpdateCheckDecided { get; set; } = false;
 
+        /// <summary>Whether the host may fetch the model catalog (<c>models.json</c>) from the project's
+        /// GitHub, so newly released Claude models show up in the picker without an extension update
+        /// (at most once every 12 h, host-side). Off by default; opted in via the consent popup or the
+        /// settings window. With it off, the copy bundled in the VSIX is used and nothing leaves the
+        /// machine — the CLI probe itself is local either way.</summary>
+        public bool ModelCatalogFetchEnabled { get; set; } = false;
+
+        /// <summary>Whether the user has decided the model-catalog opt-in. While false (for this or one
+        /// of the other consent values), the first-run popup is shown — which is why an existing install
+        /// sees it once more after updating to the version that introduced this option.</summary>
+        public bool ModelCatalogFetchDecided { get; set; } = false;
+
         /// <summary>How long (minutes) the CLI waits on a permission/AskUserQuestion prompt before
         /// it times out (applied via MCP_TOOL_TIMEOUT). Clamped to [<see cref="MinPromptTimeoutMinutes"/>,
         /// <see cref="MaxPromptTimeoutMinutes"/>]. Default 60 (1 h).</summary>
@@ -78,13 +90,6 @@ namespace CodeAstrogator.Options
         public bool ActiveFileOnByDefault { get; set; } = true;
         public string ThemeModeString { get; set; } = "auto";
         public string VerbosityString { get; set; } = "normal";
-
-        /// <summary>
-        /// When on, drive the CLI as one long-lived bidirectional stream-json process
-        /// (lower per-turn latency + in-place interrupt) instead of one process per turn.
-        /// Opt-in; the per-turn host stays the default. See docs/NOTES.md ("Persistent CLI").
-        /// </summary>
-        public bool UsePersistentCli { get; set; } = false;
 
         /// <summary>When on, file-edit permission prompts (Edit/Write/MultiEdit) are reviewed
         /// <em>in the code editor</em> instead of via the inline diff card: the chat shows a file

@@ -51,6 +51,8 @@ namespace CodeAstrogator.Services
                 NoticeFetchDecided = GetBool(nameof(AstrogatorOptions.NoticeFetchDecided), d.NoticeFetchDecided),
                 UpdateCheckEnabled = GetBool(nameof(AstrogatorOptions.UpdateCheckEnabled), d.UpdateCheckEnabled),
                 UpdateCheckDecided = GetBool(nameof(AstrogatorOptions.UpdateCheckDecided), d.UpdateCheckDecided),
+                ModelCatalogFetchEnabled = GetBool(nameof(AstrogatorOptions.ModelCatalogFetchEnabled), d.ModelCatalogFetchEnabled),
+                ModelCatalogFetchDecided = GetBool(nameof(AstrogatorOptions.ModelCatalogFetchDecided), d.ModelCatalogFetchDecided),
                 PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(
                     GetInt(nameof(AstrogatorOptions.PromptTimeoutMinutes), d.PromptTimeoutMinutes)),
                 RestoreLastSession = GetBool(nameof(AstrogatorOptions.RestoreLastSession), d.RestoreLastSession),
@@ -59,7 +61,6 @@ namespace CodeAstrogator.Services
                 ActiveFileOnByDefault = GetBool(nameof(AstrogatorOptions.ActiveFileOnByDefault), d.ActiveFileOnByDefault),
                 ThemeModeString = GetString(nameof(AstrogatorOptions.ThemeModeString), d.ThemeModeString),
                 VerbosityString = GetString(nameof(AstrogatorOptions.VerbosityString), d.VerbosityString),
-                UsePersistentCli = GetBool(nameof(AstrogatorOptions.UsePersistentCli), d.UsePersistentCli),
                 ReviewEditsInEditor = GetBool(nameof(AstrogatorOptions.ReviewEditsInEditor), d.ReviewEditsInEditor),
                 ReviewEditsAtTurnEnd = GetBool(nameof(AstrogatorOptions.ReviewEditsAtTurnEnd), d.ReviewEditsAtTurnEnd),
                 HistoryRetentionDays = AstrogatorOptions.ClampRetentionDays(
@@ -97,6 +98,8 @@ namespace CodeAstrogator.Services
             _store.SetString(Collection, nameof(AstrogatorOptions.AccentColor), o.AccentColor ?? "");
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.NoticeFetchEnabled), o.NoticeFetchEnabled);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.NoticeFetchDecided), o.NoticeFetchDecided);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ModelCatalogFetchEnabled), o.ModelCatalogFetchEnabled);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ModelCatalogFetchDecided), o.ModelCatalogFetchDecided);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UpdateCheckEnabled), o.UpdateCheckEnabled);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UpdateCheckDecided), o.UpdateCheckDecided);
             _store.SetInt32(Collection, nameof(AstrogatorOptions.PromptTimeoutMinutes),
@@ -107,7 +110,6 @@ namespace CodeAstrogator.Services
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ActiveFileOnByDefault), o.ActiveFileOnByDefault);
             _store.SetString(Collection, nameof(AstrogatorOptions.ThemeModeString), o.ThemeModeString ?? "auto");
             _store.SetString(Collection, nameof(AstrogatorOptions.VerbosityString), o.VerbosityString ?? "normal");
-            _store.SetBoolean(Collection, nameof(AstrogatorOptions.UsePersistentCli), o.UsePersistentCli);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ReviewEditsInEditor), o.ReviewEditsInEditor);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ReviewEditsAtTurnEnd), o.ReviewEditsAtTurnEnd);
             _store.SetInt32(Collection, nameof(AstrogatorOptions.HistoryRetentionDays),

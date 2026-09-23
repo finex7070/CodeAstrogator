@@ -38,8 +38,8 @@ namespace CodeAstrogator.ToolWindows
         private readonly CheckBox _activeFileDefault;
         private readonly CheckBox _noticeFetch;
         private readonly CheckBox _updateCheck;
+        private readonly CheckBox _modelCatalogFetch;
         private readonly TextBox _promptTimeout;
-        private readonly CheckBox _persistentCli;
         private readonly ComboBox _historyRetention;
         private readonly ComboBox _pastedRetention;
         private readonly CheckBox _checkpoints;
@@ -89,10 +89,10 @@ namespace CodeAstrogator.ToolWindows
             _autoAdd.Unchecked += (_, __) => { _includeLines.IsEnabled = false; _activeFileDefault.IsEnabled = false; };
             _noticeFetch = MakeCheck("Periodically check the project's GitHub for announcements and show them as a banner (makes a network request)", new Thickness(0, 8, 0, 0));
             _updateCheck = MakeCheck("Notify me about new versions (checks the project's GitHub for updates and shows a banner)", new Thickness(0, 8, 0, 0));
+            _modelCatalogFetch = MakeCheck("Keep the model list up to date from the project's GitHub, so newly released Claude models appear in the picker without an extension update (checked at most every 12 h; off = the list shipped with this version is used)", new Thickness(0, 8, 0, 0));
             _promptTimeout = MakeTextBox();
             _promptTimeout.HorizontalAlignment = HorizontalAlignment.Left;
             _promptTimeout.MinWidth = 80;
-            _persistentCli = MakeCheck("Use a persistent CLI session (lower latency; experimental)", new Thickness(0, 8, 0, 0));
             _historyRetention = MakeRetentionCombo();
             _pastedRetention = MakeRetentionCombo();
             var gitAvailable = Core.GitCheckpointService.IsGitAvailable();
@@ -133,6 +133,7 @@ namespace CodeAstrogator.ToolWindows
             left.Children.Add(Header("Announcements & updates"));
             left.Children.Add(_noticeFetch);
             left.Children.Add(_updateCheck);
+            left.Children.Add(_modelCatalogFetch);
             left.Children.Add(Header("Permissions"));
             left.Children.Add(Labeled(
                 "Auto-approve patterns (* = wildcard) — matching Bash/PowerShell commands and MCP tools "
@@ -143,8 +144,6 @@ namespace CodeAstrogator.ToolWindows
                 $"Prompt timeout — how long a permission prompt / question waits for your answer "
                 + $"before it expires (minutes, {AstrogatorOptions.MinPromptTimeoutMinutes}–{AstrogatorOptions.MaxPromptTimeoutMinutes}):",
                 _promptTimeout));
-            left.Children.Add(Header("Advanced"));
-            left.Children.Add(_persistentCli);
 
             var right = new StackPanel();
             right.Children.Add(Header("History & storage"));
@@ -236,8 +235,8 @@ namespace CodeAstrogator.ToolWindows
             _activeFileDefault.IsEnabled = o.AutoAddActiveFile;
             _noticeFetch.IsChecked = o.NoticeFetchEnabled;
             _updateCheck.IsChecked = o.UpdateCheckEnabled;
+            _modelCatalogFetch.IsChecked = o.ModelCatalogFetchEnabled;
             _promptTimeout.Text = AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes).ToString();
-            _persistentCli.IsChecked = o.UsePersistentCli;
             SelectRetention(_historyRetention, o.HistoryRetentionDays);
             SelectRetention(_pastedRetention, o.PastedRetentionDays);
             _checkpoints.IsChecked = o.CheckpointsEnabled;
@@ -326,8 +325,9 @@ namespace CodeAstrogator.ToolWindows
                 NoticeFetchDecided = true, // setting it here counts as having decided → no consent popup
                 UpdateCheckEnabled = _updateCheck.IsChecked == true,
                 UpdateCheckDecided = true,
+                ModelCatalogFetchEnabled = _modelCatalogFetch.IsChecked == true,
+                ModelCatalogFetchDecided = true,
                 PromptTimeoutMinutes = ParsePromptTimeout(_promptTimeout.Text),
-                UsePersistentCli = _persistentCli.IsChecked == true,
                 HistoryRetentionDays = SelectedRetention(_historyRetention),
                 PastedRetentionDays = SelectedRetention(_pastedRetention),
                 CheckpointsEnabled = _checkpoints.IsChecked == true,
