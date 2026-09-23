@@ -46,6 +46,14 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
+    <!-- Default model catalog. Shipped in the VSIX as the offline fallback; the same file is fetched
+         from GitHub raw at runtime so a new Claude model needs no release (see docs/NOTES.md). -->
+    <Content Include="models.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+  </ItemGroup>
+  <ItemGroup>
     <!-- Extension logo (Resources\codeastrogator.png is the 256px full-body master; icon-90/preview-200
          are generated from it. Resources\codeastrogator-head.png is the head-only master for small sizes;
          icon-16/20/24/32 are generated from it. Both masters are source-only, not shipped. -->

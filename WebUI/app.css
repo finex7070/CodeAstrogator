@@ -1633,6 +1633,17 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 
 /* Model·Mode popover */
 .mm-pop { min-width: 240px; max-width: 300px; padding: 8px; }
+
+/* "More models": older generations open in a flyout to the LEFT of the picker (a separate panel in
+   #overlay-layer, so the picker keeps its size). The row carries its own radio dot — lit while the
+   active model is one of the entries inside — and a caret pointing at where the panel appears. */
+.mm-submenu-toggle .mm-submenu-caret { margin-left: auto; color: var(--text-dim); }
+.mm-flyout {
+  width: max-content;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 4px;
+}
 /* five effort segments need tighter type than the 3-way appearance control */
 .seg-effort .seg-btn { font-size: 11px; padding: 0 2px; }
 

@@ -231,6 +231,8 @@ namespace CodeAstrogator
             to.NoticeFetchDecided = from.NoticeFetchDecided;
             to.UpdateCheckEnabled = from.UpdateCheckEnabled;
             to.UpdateCheckDecided = from.UpdateCheckDecided;
+            to.ModelCatalogFetchEnabled = from.ModelCatalogFetchEnabled;
+            to.ModelCatalogFetchDecided = from.ModelCatalogFetchDecided;
             to.PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(from.PromptTimeoutMinutes);
             to.RestoreLastSession = from.RestoreLastSession;
             to.AutoAddActiveFile = from.AutoAddActiveFile;
@@ -238,7 +240,6 @@ namespace CodeAstrogator
             to.IncludeSelectedLines = from.IncludeSelectedLines;
             to.ThemeModeString = from.ThemeModeString ?? "auto";
             to.VerbosityString = from.VerbosityString ?? "normal";
-            to.UsePersistentCli = from.UsePersistentCli;
             to.ReviewEditsInEditor = from.ReviewEditsInEditor;
             to.ReviewEditsAtTurnEnd = from.ReviewEditsAtTurnEnd;
             to.HistoryRetentionDays = AstrogatorOptions.ClampRetentionDays(from.HistoryRetentionDays);
