@@ -4,6 +4,16 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.8.1] – 2026-09-23
+
+### Fixed
+- **A turn no longer shows as finished ("0s") the moment you send a prompt.** If Claude had started a command in the background during the previous turn, the Claude Code CLI now first reports on that command before it gets to your new prompt — and it closes that report with its own "turn finished" message. Code Astrogator took that message for the end of your turn: a "0s · $…" footer appeared immediately while Claude was still thinking, and everything that belongs at the end of a turn ran too early — including the changed-files review of "Review all edits at end of turn" and the usage refresh. That report is now recognised and skipped, so the footer and the end-of-turn steps wait for the real end of your turn. It happened with any model, not just Opus 5.5.
+
+### Changed
+- **Thinking cards now look like the other cards.** Once Claude's thinking turns into a card, it sits flush with the tool cards instead of being indented, and it is a neutral grey card with a grey border instead of a transparent box with a near-black edge.
+
+---
+
 ## [0.8.0] – 2026-09-23
 
 ### Added

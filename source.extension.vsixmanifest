@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
     <Metadata>
-        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="0.8.0" Language="en-US" Publisher="Code Astrogator" />
+        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="0.8.1" Language="en-US" Publisher="Code Astrogator" />
         <!-- Marketplace / Extension-Manager name. Deliberately carries the search terms: the
              in-product strings (View → Other Windows, tool-window caption, context menu) come from
              CodeAstrogatorPackage.vsct and stay plain "Code Astrogator". -->
