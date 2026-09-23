@@ -24,6 +24,10 @@ namespace CodeAstrogator.Core
         private long _lastContextInput;
         private long _lastContextOutput;
 
+        // A system/task_notification opened this run: the next zero-turn result belongs to the queued
+        // notification, not to the user's prompt (see NotificationTurnResultEvent).
+        private bool _notificationPending;
+
         /// <summary>Maximum length of a tool-result summary forwarded to the UI
         /// (the UI collapses long output behind a "Show more" toggle).</summary>
         public int MaxSummaryLength { get; set; } = 10000;
@@ -80,7 +84,7 @@ namespace CodeAstrogator.Core
             return events;
         }
 
-        private static void ParseSystem(JObject obj, List<ClaudeEvent> events)
+        private void ParseSystem(JObject obj, List<ClaudeEvent> events)
         {
             var subtype = obj.Value<string>("subtype") ?? "";
             if (subtype == "init")
@@ -120,6 +124,10 @@ namespace CodeAstrogator.Core
             else if (subtype == "status")
             {
                 events.Add(new StatusEvent { Status = obj.Value<string>("status") });
+            }
+            else if (subtype == "task_notification")
+            {
+                _notificationPending = true;
             }
         }
 
@@ -259,6 +267,24 @@ namespace CodeAstrogator.Core
 
         private void ParseResult(JObject obj, List<ClaudeEvent> events)
         {
+            var numTurns = obj.Value<int?>("num_turns") ?? 0;
+
+            // The queued background-task notification is answered first, as a zero-turn "turn" of its
+            // own; the user's prompt follows with a fresh system/init. Only the notification's result is
+            // diverted — a zero-turn result WITHOUT a preceding notification is a real local turn
+            // (/help, /usage …) and still ends the turn.
+            if (_notificationPending && numTurns == 0 && string.IsNullOrEmpty(obj.Value<string>("parent_tool_use_id")))
+            {
+                _notificationPending = false;
+                events.Add(new NotificationTurnResultEvent
+                {
+                    SessionId = obj.Value<string>("session_id") ?? "",
+                    DurationMs = obj.Value<long?>("duration_ms") ?? 0,
+                });
+                return;
+            }
+            _notificationPending = false;
+
             var usage = obj["usage"] as JObject;
             long input = usage?.Value<long?>("input_tokens") ?? 0;
             input += usage?.Value<long?>("cache_read_input_tokens") ?? 0;
@@ -267,7 +293,7 @@ namespace CodeAstrogator.Core
             events.Add(new TurnResultEvent
             {
                 SessionId = obj.Value<string>("session_id") ?? "",
-                NumTurns = obj.Value<int?>("num_turns") ?? 0,
+                NumTurns = numTurns,
                 IsError = obj.Value<bool?>("is_error") ?? false,
                 CostUsd = obj.Value<double?>("total_cost_usd") ?? 0,
                 DurationMs = obj.Value<long?>("duration_ms") ?? 0,
