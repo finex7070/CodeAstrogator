@@ -1797,11 +1797,13 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   50% { opacity: 1; }
 }
 
+/* Same footprint as a tool card (flush left, same margins) but neutral grey: --border rather than
+   --border-subtle, which renders near-black on the dark theme, and no status colour. */
 .thinking-card {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: transparent;
-  margin: 4px 0 4px 22px;
+  background: var(--bg-elevated);
+  margin: 6px 0;
   overflow: hidden;
 }
 .thinking-card .tool-head { cursor: pointer; }
@@ -1819,7 +1821,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   color: var(--text-dim);
   white-space: pre-wrap;
   padding: 6px 10px 8px 10px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border);
   max-height: 240px;
   overflow-y: auto;
 }

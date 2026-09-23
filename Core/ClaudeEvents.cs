@@ -126,6 +126,22 @@ namespace CodeAstrogator.Core
         public string? ParentToolUseId { get; set; }
     }
 
+    /// <summary>
+    /// A <c>result</c> the CLI emits for a <b>queued background-task notification</b>, not for the
+    /// user's prompt. When a <c>run_in_background</c> task from an earlier turn reported back, CLI
+    /// 2.1.280 opens the next <c>-p</c> run with <c>system/task_notification</c> → <c>system/init</c>
+    /// → <c>result</c> (<c>num_turns: 0</c>, empty text, ~0 ms, the unchanged session cost) and only
+    /// then starts the real turn with a second <c>system/init</c>. Treating that first result as the
+    /// turn end drew a "0s · $x" footer the moment a prompt was sent and ran the end-of-turn
+    /// bookkeeping (changed-files review, usage refresh) before the turn had even begun — so it gets
+    /// its own event, which the bridge and session service ignore.
+    /// </summary>
+    public sealed class NotificationTurnResultEvent : ClaudeEvent
+    {
+        public string SessionId { get; set; } = "";
+        public long DurationMs { get; set; }
+    }
+
     /// <summary>The CLI is retrying an API call (informational).</summary>
     public sealed class ApiRetryEvent : ClaudeEvent
     {
