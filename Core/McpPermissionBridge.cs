@@ -387,8 +387,8 @@ namespace CodeAstrogator.Core
 
         /// <summary>
         /// Updates the per-tool-call timeout and rewrites the live <c>--mcp-config</c> file so the
-        /// next turn picks it up (the per-turn host re-reads the file each turn; the persistent
-        /// host only at process restart, like the env var). No-op if unchanged or not started.
+        /// next turn picks it up (every turn is its own process and re-reads the file).
+        /// No-op if unchanged or not started.
         /// </summary>
         public void UpdateToolTimeout(int timeoutMs)
         {

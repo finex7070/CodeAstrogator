@@ -51,13 +51,24 @@
     expiredCheckpoints: new Set(), // shas the host reported as pruned → button greyed out
   };
 
-  // Ordered strongest → lightest: Fable 5 (most capable) first, then the Opus tier, Sonnet, Haiku.
+  // Replaced in place by the host's `models.list` (§3), which is built from models.json (repo copy,
+  // else the one bundled in the VSIX) and filtered to the IDs the installed CLI actually accepts —
+  // an ID a CLI does not know fails every turn with `[claude-code:unrecognized_model]`.
+  // `primary: true` = top-level row (newest accepted model of its family); the rest live in the
+  // "More models" submenu. This static list is only the fallback for the browser mock and for a
+  // host that never reports one.
+  // Mirrors models.json minus the entries a current CLI may not know yet (Opus 5.5): without a
+  // host there is nothing to probe against, so the fallback stays on models every shipped CLI runs.
   const MODELS = [
-    { id: "claude-fable-5", label: "Fable 5" },
-    { id: "claude-opus-5", label: "Opus 5" },
-    { id: "claude-opus-4-8", label: "Opus 4.8" },
-    { id: "claude-sonnet-5", label: "Sonnet 5" },
-    { id: "claude-haiku-4-5", label: "Haiku 4.5" },
+    { id: "claude-opus-5", label: "Opus 5", family: "opus", primary: true },
+    { id: "claude-fable-5-1", label: "Fable 5.1", family: "fable", primary: true },
+    { id: "claude-sonnet-5", label: "Sonnet 5", family: "sonnet", primary: true },
+    { id: "claude-haiku-4-5", label: "Haiku 4.5", family: "haiku", primary: true },
+    { id: "claude-fable-5", label: "Fable 5", family: "fable", primary: false },
+    { id: "claude-opus-4-8", label: "Opus 4.8", family: "opus", primary: false },
+    { id: "claude-opus-4-7", label: "Opus 4.7", family: "opus", primary: false },
+    { id: "claude-opus-4-6", label: "Opus 4.6", family: "opus", primary: false },
+    { id: "claude-sonnet-4-6", label: "Sonnet 4.6", family: "sonnet", primary: false },
   ];
   const PERMISSION_LABELS = {
     ask: "Ask",
@@ -412,9 +423,10 @@
     if (bannersEvaluated) return;
     bannersEvaluated = true;
     appVersion = s.appVersion || appVersion;
-    // The same popup also carries the checkpoint opt-in, so an undecided checkpoint setting opens it
-    // as well (existing installs therefore see the dialog once more).
-    if (!s.noticeDecided || !s.updateDecided || !s.checkpointsDecided) {
+    // The same popup also carries the checkpoint and model-list opt-ins, so an undecided one of those
+    // opens it as well (an existing install therefore sees the dialog once more after an update that
+    // introduces a new opt-in).
+    if (!s.noticeDecided || !s.updateDecided || !s.checkpointsDecided || !s.modelsDecided) {
       openConsentPopup(s);
       return;
     }
@@ -433,9 +445,9 @@
 
     const body = el("div", "modal-body");
     body.textContent =
-      "Choose what Code Astrogator should do for you. The first two check the project's GitHub when "
-      + "this window opens (a small network request); the third is local only. All of them can be "
-      + "changed anytime in the settings.";
+      "Choose what Code Astrogator should do for you. The first three check the project's GitHub (a "
+      + "small network request); the last one is local only. All of them can be changed anytime in "
+      + "the settings.";
     modal.appendChild(body);
 
     // Pre-fill: reflect a previously-decided choice, otherwise suggest "on".
@@ -443,8 +455,14 @@
       s.noticeDecided ? !!s.noticeEnabled : true);
     const upd = consentRow("Notify me about new versions (updates)",
       s.updateDecided ? !!s.updateEnabled : true);
+    // Model list: fetched host-side (at most every 12 h) so a newly released Claude model shows up in
+    // the picker without an extension update. Off ⇒ the list shipped with this version is used.
+    const mdl = consentRow(
+      "Keep the list of selectable Claude models up to date from the project's GitHub",
+      s.modelsDecided ? !!s.modelsEnabled : true);
     modal.appendChild(ann.row);
     modal.appendChild(upd.row);
+    modal.appendChild(mdl.row);
 
     // Checkpoints: needs git, so the row is disabled (and forced off) when the host reports none.
     const cpAvailable = !!s.checkpointsGitAvailable;
@@ -468,6 +486,7 @@
       post("consent.set", {
         noticeEnabled: noticeEnabled,
         updateEnabled: updateEnabled,
+        modelsEnabled: mdl.input.checked,
         checkpointsEnabled: checkpointsEnabled,
       });
       state.checkpoints.enabled = checkpointsEnabled;
@@ -557,6 +576,7 @@
       case "editReview.turnFileState": return turnReviewFileState(m.path, m.allDecided);
       case "editReview.turnListClear": return clearTurnReview();
       case "mode.update": return applyModeUpdate(m);
+      case "models.list": return applyModelCatalog(m.models || []);
       case "question.request": return questionRequest(m);
       case "turn.result": return turnResult(m);
       case "agent.result": return agentResult(m);
@@ -721,6 +741,8 @@
       noticeDecided: !!m.noticeFetchDecided,
       updateEnabled: !!m.updateCheckEnabled,
       updateDecided: !!m.updateCheckDecided,
+      modelsEnabled: !!m.modelCatalogFetchEnabled,
+      modelsDecided: !!m.modelCatalogFetchDecided,
       checkpointsEnabled: !!state.checkpoints.enabled,
       checkpointsDecided: !!state.checkpoints.decided,
       checkpointsGitAvailable: !!state.checkpoints.gitAvailable,
@@ -1365,6 +1387,24 @@
   function updateTitle() {
     titleEl.textContent = state.title || "Untitled";
     titleEl.title = state.title || "Untitled";
+  }
+
+  // Host-reported picker list (§3 `models.list`). Mutates MODELS in place — the popover reads it
+  // on open, and the pill label resolves the current id through it. An empty/garbled list is
+  // ignored so the built-in fallback above survives a failed CLI probe.
+  function applyModelCatalog(models) {
+    const clean = (Array.isArray(models) ? models : [])
+      .filter((m) => m && typeof m.id === "string" && m.id)
+      .map((m) => ({
+        id: m.id,
+        label: typeof m.label === "string" && m.label ? m.label : m.id,
+        family: typeof m.family === "string" ? m.family : "other",
+        primary: m.primary !== false,
+      }));
+    if (!clean.length) return;
+    MODELS.length = 0;
+    clean.forEach((m) => MODELS.push(m));
+    updateModelModeLabel(); // the active model may now render under a different label
   }
 
   function updateModelModeLabel() {
@@ -3487,6 +3527,7 @@
   let openOverlay = null; // { el, anchor, reposition }
 
   function closeAllOverlays() {
+    closeModelFlyout(); // side-panel of the model picker (own element next to the popover)
     if (openOverlay) {
       openOverlay.el.remove();
       if (openOverlay.anchor) openOverlay.anchor.setAttribute("aria-expanded", "false");
@@ -3496,6 +3537,51 @@
     closeAtAutocomplete();
     closeModal();
     closeImageLightbox();
+  }
+
+  // ───────── Model picker flyout ("More models") ─────────
+  // A second, free-standing panel beside the Model·Mode popover instead of an inline expander:
+  // the picker must not change size, and a child of .popover would be clipped by its
+  // overflow-y:auto (its popIn animation leaves a transform behind, so even position:fixed would
+  // be trapped). It therefore lives in #overlay-layer next to the popover and is torn down with it
+  // (closeAllOverlays). Opens/closes on hover with a short grace period so the pointer can travel
+  // across the gap, and on click for keyboard/touch users.
+  let modelFlyout = null;
+  let modelFlyoutCloseTimer = null;
+
+  function closeModelFlyout() {
+    if (modelFlyoutCloseTimer) { clearTimeout(modelFlyoutCloseTimer); modelFlyoutCloseTimer = null; }
+    if (modelFlyout) { modelFlyout.remove(); modelFlyout = null; }
+  }
+
+  function scheduleModelFlyoutClose() {
+    if (modelFlyoutCloseTimer) clearTimeout(modelFlyoutCloseTimer);
+    modelFlyoutCloseTimer = setTimeout(closeModelFlyout, 220);
+  }
+
+  function openModelFlyout(popEl, toggleRow, models, buildRow) {
+    if (modelFlyoutCloseTimer) { clearTimeout(modelFlyoutCloseTimer); modelFlyoutCloseTimer = null; }
+    if (modelFlyout) return; // already open — hovering back in just cancels the pending close
+    const fly = el("div", "popover mm-flyout");
+    models.forEach((md) => fly.appendChild(buildRow(md)));
+    fly.addEventListener("mouseenter", () => {
+      if (modelFlyoutCloseTimer) { clearTimeout(modelFlyoutCloseTimer); modelFlyoutCloseTimer = null; }
+    });
+    fly.addEventListener("mouseleave", scheduleModelFlyoutClose);
+    overlayLayer.appendChild(fly);
+    modelFlyout = fly;
+
+    // Left of the picker, top-aligned with its row; flips to the right when there is no room.
+    const margin = 6;
+    const pr = popEl.getBoundingClientRect();
+    const tr = toggleRow.getBoundingClientRect();
+    const fr = fly.getBoundingClientRect();
+    let left = pr.left - fr.width - margin;
+    if (left < margin) left = Math.min(pr.right + margin, window.innerWidth - fr.width - margin);
+    let top = tr.top - 4;
+    if (top + fr.height > window.innerHeight - margin) top = window.innerHeight - fr.height - margin;
+    fly.style.left = Math.max(margin, left) + "px";
+    fly.style.top = Math.max(margin, top) + "px";
   }
 
   function openPopover(anchor, contentEl, opts) {
@@ -3556,7 +3642,9 @@
   // outside click
   document.addEventListener("mousedown", (e) => {
     if (openOverlay && !openOverlay.el.contains(e.target) &&
-        (!openOverlay.anchor || !openOverlay.anchor.contains(e.target))) {
+        (!openOverlay.anchor || !openOverlay.anchor.contains(e.target)) &&
+        // the model flyout is a sibling of the popover — a click in it is not "outside"
+        (!modelFlyout || !modelFlyout.contains(e.target))) {
       closeAllOverlays();
     }
     if (slashAutocompleteOpen && slashAutoEl && !slashAutoEl.contains(e.target) && e.target !== input) {
@@ -4306,22 +4394,56 @@
   modelModeBtn.addEventListener("click", function () {
     const pop = el("div", "popover mm-pop");
 
-    // Model
+    // Model — newest model per family at the top level, older generations in a submenu
     const s1 = el("div", "mm-section");
     s1.appendChild(el("div", "mm-section-title", "Model"));
-    MODELS.forEach((md) => {
+    let submenuToggle = null;   // the "More models" row (set below when there are older models)
+    let submenuIds = [];        // ids that live in the flyout → drive the toggle's own radio dot
+    const selectModel = (md, row) => {
+      state.model = md.id;
+      s1.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("selected"));
+      if (modelFlyout) modelFlyout.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("selected"));
+      row.classList.add("selected");
+      if (submenuToggle) submenuToggle.classList.toggle("selected", submenuIds.indexOf(md.id) >= 0);
+      updateModelModeLabel();
+      post("model.set", { model: md.id });
+    };
+    const modelRow = (md) => {
       const row = el("div", "radio-row" + (state.model === md.id ? " selected" : ""));
       row.appendChild(el("span", "radio-dot"));
       row.appendChild(el("span", null, md.label));
-      row.addEventListener("click", () => {
-        state.model = md.id;
-        s1.querySelectorAll(".radio-row").forEach((r) => r.classList.remove("selected"));
-        row.classList.add("selected");
-        updateModelModeLabel();
-        post("model.set", { model: md.id });
+      row.addEventListener("click", () => selectModel(md, row));
+      return row;
+    };
+
+    const primary = MODELS.filter((m) => m.primary !== false);
+    const older = MODELS.filter((m) => m.primary === false);
+    // A session can carry a model that is no longer offered (older chat, CLI downgrade): keep it
+    // visible and selected instead of silently showing an unselected list.
+    if (state.model && !MODELS.some((m) => m.id === state.model))
+      s1.appendChild(modelRow({ id: state.model, label: state.model }));
+    primary.forEach((md) => s1.appendChild(modelRow(md)));
+
+    if (older.length) {
+      // "More models" opens a flyout to the LEFT of the picker — a separate element next to the
+      // popover, so the picker itself never changes size. Its own radio dot mirrors the submenu:
+      // lit whenever the active model lives in there.
+      const toggle = el("div", "radio-row mm-submenu-toggle");
+      toggle.appendChild(el("span", "radio-dot"));
+      toggle.appendChild(el("span", null, "More models"));
+      toggle.appendChild(el("span", "mm-submenu-caret", "‹"));
+      toggle.classList.toggle("selected", older.some((m) => m.id === state.model));
+      submenuToggle = toggle;
+      submenuIds = older.map((m) => m.id);
+      const openFlyout = () => openModelFlyout(pop, toggle, older, modelRow);
+      toggle.addEventListener("mouseenter", openFlyout);
+      toggle.addEventListener("mouseleave", scheduleModelFlyoutClose);
+      toggle.addEventListener("click", () => {
+        if (modelFlyout) closeModelFlyout();
+        else openFlyout();
       });
-      s1.appendChild(row);
-    });
+      s1.appendChild(toggle);
+    }
     pop.appendChild(s1);
 
     // Effort — the CLI's --effort levels (claude 2.1.x)

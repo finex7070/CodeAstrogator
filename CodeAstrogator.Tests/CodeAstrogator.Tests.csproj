@@ -21,5 +21,9 @@
     <Content Include="Fixtures\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- The shipped default model catalog is asserted on directly (see ModelCatalogTests). -->
+    <Content Include="..\models.json" Link="models.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

@@ -44,9 +44,10 @@ namespace CodeAstrogator.Core
     }
 
     /// <summary>
-    /// Abstraction over the CLI child process (Teil A §A3). v1 runs one
-    /// <c>claude -p … --output-format stream-json</c> process per turn; the interface
-    /// allows switching to a persistent bidirectional process later without UI changes.
+    /// Abstraction over the CLI child process (Teil A §A3): one
+    /// <c>claude -p … --output-format stream-json</c> process per turn. The interface keeps the
+    /// session service testable (the tests inject stub hosts); the bidirectional long-lived host
+    /// that used to sit behind it was removed in 0.8.0 — see docs/NOTES.md.
     /// </summary>
     public interface IClaudeProcessHost
     {

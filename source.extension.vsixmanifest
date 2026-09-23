@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
     <Metadata>
-        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="0.7.1" Language="en-US" Publisher="Code Astrogator" />
-        <DisplayName>Code Astrogator</DisplayName>
+        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="0.8.0" Language="en-US" Publisher="Code Astrogator" />
+        <!-- Marketplace / Extension-Manager name. Deliberately carries the search terms: the
+             in-product strings (View → Other Windows, tool-window caption, context menu) come from
+             CodeAstrogatorPackage.vsct and stay plain "Code Astrogator". -->
+        <DisplayName>Code Astrogator — Claude Code Chat</DisplayName>
         <Description xml:space="preserve">Claude Code chat tool window for Visual Studio. Integrates the Claude Code CLI (OAuth or API key) with streaming chat, tool activity and inline diff approvals.</Description>
         <Icon>Resources\icon-90.png</Icon>
         <PreviewImage>Resources\preview-200.png</PreviewImage>
+        <Tags>claude, claude code, anthropic, ai, chat, assistant, agent, llm, copilot alternative, cli, code assistant, pair programming</Tags>
     </Metadata>
     <Installation>
         <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.14, )">

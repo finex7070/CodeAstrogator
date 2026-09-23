@@ -2,9 +2,9 @@
 
 VSIX-Extension (VSSDK in-process, net472, ein Projekt): Chat-Tool-Window auf WebView2-Basis,
 das die **Claude Code CLI** integriert (`claude -p --output-format stream-json`, ein Prozess
-pro Turn, Prompt via stdin). Optional opt-in: **persistenter bidirektionaler Modus**
-(`--input-format stream-json`, ein langlebiger Prozess) und **MCP-Permission-Hook**
-(`--permission-prompt-tool` → in-process Localhost-MCP-Server für interaktive Diff-Approvals).
+pro Turn, Prompt via stdin) plus **MCP-Permission-Hook** (`--permission-prompt-tool` → in-process
+Localhost-MCP-Server für interaktive Diff-Approvals). Der frühere persistente bidirektionale Modus
+(`--input-format stream-json`) wurde in 0.8.0 entfernt — nicht wieder einführen (s. NOTES).
 
 ## Pflichtlektüre vor Änderungen
 - `docs/claude-vs-2026-plan.md` — verbindliche Spec (Teil A Architektur, Teil B UI-Kontrakt).
@@ -57,7 +57,7 @@ PR anlegen; nur auf ausdrücklichen Wunsch.
 ## Architektur in einem Satz je Schicht
 `WebUI/` (single-page, dependency-frei, §3-Nachrichten-Kontrakt) ↔ `Bridge/WebViewBridge.cs`
 (Kontrakt host-seitig, UI-Thread-Marshaling) → `Core/` (UI-frei + getestet: NdjsonParser,
-ClaudeSessionService, ClaudeCliProcessHost + **ClaudePersistentProcessHost** (opt-in),
+ClaudeSessionService, ClaudeCliProcessHost, **ModelCatalog + ClaudeModelCatalog** (Modell-Liste),
 **McpPermissionBridge** (`IPermissionBridge`, in-process MCP-Server), UsageClient, FileLister,
 RemoteControlHost, CliSessionReader) — daneben `Services/`
 (Theme, Session-Persistenz, **`AstrogatorSettingsStore`** = WritableSettingsStore-Wrapper),

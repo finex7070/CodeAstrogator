@@ -37,7 +37,7 @@ namespace CodeAstrogator.Core
     /// </summary>
     public sealed class ClaudeSessionService
     {
-        private IClaudeProcessHost _processHost;
+        private readonly IClaudeProcessHost _processHost;
         private CancellationTokenSource? _turnCts;
         private int _busy; // 0 = idle, 1 = turn running
 
@@ -49,17 +49,6 @@ namespace CodeAstrogator.Core
         public ClaudeSessionService(IClaudeProcessHost processHost)
         {
             _processHost = processHost;
-        }
-
-        /// <summary>
-        /// Swaps the process-host implementation (per-turn ↔ persistent). Only valid while
-        /// idle; the caller owns disposing the previous host. Throws if a turn is running.
-        /// </summary>
-        public void SetProcessHost(IClaudeProcessHost host)
-        {
-            if (IsBusy)
-                throw new InvalidOperationException("Cannot swap the process host while a turn is running.");
-            _processHost = host ?? throw new ArgumentNullException(nameof(host));
         }
 
         /// <summary>Session id from system/init of the first turn; passed as --resume afterwards.</summary>
