@@ -28,13 +28,6 @@ Major only on request.
      `%LocalAppData%\CodeAstrogator\settings-error.log`.
   2. Active-file chip: name+`:lines`, truncation on long names, click = session toggle
      (struck through), disappears when the option is off.
-  3. **Persistent CLI mode** (Settings → Advanced → "Use a persistent CLI session"): turns
-     run, follow-up turns noticeably faster (no spawn); **Stop** aborts in-place (process
-     survives); `session.new`/`session.load`/model switch restart the process cleanly; toggle
-     off/on takes effect (idle immediately, otherwise on reopen). The protocol was verified
-     empirically, but the C# threading/lifecycle only via build/unit test. (The permission hook
-     ran in VS — the persistent mode as its carrier is thus indirectly partly tested, but not
-     specifically.)
 
 **Defender false positive (2026-06-04, harmless):** Defender reported
 `Backdoor:ASP/Dirtelti.G!MTB` on a **CLI session log file**
@@ -105,8 +98,9 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 - `Core/` (UI-free, testable):
   `NdjsonParser` (stream-json → domain events), `ClaudeEvents` (event types),
   `ClaudeCliProcessHost` + `IClaudeProcessHost` (one `claude -p` process per turn, prompt via stdin),
-  `ClaudePersistentProcessHost` (opt-in: one long-lived bidirectional stream-json process, see "Persistent CLI mode"),
   `ClaudeSessionService` (turn orchestration, --resume, retry, Ultracode injection),
+  `ModelCatalog` + `ClaudeModelCatalog` (models.json defaults + local cache + CLI probe, see
+  "Model catalog / CLI model probe"),
   `ClaudeExecutableLocator` (CLI discovery + auth probe), `ClaudeUsageClient` (limits/plan),
   `WorkspaceFileLister` (@-mention file list), `IPermissionBridge` + `McpPermissionBridge`
   (in-process MCP server for `--permission-prompt-tool`, Phase 1, see "Permission hook"),
@@ -119,7 +113,7 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 - `ToolWindows/` — `ClaudeChatWindow(Control)` (WebView2, virtual host `codeastrogator.local`).
 - `Options/AstrogatorOptions.cs` — in-memory snapshot of the Unified Settings (CLI path, model,
   Effort, Theme, Verbosity, Restore last session, AutoAddActiveFile, IncludeSelectedLines,
-  ActiveFileOnByDefault, UsePersistentCli);
+  ActiveFileOnByDefault, the three repo-fetch opt-ins);
   definitions in `CodeAstrogatorExtension.cs` (see "Unified Settings").
 - `WebUI/` — index.html / app.css / app.js / qr.js (dependency-free; mock adapter when the
   host is missing; qr.js = own QR encoder for the remote link).
@@ -158,14 +152,20 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 - **Working phrases in config.js:** `CPFC_CONFIG.workingPhrases` (the "Space Astrogator" one-liners next to the
   rocket). `app.js` filters out empty/non-string entries and otherwise uses the fallback `["Working…"]`
   (if config.js is missing/empty). Editable like the rest of the config: before the build.
-- **Opt-in / consent (privacy) — shared for both banners:** Both fetches are network calls →
-  **gated**. Persisted in `AstrogatorOptions.NoticeFetchEnabled`/`NoticeFetchDecided` **and**
-  `UpdateCheckEnabled`/`UpdateCheckDecided`. As long as **one** is not yet decided, `app.js` shows
-  **one** in-window consent popup (`.modal-backdrop`/`.modal`) when the window opens, with **two checkboxes**
-  (Announcements + Updates) + "Save". Answer → **`consent.set {noticeEnabled, updateEnabled}`** (web→host)
-  → sets both enabled + both decided=true. Also changeable in the **settings window** (two checkboxes under
-  "Announcements & updates"); Save sets decided=true and pushes **`banner.settings`** (host→web, via
-  `OnOptionsChanged`/`SendBannerSettings`) → banners are loaded/hidden live.
+- **Opt-in / consent (privacy) — one popup for every opt-in:** Every repo fetch is a network call →
+  **gated**. Persisted in `AstrogatorOptions.NoticeFetchEnabled`/`NoticeFetchDecided`,
+  `UpdateCheckEnabled`/`UpdateCheckDecided`, **`ModelCatalogFetchEnabled`/`ModelCatalogFetchDecided`**
+  (model list, 2026-09-23) and `CheckpointsEnabled`/`CheckpointsDecided` (local only). As long as
+  **one** is not yet decided, `app.js` shows **one** in-window consent popup
+  (`.modal-backdrop`/`.modal`) when the window opens, with **four checkboxes** (Announcements +
+  Updates + Model list + Checkpoints) + "Save". Answer →
+  **`consent.set {noticeEnabled, updateEnabled, modelsEnabled, checkpointsEnabled}`** (web→host) →
+  sets each enabled + every decided=true. **Adding a new opt-in therefore re-opens the popup once for
+  existing installs** — that is the intended upgrade path (`…Decided` defaults to false). Also
+  changeable in the **settings window** (three checkboxes under "Announcements & updates" plus the
+  checkpoint one); Save sets decided=true and pushes **`banner.settings`** (host→web, via
+  `OnOptionsChanged`/`SendBannerSettings`) → banners are loaded/hidden live, and `SendModelCatalog`
+  re-runs with the new consent.
 - **Load logic (`app.js`):** `applySessionInit` → `evaluateBanners({notice*, update*, appVersion})` (once
   per window load, flag `bannersEvaluated`): one not decided → consent popup; otherwise, depending on opt-in,
   `loadNotice()` and/or `loadUpdate()`; **disabled → no fetch at all, no display at all.**
@@ -220,8 +220,9 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
    allow/deny), still to be verified in real VS. **Phase 2/3 open** (extended editor inline
    diff per hunk, pulls in #3 `updatedInput`). Details see section "Permission hook &
    inline diff review". `Core/McpPermissionBridge` is live; `IPermissionBridge` is no longer a stub.
-2. ~~Persistent bidirectional CLI mode~~ — **implemented (opt-in, default off)**, see
-   section "Persistent CLI mode". Still to be verified in real VS.
+2. ~~Persistent bidirectional CLI mode~~ — **dropped in 0.8.0** (implemented, then removed: no
+   measurable benefit, a second code path through every turn). See section "Persistent CLI mode —
+   REMOVED".
 3. `updatedInput` (edit the diff before approve) — **redeemed with #1 (extended mode)**.
    Remaining open: multi-tab, context injection of the active editor.
 4. Remote Control expansion (optional): worktree spawn mode (`--spawn worktree`),
@@ -235,6 +236,12 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **`models.list` (host → web, 2026-09-23)** — `{ models: [{ id, label, family, primary }] }`, the list
+  the Model·Mode picker renders. `primary: true` = top-level row (newest model of its family the CLI
+  accepts), `false` = "More models" submenu. Sent on `ready`, again after an options change, and once
+  per probe while a first-run sweep is still running (progressive fill). The WebUI keeps its built-in
+  list until the first one arrives and ignores an empty one, so a failed probe never empties the
+  picker. See "Model catalog / CLI model probe".
 - **Checkpoints / rewind (web ↔ host, 2026-08-28)** — see section "File checkpoints / rewind".
   host→web: `session.init.checkpoints { enabled, gitAvailable, decided, retentionDays }`,
   `checkpoint.settings` (same payload, live update), `checkpoint.created { messageId, sha, shortSha,
@@ -706,37 +713,22 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   settings file and when it comes from another scope (project `.claude/settings.json`), i.e. `disableAllHooks`
   is global, not file-local. Re-test on a CLI update.
 
-## Persistent CLI mode (Roadmap #2, 2026-06-04 — opt-in, default off)
-- **What:** Instead of one process per turn, a **long-lived** `claude -p --input-format stream-json
-  --output-format stream-json --verbose --include-partial-messages [--resume] [--model] [--effort]
-  [--permission-mode]`. Advantage: no spawn per turn (latency) + **in-place interrupt**.
-- **Activation:** Option `UsePersistentCli` (bool, default **off**) in the settings ("Advanced →
-  Use a persistent CLI session"). The proven per-turn host (`ClaudeCliProcessHost`) stays
-  the default. The toggle takes effect live when idle (bridge `ApplyProcessHostOption`), otherwise on the next
-  tool-window open. Both implement `IClaudeProcessHost` → UI/session service unchanged.
-- **Implementation:** `Core/ClaudePersistentProcessHost` (`IClaudeProcessHost, IDisposable`):
-  - **Turn:** writes `{"type":"user","message":{"role":"user","content":[{"type":"text",
-    "text":…}]}}` (newline-terminated) to stdin, reads up to the `result` line → `ClaudeTurnExit`,
-    the process keeps living. stdin = UTF-8 `StreamWriter` on `BaseStream` (net472 has **no**
-    `ProcessStartInfo.StandardInputEncoding`).
-  - **Transparent restart:** `IsCompatible` compares a `FlagSig` (Model/Effort/Permission/
-    cwd/exe/extraArgs/env) **and** the session: the host tracks the live `session_id` from the stream
-    (`HandleLine`); reuse only if `request.SessionId == _liveSessionId` (resp. `== _startResumeId`).
-    `session.new` (SessionId→null) and `session.load`/model switch ⇒ restart (fresh resp.
-    `--resume <id>`). This keeps the session service's "No conversation found" retry intact
-    (the process dies with stderr → ExitCode≠0 → service retries with SessionId=null → fresh).
-  - **Stop = interrupt:** ct-cancel → `{"type":"control_request","request_id":…,"request":
-    {"subtype":"interrupt"}}`. The CLI answers `control_response success` and ends the turn
-    with `result subtype=error_during_execution` (process survives). **Kill fallback** after 4 s if
-    no turn end. `WasCancelled=true` ⇒ the bridge shows no error (only "Turn stopped").
-- **Empirically verified (CLI 2.1.162, probe):** Startup without an initial prompt arg; user-message
-  format exactly as above; `system/init` arrives **per turn** (identical to the per-turn pattern — the bridge
-  sends no transcript-wiping `session.init` on `SessionInitEvent`, so no regression);
-  interrupt + "process keeps living afterwards" confirmed. Plain-string `content` is rejected
-  (array required). Slash/TUI commands stay headless (like per-turn).
-- **Tests:** `PersistentProcessHostTests` cover `BuildArguments` (resume explicit, not from
-  SessionId; Model/Effort/Permission; default-Permission omit). Process lifecycle/interrupt =
-  to be verified manually in VS.
+## Persistent CLI mode — REMOVED in 0.8.0 (2026-09-23)
+- **Gone:** `Core/ClaudePersistentProcessHost`, the `UsePersistentCli` option, the "Advanced → Use a
+  persistent CLI session" checkbox, `ClaudeSessionService.SetProcessHost`, the bridge's
+  `CreateProcessHost`/`ApplyProcessHostOption` and `PersistentProcessHostTests`. There is now exactly
+  one host: `ClaudeCliProcessHost`, one process per turn.
+- **Why (user's call):** it made no measurable difference in practice and carried no advantage worth
+  the price — a second code path through every turn, interrupt handling, restart heuristics and
+  lifecycle that had to be re-tested on every CLI update. Dead weight, so it went.
+- **Consequence for the plan (`docs/claude-vs-2026-plan.md` §A2/§A8):** the process host stays behind
+  `IClaudeProcessHost`, but the persistent bidirectional mode is off the roadmap. Anyone reviving it
+  will find the working implementation in git history (0.7.x and earlier) — it was verified against
+  CLI 2.1.162: user message as `{"type":"user","message":{"role":"user","content":[{"type":"text",…}]}}`
+  on stdin (plain-string content rejected), `system/init` per turn, interrupt via
+  `control_request {"subtype":"interrupt"}` with the process surviving.
+- **Stale settings value:** an existing `UsePersistentCli` entry stays in the WritableSettingsStore
+  and is simply ignored (nothing reads or writes it any more).
 
 ## Model·Mode popover (Part B §5.4)
 - **Persistence (2026-06-05):** All popover selections (Model/Effort/Ultracode/Permission) are
@@ -768,6 +760,71 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   the keyword `ultracode` to every prompt (opt-in for multi-agent workflows in the
   CLI; no CLI flag, hence prompt injection). No duplication if the user types the
   keyword themselves. The button label then shows e.g. `Opus 4.8 · Ask · Ultra`.
+
+## Model catalog / CLI model probe (2026-09-23)
+- **Problem:** Anthropic releases a model before the CLI accepts it. Claude Opus 5.5
+  (`claude-opus-5-5`, released 2026-09-22) is rejected by CLI 2.1.263 with
+  `[claude-code:unrecognized_model]` — offering it unconditionally would break every turn for users on
+  an older CLI, hard-coding the previous model would hide the new one from users who updated, and a
+  list baked into the code needs a release for every new model.
+- **Three layers (`Core/ModelCatalog.cs` = pure logic, `Core/ClaudeModelCatalog.cs` = I/O):**
+  1. **Default catalog `models.json`** — repo root, **fetched from GitHub raw** (`ReadRepoConfig`
+     reads `githubRepo`/`noticeBranch` out of the shipped `WebUI/config.js`, i.e. the same repo and
+     branch as notice.json) and **also bundled into the VSIX** as the offline fallback. It defines
+     which models exist plus `label`, `family` and the order. **Order matters:** within a family the
+     newest model comes first. Editing + pushing this file adds a model to installed extensions
+     **without a release**. Fetch is gated by its **own opt-in** (`ModelCatalogFetchEnabled` /
+     `…Decided` — third checkbox in the consent popup, third row under "Announcements & updates" in
+     the settings window) and throttled to `RemoteRefreshInterval` = 12 h (`defaultsFetchedAt` in the
+     cache); a failed fetch silently falls back to the bundled copy. Unlike the banners this fetch
+     runs **host-side** (`HttpClient`), because the catalog is merged and probed host-side.
+  2. **Local cache `%LocalAppData%\CodeAstrogator\models.json`** — the merged catalog plus, per model,
+     `available` + `checkedCliVersion` + `checkedAt`. `MergeDefaults` keeps probe results and the
+     file's order, refreshes label/family of `source: "catalog"` entries, and **never touches
+     `source: "user"` entries** — users can add their own models by hand (id/label/family; anything
+     written without a `source` counts as a user entry). A default missing from the cache is inserted
+     right after its predecessor in the default list, so a newly released model lands next to its own
+     generation (and becomes that family's top-level row as soon as the CLI accepts it).
+  3. **CLI probe** — everything with no result for the **current CLI version** is verified against the
+     binary; a CLI update (`claude --version`) re-probes everything.
+- **How the probe works:** there is **no** `claude models` subcommand and no local model list —
+  `/model` only prints the alias list (`sonnet, opus, haiku, fable, best, …`), no IDs. What works is
+  `claude -p /model --model <id> --output-format json`: the report reads ``Current model: `Opus 5.5` ``
+  for an ID the CLI knows and ``Current model: `claude-opus-5-5` `` (the raw ID echoed) for one it does
+  not. `ParseModelKnown` compares the backticked name with the probed ID; equal ⇒ unknown.
+- **No API call, no token (measured against CLI 2.1.263, 2026-09-23):** `num_turns: 0`,
+  `total_cost_usd: 0`, `duration_api_ms: 0`, and the command still answers with `ANTHROPIC_BASE_URL`
+  pointed at a dead port ⇒ purely local, the OAuth token is never touched (same rule as `/usage`:
+  everything goes through the official binary).
+- **Picker layout (`BuildPicker`):** only models with `available == true` are offered (unprobed ⇒ not
+  offered — never hand the CLI an ID that fails the turn). The **first available model of each family
+  is a top-level row**, every other one goes into the **"More models"** submenu. Family order comes
+  from the catalog as a whole, not from what is available, so an old CLI that cannot run the newest
+  Opus does not push the whole Opus group to the bottom. Measured on CLI 2.1.263: top level
+  Opus 5 · Fable 5.1 · Sonnet 5 · Haiku 4.5, submenu Fable 5 · Opus 4.8 · Opus 4.7 · Opus 4.6 ·
+  Sonnet 4.6 (Opus 5.5 dropped). A session saved with a model that is no longer listed keeps running
+  on it; the WebUI adds it as an extra selected row and the pill shows its raw ID.
+- **"More models" flyout (WebUI):** the submenu is a **separate panel to the LEFT** of the picker
+  (`.mm-flyout`, appended to `#overlay-layer`), not an inline expander — the picker must keep its
+  size, and a child of `.popover` would be clipped by its `overflow-y: auto` (the `popIn` animation
+  leaves a `transform` behind, so even `position: fixed` stays trapped). It flips to the right side
+  when there is no room. Teardown rides on `closeAllOverlays` (which calls `closeModelFlyout`), and
+  the outside-click handler treats the flyout as part of the overlay — otherwise the `mousedown`
+  would remove it before the row's `click` could fire. Opens/closes on **hover** with a 220 ms grace
+  period (pointer crossing the gap) plus click for keyboard/touch. The toggle row carries its **own
+  radio dot**, lit while the active model is one of the entries inside, and the rows in the flyout
+  carry theirs — so both levels show the selection.
+- **Wiring:** `RefreshAsync` runs off the UI thread behind a semaphore, reports after **every** probe
+  (`models.list` fills in progressively — a first-run sweep is ~4 s per model), writes the cache and
+  remembers the swept executable for the process; `Invalidate()` + re-send on an options change. All
+  processes are hidden (`CreateNoWindow`), stdin closed, 30 s timeout, with the shared no-hooks
+  `--settings` file from `ClaudeUsageClient` so no hook can flash a console window. A cold start with
+  a valid cache costs ~60 ms (measured), no CLI process at all.
+- **Failure behaviour:** probe fails ⇒ entry stays unknown and is retried next time; no CLI at all ⇒
+  nothing is reported and the WebUI keeps its built-in list; cache unwritable ⇒ the sweep just runs
+  again next time.
+- **Re-verify on a CLI update:** that the label-vs-echo distinction still holds and that the probe
+  stays free of API calls.
 
 ## Active-file reference (2026-06-04)
 - **Feature:** The file in the active editor tab is automatically appended as an `@<path>` reference
@@ -1009,9 +1066,9 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   (like `/login`), incl. a hint about the terminal + `claude --resume <id>` for
   interactive-only commands. `/help` is always appended to the dynamic menu list
   on the UI side.
-- **Empirically clarified (CLI 2.1.161):** The persistent bidirectional mode too
-  (`--input-format stream-json`) is headless — TUI commands (`/help`,
-  `/remote-control`, `/config`) stay unavailable there. `claude remote-control`
+- **Empirically clarified (CLI 2.1.161):** The bidirectional mode too
+  (`--input-format stream-json`, since removed — see "Persistent CLI mode — REMOVED") is headless:
+  TUI commands (`/help`, `/remote-control`, `/config`) stay unavailable there. `claude remote-control`
   exists as a standalone server mode (own sessions, no live mirror into the
   tool window); integration deliberately deferred.
 
@@ -1215,7 +1272,7 @@ is a **preview before the allow** — the CLI writes only on "Accept" (possibly 
     `%LocalAppData%\CodeAstrogator\mcp-permission-<port>.json`; `Start()`/`Dispose()`.
   - `ClaudeSessionService.PermissionBridge` → in `RunTurnAsync` when `IsAvailable` **and the mode ≠
     bypass** `--mcp-config` + `--permission-prompt-tool mcp__vsbridge__permission_prompt` in
-    `ExtraArgs` (works in both hosts; in the persistent host part of the `FlagSig` → stable).
+    `ExtraArgs`.
     `--permission-mode` controls the firing (Ask=default → Edits/Bash prompt; acceptEdits → only
     Bash/others; plan → idle; bypass → no flags). Makes "Ask" usable in headless `-p` for the first time.
   - `WebViewBridge`: starts/disposes the bridge; `OnPermissionRequested` → requestId, build diff
@@ -1655,9 +1712,8 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   - **Configurable in the settings window** ("Prompt timeout", minutes): `AstrogatorOptions.PromptTimeoutMinutes`
     (default 60, clamped `Min/MaxPromptTimeoutMinutes` = 1–240). Flow: SettingsWindow → `AstrogatorOptions`
     (persisted via `SetInt32`) → `WebViewBridge` (ctor + `OnOptionsChanged`) → config file **and**
-    `SessionSettings.McpToolTimeoutMs` (env fallback). **Per-turn host:** takes effect next turn (the file is
-    re-read each turn). **Persistent host:** only after a process restart (config + env are fixed at process
-    start). **Re-test on CLI update** (the deliverer + env var names are version-dependent — see above).
+    `SessionSettings.McpToolTimeoutMs` (env fallback). Takes effect on the next turn (the file is
+    re-read per turn, and every turn is its own process). **Re-test on CLI update** (the deliverer + env var names are version-dependent — see above).
   - **Transport-level timeout (fix 2026-06-30 — the *real* "expires after ~5 min" cause):** the MCP
     `timeout` field is an **application-layer** limit; the CLI's HTTP client (Node/undici) ALSO enforces a
     **transport timeout** (~5 min of header/body inactivity — undici `headersTimeout`/`bodyTimeout` ≈ 300 s)
@@ -1718,6 +1774,17 @@ on a long review; correct updatedInput merge semantics vs. CLI write.
 
 **Recommended order:** Phase 1 fully finished first (independently valuable, closes the #1 base),
 then spike 0-B, then phases 2/3 with intermediate verification.
+
+## Marketplace listing / naming (2026-09-23)
+- **`<DisplayName>` = `Code Astrogator — Claude Code Chat`** plus a `<Tags>` element (claude,
+  claude code, anthropic, ai, chat, assistant, agent, llm, copilot alternative, cli, …) in
+  `source.extension.vsixmanifest`. Reason: the Marketplace indexes name + description + tags, and a
+  search for "claude" did not surface the extension at all.
+- **In-product strings are separate and stay plain "Code Astrogator":** `CodeAstrogatorPackage.vsct`
+  (`ButtonText`, View → Other Windows, editor context menu), the tool-window caption and the WebUI
+  wordmark. Only the store listing and the row in the Extensions manager carry the long name —
+  those two cannot diverge, the Marketplace name *is* the manifest `DisplayName`.
+- `marketplace-overview.md` (the store overview page) carries the same heading.
 
 ## Logo / icons (2026-06-04, logo+accent new 2026-06-05)
 - **2026-06-05:** New logo (purple **astronaut robot**) brought in + accent color switched from

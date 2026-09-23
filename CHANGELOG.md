@@ -4,6 +4,22 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.8.0] – 2026-09-23
+
+### Added
+- **Claude Opus 5.5 appears in the model picker as soon as your Claude Code CLI can run it.** Anthropic released Opus 5.5 on 2026-09-22, but a CLI that predates the model refuses it outright — every turn would end in `unrecognized_model`. Rather than guess, Code Astrogator asks the installed CLI which models it actually resolves (once per CLI version, in the background, no console window): a model the CLI knows is offered, one it does not know is hidden and the next older model of that family takes its place. Update the CLI and the picker switches over on its own. The check costs nothing and talks to nobody — it is a local CLI command with no API request, no billed turn and no access to your login token.
+- **The list of models is no longer baked into the extension.** It lives in `models.json`, which is fetched from the project repository the same way the announcement banner is (and is shipped inside the extension as the offline fallback) — so a newly released Claude model can reach installed setups without an update. Everything that is found is cached per machine under `%LocalAppData%\CodeAstrogator\models.json` together with what your CLI accepts; you can open that file and add models of your own, which the extension will check and then offer like the rest. Fetching it has **its own opt-in** — a third checkbox in the getting-started dialog and under "Announcements & updates" in the settings. Because that opt-in is new, the getting-started dialog appears once more after this update so you can answer it; with the box left off, the copy shipped with the extension is used and nothing leaves your machine. The check of what your CLI supports is local either way.
+- **Older model generations moved into a "More models" submenu.** The picker now shows one entry per family — the newest Fable, Opus, Sonnet and Haiku your CLI can run — and keeps the rest behind a single row that opens a panel to the left on hover; the picker itself never changes size. The row has its own radio button, so you can see at a glance that your current model is one of the older ones, and the panel shows which one. Selectable models: Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Opus 4.6 and Sonnet 4.6, minus whatever your CLI does not know.
+
+### Changed
+- **Fable 5.1 replaced Fable 5 at the top of the picker**, and Fable 5 moved into the submenu together with the older Opus and Sonnet generations — they stay selectable because they are cheaper and some workflows still run on them. An existing chat that was saved with a model no longer on the list keeps running on that model: it is shown as an extra, selected entry and the pill displays its plain model ID.
+- **The extension is easier to find in the Marketplace.** It is now listed as **"Code Astrogator — Claude Code Chat"** and carries search tags (claude, claude code, anthropic, ai, chat, …) — searching for "claude" simply did not turn it up before. This only affects the store listing and the row in the Extensions manager; inside Visual Studio it is still plain "Code Astrogator" (View → Other Windows, the tool-window tab and the editor context menu are unchanged).
+
+### Removed
+- **The "Use a persistent CLI session" setting and the mode behind it are gone.** It kept one long-lived CLI process alive across turns instead of starting one per turn. In practice it made no noticeable difference, so all it added was a second way for every single turn to work — with its own interrupt handling, restart rules and process lifecycle to re-check after each CLI update. Every turn now runs the one path that was the default anyway; nothing about how you use the extension changes. An old saved value for the setting is simply ignored.
+
+---
+
 ## [0.7.1] – 2026-09-10
 
 ### Fixed

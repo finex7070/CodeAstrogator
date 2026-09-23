@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/finex7070/CodeAstrogator/main/Resources/preview-200.png" alt="Code Astrogator" width="120" />
 
-# Code Astrogator
+# Code Astrogator — Claude Code Chat
 
 **Claude Code chat tool window for Visual Studio 2026**
 
@@ -142,8 +142,9 @@ Open settings via the **gear icon → "Advanced options…"**. From there you ca
 - The Claude CLI path (if it isn't on `PATH`), default model / effort, theme, and verbosity.
 - Permission mode and the auto-approve pattern list.
 - Restore-last-session, auto-add active file, include selected lines.
-- Prompt timeout, and whether to use a persistent CLI session.
-- Whether to receive announcements and update notifications.
+- Prompt timeout.
+- Whether to receive announcements and update notifications, and whether to keep the model list
+  up to date from the project's GitHub.
 
 Quick appearance options (theme, accent color) are also available directly in the gear popover.
 

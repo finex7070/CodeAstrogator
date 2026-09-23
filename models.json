@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Default model catalog for the Model · Mode picker.",
+    "Delivered two ways: bundled into the VSIX (offline fallback) and fetched from GitHub raw",
+    "(same repo/branch as notice.json), so a new Claude model reaches installed extensions without",
+    "a release. Editing this file + pushing is enough.",
+    "",
+    "Order matters: it is the display order, and within one family the NEWEST model comes first —",
+    "the first entry of a family the installed CLI actually accepts becomes that family's top-level",
+    "row in the picker, every other accepted model moves into the 'More models' submenu.",
+    "",
+    "Each entry: id (CLI model ID), label (shown in the picker), family (groups the generations).",
+    "Availability is NOT stored here — it is probed per machine against the installed CLI and cached",
+    "in %LocalAppData%\\CodeAstrogator\\models.json, where own entries can be added by hand."
+  ],
+  "version": 1,
+  "models": [
+    { "id": "claude-opus-5-5", "label": "Opus 5.5", "family": "opus" },
+    { "id": "claude-fable-5-1", "label": "Fable 5.1", "family": "fable" },
+    { "id": "claude-sonnet-5", "label": "Sonnet 5", "family": "sonnet" },
+    { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "family": "haiku" },
+    { "id": "claude-opus-5", "label": "Opus 5", "family": "opus" },
+    { "id": "claude-fable-5", "label": "Fable 5", "family": "fable" },
+    { "id": "claude-opus-4-8", "label": "Opus 4.8", "family": "opus" },
+    { "id": "claude-opus-4-7", "label": "Opus 4.7", "family": "opus" },
+    { "id": "claude-opus-4-6", "label": "Opus 4.6", "family": "opus" },
+    { "id": "claude-sonnet-4-6", "label": "Sonnet 4.6", "family": "sonnet" }
+  ]
+}

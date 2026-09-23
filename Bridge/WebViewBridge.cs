@@ -33,7 +33,7 @@ namespace CodeAstrogator.Bridge
         private readonly CoreWebView2 _webView;
         private readonly CodeAstrogatorPackage _package;
         private readonly ClaudeSessionService _session;
-        private IClaudeProcessHost _processHost; // per-turn or persistent (UsePersistentCli option)
+        private readonly IClaudeProcessHost _processHost; // one CLI process per turn
         private readonly SessionHistoryStore _history;
         private JObject? _streamingAssistant; // transcript accumulator for the active assistant block
         private bool _turnHadAssistantOutput; // gates the result-text fallback (decision #8)
@@ -116,7 +116,7 @@ namespace CodeAstrogator.Bridge
             ThreadHelper.ThrowIfNotOnUIThread();
             _webView = webView;
             _package = package;
-            _processHost = CreateProcessHost(package.GetOptions().UsePersistentCli);
+            _processHost = new ClaudeCliProcessHost();
             _session = new ClaudeSessionService(_processHost);
             // seed the session from the persisted Model·Mode popover state (sticky across new
             // chats + VS restarts); the popover writes these back via SaveOptions on each change
@@ -185,19 +185,11 @@ namespace CodeAstrogator.Bridge
             DenyAllPendingPermissions("Tool window closed");
             _editReview.Dispose(); // remove any open edit-review adornments
             _permission.Dispose(); // stops the MCP listener + deletes the config file
-            (_processHost as IDisposable)?.Dispose(); // persistent host owns a live process
             _remoteTerminal?.Dispose(); // releases the integrated-terminal proxy (the terminal closes with VS)
             lock (_history)
                 _history.Save(); // synchronous — tool window / VS is closing
         }
 
-        private static IClaudeProcessHost CreateProcessHost(bool persistent) =>
-            persistent ? new ClaudePersistentProcessHost() : (IClaudeProcessHost)new ClaudeCliProcessHost();
-
-        /// <summary>
-        /// Applies the UsePersistentCli option by swapping the process host when it changed.
-        /// Only swaps while idle; otherwise the change takes effect on the next tool-window open.
-        /// </summary>
         /// <summary>Mirrors every persisted Model·Mode popover value onto the live session settings.
         /// The WebUI renders these from the OPTIONS, so any drift between the two shows a control that
         /// lies (most sharply "Review all edits at end of turn": the toggle read on while the turn ran
@@ -214,20 +206,6 @@ namespace CodeAstrogator.Bridge
             _session.Settings.PermissionMode = opt.PermissionModeString;
             _session.Settings.ReviewEditsAtTurnEnd = opt.ReviewEditsAtTurnEnd;
             _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
-        }
-
-        private void ApplyProcessHostOption()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var wantPersistent = _package.GetOptions().UsePersistentCli;
-            var isPersistent = _processHost is ClaudePersistentProcessHost;
-            if (wantPersistent == isPersistent || _session.IsBusy)
-                return;
-
-            var old = _processHost;
-            _processHost = CreateProcessHost(wantPersistent);
-            _session.SetProcessHost(_processHost);
-            (old as IDisposable)?.Dispose();
         }
 
         // ── web → host ────────────────────────────────────────────────────────
@@ -253,6 +231,7 @@ namespace CodeAstrogator.Bridge
                     SendAuthState();
                     SendInitialSession();
                     SendSlashCommands(); // re-send the CLI-reported list after a WebView reload
+                    SendModelCatalog();  // which models the installed CLI accepts (async probe)
                     SendActiveFile();
                     if (_package.SettingsLoadError != null)
                         PostSystemNote("⚠ Settings could not be read — using defaults. " + _package.SettingsLoadError);
@@ -347,17 +326,21 @@ namespace CodeAstrogator.Bridge
                     HandleDiscardAllTurnReviews();
                     break;
                 case "consent.set":
-                    // first-run consent popup answered (announcements + updates + checkpoints) →
-                    // persist the choices and that they were made (so the popup never re-appears).
+                    // first-run consent popup answered (announcements + updates + model list +
+                    // checkpoints) → persist the choices and that they were made (so the popup never
+                    // re-appears until a new opt-in is introduced).
                     _package.GetOptions().NoticeFetchEnabled = msg.Value<bool?>("noticeEnabled") ?? false;
                     _package.GetOptions().NoticeFetchDecided = true;
                     _package.GetOptions().UpdateCheckEnabled = msg.Value<bool?>("updateEnabled") ?? false;
                     _package.GetOptions().UpdateCheckDecided = true;
+                    _package.GetOptions().ModelCatalogFetchEnabled = msg.Value<bool?>("modelsEnabled") ?? false;
+                    _package.GetOptions().ModelCatalogFetchDecided = true;
                     _package.GetOptions().CheckpointsEnabled =
                         (msg.Value<bool?>("checkpointsEnabled") ?? false) && GitCheckpointService.IsGitAvailable();
                     _package.GetOptions().CheckpointsDecided = true;
                     _package.SaveOptions();
                     SendCheckpointSettings();
+                    SendModelCatalog(); // the answer may just have allowed the repo fetch
                     break;
                 case "checkpoint.previewRequest":
                     HandleCheckpointPreview(msg.Value<string>("sha") ?? "", msg.Value<string>("scope") ?? "turns");
@@ -2763,9 +2746,10 @@ namespace CodeAstrogator.Bridge
             _checkpoints.Filter = BuildCheckpointFilter(_package.GetOptions()); // applies to the next snapshot
             SyncSessionSettingsFromOptions(); // incl. the MCP timeout below (options are the source of truth)
             ClaudeCliCapabilities.Invalidate();  // the executable path may have changed → re-probe its --help
+            ClaudeModelCatalog.Invalidate();     // …and re-probe which models that binary knows
+            SendModelCatalog();                  // push the (possibly different) picker list
             var promptTimeoutMs = PromptTimeoutMs(_package.GetOptions());
             _permission.UpdateToolTimeout(promptTimeoutMs);            // config `timeout` (the value the CLI prefers)
-            ApplyProcessHostOption(); // persistent-CLI toggle may have changed
         }
 
         /// <summary>Configured prompt timeout (settings, minutes) as milliseconds for the CLI env var.</summary>
@@ -3367,9 +3351,67 @@ namespace CodeAstrogator.Bridge
                 ["noticeFetchDecided"] = options.NoticeFetchDecided,
                 ["updateCheckEnabled"] = options.UpdateCheckEnabled,
                 ["updateCheckDecided"] = options.UpdateCheckDecided,
+                ["modelCatalogFetchEnabled"] = options.ModelCatalogFetchEnabled,
+                ["modelCatalogFetchDecided"] = options.ModelCatalogFetchDecided,
                 ["checkpoints"] = BuildCheckpointsState(),
                 ["appVersion"] = GetInstalledVersion(),
             });
+        }
+
+        /// <summary>
+        /// Pushes the model list for the Model · Mode picker (<c>models.list</c>). Resolved off the UI
+        /// thread: the catalog comes from <c>models.json</c> (repo copy, else the bundled one) and each
+        /// ID is verified against the installed CLI, because a model can be released before the CLI
+        /// accepts it — see <see cref="ClaudeModelCatalog"/> (cost-free, no API call). Partial results
+        /// are pushed while a first-run sweep is still probing; until the first one arrives the WebUI
+        /// keeps its built-in list, so a slow or missing CLI never empties the picker.
+        /// </summary>
+        private void SendModelCatalog()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = _package.GetOptions();
+            var exeOverride = options.ClaudeExecutablePath;
+            var allowRemote = options.ModelCatalogFetchEnabled; // own opt-in (consent popup / settings)
+            var cwd = _package.GetSolutionDirectory();
+            var extensionDir = System.IO.Path.GetDirectoryName(typeof(WebViewBridge).Assembly.Location) ?? "";
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+
+                var repoConfig = ClaudeModelCatalog.ReadRepoConfig(extensionDir);
+                var context = new ModelCatalogContext
+                {
+                    ExePath = ClaudeExecutableLocator.Locate(exeOverride),
+                    WorkingDirectory = cwd,
+                    ExtensionDirectory = extensionDir,
+                    AllowRemoteDefaults = allowRemote,
+                    GitHubRepo = repoConfig.Repo,
+                    Branch = repoConfig.Branch,
+                };
+
+                await ClaudeModelCatalog.RefreshAsync(context, PostModelCatalog).ConfigureAwait(false);
+            }).Task.Forget();
+        }
+
+        /// <summary>Sends one <c>models.list</c>; ignored while the list is still empty (nothing probed
+        /// yet) so the UI keeps its built-in fallback instead of showing an empty picker.</summary>
+        private void PostModelCatalog(IReadOnlyList<PickerModel> models)
+        {
+            if (models == null || models.Count == 0)
+                return;
+
+            var list = new JArray();
+            foreach (var m in models)
+                list.Add(new JObject
+                {
+                    ["id"] = m.Id,
+                    ["label"] = m.Label,
+                    ["family"] = m.Family,
+                    ["primary"] = m.Primary,
+                });
+
+            Post(new JObject { ["type"] = "models.list", ["models"] = list });
         }
 
         /// <summary>Re-pushes the Model·Mode popover state (mode + its sub-toggles) after an options
@@ -3402,6 +3444,8 @@ namespace CodeAstrogator.Bridge
                 ["type"] = "banner.settings",
                 ["noticeEnabled"] = options.NoticeFetchEnabled,
                 ["noticeDecided"] = options.NoticeFetchDecided,
+                ["modelsEnabled"] = options.ModelCatalogFetchEnabled,
+                ["modelsDecided"] = options.ModelCatalogFetchDecided,
                 ["updateEnabled"] = options.UpdateCheckEnabled,
                 ["updateDecided"] = options.UpdateCheckDecided,
                 ["appVersion"] = GetInstalledVersion(),
