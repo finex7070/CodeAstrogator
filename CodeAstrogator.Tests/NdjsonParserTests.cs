@@ -135,6 +135,35 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void ForegroundCommand_EmitsTaskStartedAndNotification_WithoutDivertingTheResult()
+        {
+            // Measured against CLI 2.1.280: every foreground Bash/PowerShell command is announced as a
+            // task (the live-output hook) and closed with a task_notification mid-turn.
+            var parser = new NdjsonParser();
+            var events = new[]
+            {
+                "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"brchlhc2o\",\"tool_use_id\":\"toolu_ps\",\"description\":\"Run loop\",\"is_backgrounded\":false,\"task_type\":\"local_bash\",\"session_id\":\"s\"}",
+                "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"brchlhc2o\",\"tool_use_id\":\"toolu_ps\",\"status\":\"completed\",\"output_file\":\"\",\"session_id\":\"s\"}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":2,\"result\":\"done\",\"session_id\":\"s\",\"duration_ms\":14000}",
+            }.SelectMany(parser.ParseLine).ToList();
+
+            var started = events.OfType<TaskStartedEvent>().Single();
+            Assert.Equal("brchlhc2o", started.TaskId);
+            Assert.Equal("toolu_ps", started.ToolUseId);
+            Assert.Equal("local_bash", started.TaskType);
+            Assert.False(started.IsBackgrounded);
+            Assert.Equal("s", started.SessionId);
+
+            var done = events.OfType<TaskNotificationEvent>().Single();
+            Assert.Equal("brchlhc2o", done.TaskId);
+            Assert.Equal("completed", done.Status);
+
+            // the mid-turn notification must not swallow the real turn end
+            Assert.Empty(events.OfType<NotificationTurnResultEvent>());
+            Assert.Equal(2, events.OfType<TurnResultEvent>().Single().NumTurns);
+        }
+
+        [Fact]
         public void ZeroTurnResult_WithoutNotification_StillEndsTheTurn()
         {
             // Local slash commands (/help, /usage …) legitimately end with num_turns 0 — only a result

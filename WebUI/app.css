@@ -377,12 +377,9 @@ button:focus { outline: none; }
   font-size: 12.5px;
   line-height: 1.55;
   padding: 12px 12px 16px;
+  /* Full width at every size — no centred 900 px column. The composer below spans the whole panel,
+     and a capped transcript left messages and cards visibly narrower than it in a wide tool window. */
   max-width: 100%;
-}
-
-/* wide: center text column */
-@container app (min-width: 521px) {
-  .transcript-inner { max-width: 900px; margin: 0 auto; }
 }
 
 /* ---- Message rows ------------------------------------------------------ */
@@ -1942,6 +1939,35 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   white-space: pre-wrap;
 }
 .tool-output.clamped { max-height: 180px; overflow: hidden; }
+
+/* Live console of a running Bash/PowerShell command (tool.output). Lives in the card body below the
+   command, scrolls on its own (sticks to the bottom while you are at the bottom) and keeps the
+   final output once the command finished. The blinking block cursor marks "still running". */
+.tool-body .tool-console { /* beats `.tool-body pre { margin: 0 }` */
+  margin: 8px 0 0 0;
+  padding: 6px 0 0 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+}
+/* Opened at task start, before the first byte: say so, so a command that holds its output back
+   (`… | Select-Object -Last 8`, a program buffering stdout) does not look like a broken console. */
+.tool-console:empty::before { color: var(--text-faint); font-style: italic; }
+.tool-console.live:empty::before { content: "waiting for output… (piped into Select-Object -Last etc.? then it only prints at the end)"; }
+.tool-console:not(.live):empty::before { content: "(no output)"; }
+.tool-console.live::after {
+  content: "▍";
+  color: var(--text-dim);
+  animation: consoleBlink 1s steps(1) infinite;
+}
+@keyframes consoleBlink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .tool-console.live::after { animation: none; } }
 .show-more {
   display: block;
   margin-top: 4px;

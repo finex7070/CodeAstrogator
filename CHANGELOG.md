@@ -4,6 +4,19 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.8.2] – 2026-09-23
+
+### Changed
+- **The chat now uses the full width of the tool window.** In a wide window, messages and cards used to stop at a centred column about 900 px wide, well short of the input box below. They now run the full width, flush with the input box.
+
+### Added
+- **Watch shell commands live.** Open a PowerShell or Bash card while the command is still running and you now see its output as it happens — like a small console under the command, with a blinking cursor while it runs. It keeps scrolling along as long as you are at the bottom, leaves you alone if you scroll up to read, strips colour codes, and lets progress bars redraw their line the way a terminal does. When the command finishes, its output simply stays there. Until now nothing appeared before the command was done, and short outputs were not shown in the card at all. The console appears as soon as the command starts and says "waiting for output…" until the first line arrives — worth knowing because Claude often trims long output with `… | Select-Object -Last 8`, and that holds every line back until the command has finished, so such a console stays empty until the end. One more limit: a program that holds back its own output when it is not running in a real console window (for example a nested `powershell -File …`, or Python without `-u`) still shows it in chunks or only at the end.
+
+### Fixed
+- **The model picker no longer falls back to an outdated list after restarting Visual Studio.** Once the extension had checked which models your CLI supports, it only sent the model list to the chat window while it was checking — on every later start there was nothing left to check, so the list never arrived and the picker showed its small built-in fallback instead. That fallback does not know Opus 5.5, so Opus 5 sat at the top and an Opus 5.5 you had selected showed up as an extra entry with its raw ID ("claude-opus-5-5"), in the picker and on the button. The picker now always gets the full list, straight from the cache.
+
+---
+
 ## [0.8.1] – 2026-09-23
 
 ### Fixed

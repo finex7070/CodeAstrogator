@@ -53,6 +53,13 @@ namespace CodeAstrogator.Bridge
         // "what changed during Claude's turn" is a tree-to-tree diff (covers bash/scripts, not just
         // the edit tools). The shas ride along on the user message in the history.
         private readonly GitCheckpointService _checkpoints = new GitCheckpointService();
+
+        // ── live console output of running shell commands ───────────────────
+        // Tails the CLI's per-task .output file (announced by system/task_started) and streams it into
+        // the Bash/PowerShell card as tool.output. Session id + cwd come from the turn's system/init.
+        private readonly TaskOutputWatcher _taskOutput;
+        private string? _turnSessionId;
+        private string? _turnCwd;
         private JObject? _checkpointTurnMessage;      // user message of the turn about to start (UI thread)
         private CheckpointTurnState? _checkpointTurn; // in-flight turn: where to put the "after" snapshot
         private string? _pendingRestoreNote;          // prepended to the next prompt after a rewind
@@ -118,6 +125,7 @@ namespace CodeAstrogator.Bridge
             _package = package;
             _processHost = new ClaudeCliProcessHost();
             _session = new ClaudeSessionService(_processHost);
+            _taskOutput = new TaskOutputWatcher(PostToolOutput);
             // seed the session from the persisted Model·Mode popover state (sticky across new
             // chats + VS restarts); the popover writes these back via SaveOptions on each change
             var opt = package.GetOptions();
@@ -185,6 +193,7 @@ namespace CodeAstrogator.Bridge
             DenyAllPendingPermissions("Tool window closed");
             _editReview.Dispose(); // remove any open edit-review adornments
             _permission.Dispose(); // stops the MCP listener + deletes the config file
+            _taskOutput.Dispose(); // stop tailing any still-running command output
             _remoteTerminal?.Dispose(); // releases the integrated-terminal proxy (the terminal closes with VS)
             lock (_history)
                 _history.Save(); // synchronous — tool window / VS is closing
@@ -2354,6 +2363,10 @@ namespace CodeAstrogator.Bridge
             switch (ev)
             {
                 case SessionInitEvent init when !string.IsNullOrEmpty(init.SessionId):
+                    // the live-output watcher needs both to locate the CLI's task files
+                    _turnSessionId = init.SessionId;
+                    if (!string.IsNullOrEmpty(init.Cwd))
+                        _turnCwd = init.Cwd;
                     // history id/resumability is adopted at turn end (num_turns > 0) —
                     // local-only turns like /help report ids --resume cannot use
                     if (init.SlashCommands.Count > 0)
@@ -2488,7 +2501,28 @@ namespace CodeAstrogator.Bridge
                     }
                     break;
 
+                case TaskStartedEvent task:
+                    // A foreground shell command started: stream its output into the card while it
+                    // runs. Background tasks answer their tool_use immediately ("running in the
+                    // background") and are killed with the per-turn process anyway — not tailed.
+                    if (task.TaskType == "local_bash" && !task.IsBackgrounded)
+                    {
+                        _taskOutput.Start(task.TaskId, task.ToolUseId,
+                            string.IsNullOrEmpty(task.SessionId) ? _turnSessionId : task.SessionId,
+                            _turnCwd);
+                        // Open the (empty) console right away so the card shows it is live even while
+                        // the command prints nothing yet — e.g. `… | Select-Object -Last 8` holds every
+                        // line back until the command ends.
+                        Post(new JObject { ["type"] = "tool.output", ["id"] = task.ToolUseId, ["text"] = "", ["start"] = true });
+                    }
+                    break;
+
+                case TaskNotificationEvent task:
+                    _taskOutput.Stop(task.TaskId); // final read, then stop tailing
+                    break;
+
                 case ToolResultEvent result:
+                    _taskOutput.StopByToolUse(result.ToolUseId); // flush any live output before the result
                     // A result for a tool whose permission/question prompt is STILL open means the
                     // CLI abandoned the prompt itself (e.g. the AskUserQuestion/permission tool timed
                     // out and the turn moved on). Settle it, close the orphaned card, and restore the
@@ -2617,6 +2651,7 @@ namespace CodeAstrogator.Bridge
 #pragma warning disable VSTHRD010
             DenyAllPendingPermissions("Turn ended");
 #pragma warning restore VSTHRD010
+            _taskOutput.StopAll(); // the process is gone — nothing more will be written
             lock (_history) _recordedPermissions.Clear(); // tool.result correlation is per-turn
             if (error != null)
             {
@@ -3390,8 +3425,21 @@ namespace CodeAstrogator.Bridge
                     Branch = repoConfig.Branch,
                 };
 
-                await ClaudeModelCatalog.RefreshAsync(context, PostModelCatalog).ConfigureAwait(false);
+                // Progress posts only happen while something is being probed. With a complete cache
+                // (every start after the first sweep) nothing is probed, so the final list has to be
+                // posted here — otherwise the WebUI silently stays on its built-in fallback.
+                var rows = await ClaudeModelCatalog.RefreshAsync(context, PostModelCatalog).ConfigureAwait(false);
+                PostModelCatalog(rows);
             }).Task.Forget();
+        }
+
+        /// <summary>Live console text of a running Bash/PowerShell command (<c>tool.output</c>, appended
+        /// by the WebUI to the card's console). Called from the watcher's timer thread; Post marshals.</summary>
+        private void PostToolOutput(string toolUseId, string text)
+        {
+            if (string.IsNullOrEmpty(toolUseId) || string.IsNullOrEmpty(text))
+                return;
+            Post(new JObject { ["type"] = "tool.output", ["id"] = toolUseId, ["text"] = text });
         }
 
         /// <summary>Sends one <c>models.list</c>; ignored while the list is still empty (nothing probed
