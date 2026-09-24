@@ -125,9 +125,28 @@ namespace CodeAstrogator.Core
             {
                 events.Add(new StatusEvent { Status = obj.Value<string>("status") });
             }
+            else if (subtype == "task_started")
+            {
+                events.Add(new TaskStartedEvent
+                {
+                    TaskId = obj.Value<string>("task_id") ?? "",
+                    ToolUseId = obj.Value<string>("tool_use_id") ?? "",
+                    TaskType = obj.Value<string>("task_type"),
+                    IsBackgrounded = obj.Value<bool?>("is_backgrounded") ?? false,
+                    SessionId = obj.Value<string>("session_id"),
+                });
+            }
             else if (subtype == "task_notification")
             {
+                // Also fires after every ordinary foreground command; only a following zero-turn
+                // result is diverted (see ParseResult), so arming the flag here is safe.
                 _notificationPending = true;
+                events.Add(new TaskNotificationEvent
+                {
+                    TaskId = obj.Value<string>("task_id") ?? "",
+                    ToolUseId = obj.Value<string>("tool_use_id"),
+                    Status = obj.Value<string>("status"),
+                });
             }
         }
 
