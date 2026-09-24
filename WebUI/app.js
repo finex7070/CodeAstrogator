@@ -567,6 +567,7 @@
       case "assistant.end": return assistantEnd(m.id);
       case "tool.use": return toolUse(m);
       case "tool.result": return toolResult(m);
+      case "tool.output": return toolOutput(m);
       case "permission.request": return permissionRequest(m);
       case "permission.result": return applyPermissionResult(m);
       case "permission.finalize": return finalizePermissionCard(m.requestId, m.status);
@@ -1936,6 +1937,55 @@
     appendNode(card);
   }
 
+  // ───────── Live console (tool.output) ─────────
+  // A running Bash/PowerShell command streams its output here (host tails the CLI's task file).
+  // The raw text is kept on the element and re-rendered on each chunk; only the tail is kept so a
+  // chatty build can't grow the DOM without bound.
+  const CONSOLE_MAX_CHARS = 60000;
+
+  function toolOutput(m) {
+    if (!m.id || (!m.text && !m.start)) return;
+    const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
+    // A late chunk after the result (host posts race) must not re-open a finished console.
+    if (!card || card.classList.contains("tool-ok") || card.classList.contains("tool-err")) return;
+    const con = ensureToolConsole(card);
+    if (!con || !m.text) return; // `start`: the empty console (with its placeholder) is all we need
+    con._raw = (con._raw || "") + m.text;
+    if (con._raw.length > CONSOLE_MAX_CHARS) con._raw = con._raw.slice(-CONSOLE_MAX_CHARS);
+    renderToolConsole(con, con._raw);
+  }
+
+  function ensureToolConsole(card) {
+    let con = card.querySelector(".tool-console");
+    if (con) return con;
+    const body = card.querySelector(".tool-body");
+    if (!body) return null;
+    con = el("pre", "tool-console live");
+    body.appendChild(con);
+    return con;
+  }
+
+  // Sticks to the bottom while the user is at the bottom; leaves a scrolled-up view alone.
+  function renderToolConsole(con, raw) {
+    const atBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 24;
+    con.textContent = consoleText(raw);
+    if (atBottom) con.scrollTop = con.scrollHeight;
+  }
+
+  // Terminal-ish cleanup: strip ANSI escape sequences (colours, cursor moves) and honour a bare
+  // "\r" the way a console does — the text after it overwrites the line (progress bars, spinners).
+  function consoleText(raw) {
+    const plain = String(raw || "")
+      .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "")
+      .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
+      .replace(/\r\n/g, "\n");
+    if (plain.indexOf("\r") < 0) return plain;
+    return plain.split("\n").map((line) => {
+      const i = line.lastIndexOf("\r", line.length - 2); // a trailing "\r" alone keeps the line
+      return i >= 0 ? line.slice(i + 1).replace(/\r$/, "") : line.replace(/\r$/, "");
+    }).join("\n");
+  }
+
   function toolResult(m) {
     reconcileTaskId(m.id, m.summary); // assign a TaskCreate its real "#N" id (no-op for other tools)
     agentEnd(m.id); // if this result is for a running Task agent, drop it from the live list
@@ -1952,6 +2002,17 @@
     card.classList.remove("tool-ok", "tool-err");
     card.classList.add(m.status === "ok" ? "tool-ok" : "tool-err");
     if (card.classList.contains("todo-card")) return; // checklist keeps its n/m summary
+    // A live console already shows the command's output: finish it in place instead of adding a
+    // second copy below. Keep whichever text is more complete — the live tail can hold more than
+    // the (length-capped) result, the result wins when the live file was missed or cut short.
+    const con = card.querySelector(".tool-console");
+    if (con) {
+      con.classList.remove("live");
+      const live = consoleText(con._raw || "");
+      const final = m.summary != null ? consoleText(m.summary) : "";
+      renderToolConsole(con, final.length > live.length ? final : (con._raw || ""));
+      return;
+    }
     if (m.summary != null) {
       // keep the input-derived title (Read filename, command, …); otherwise show the result's
       // first line. Long output always goes into the body behind "Show more" (decision #17).
@@ -5000,6 +5061,20 @@
         for (let i = 1; i <= 60; i++) longOut += "// line " + i + " of the file contents preview …\n";
         handle({ type: "tool.result", id: tId, status: "ok", summary: longOut });
       }, delay + 500);
+
+      // PowerShell command with live console output (tool.output) — includes a "\r" progress bar
+      // and an ANSI colour code, which the console must render like a terminal would.
+      const psId = nid("ps");
+      sched(() => { if (stopped) return; handle({ type: "tool.use", id: psId, name: "PowerShell", status: "running", input: { command: "& \"$bin\\xbapp.exe\" deploy \"C:\\Builds\\Berlin93_XboxSeries\\Loose\"", description: "Deploy the new build to the devkit" } }); }, delay + 520);
+      sched(() => { if (!stopped) handle({ type: "tool.output", id: psId, text: "", start: true }); }, delay + 530); // host opens the console at task_started
+      const psLines = ["Connecting to devkit 192.168.1.40 …\n", "Registering package Berlin93_1.0.0.0_x64 …\n", "\x1b[32mCopying files\x1b[0m\n"];
+      for (let p = 0; p <= 100; p += 20) psLines.push("\r  [" + "#".repeat(p / 10) + " ".repeat(10 - p / 10) + "] " + p + "%" + (p === 100 ? "\n" : ""));
+      psLines.push("Launching title …\n", "Deployed successfully.\n");
+      psLines.forEach((line, i) => sched(() => { if (!stopped) handle({ type: "tool.output", id: psId, text: line }); }, delay + 560 + i * 350));
+      sched(() => {
+        if (stopped) return;
+        handle({ type: "tool.result", id: psId, status: "ok", summary: "Connecting to devkit 192.168.1.40 …\nRegistering package Berlin93_1.0.0.0_x64 …\nCopying files\n  [##########] 100%\nLaunching title …\nDeployed successfully." });
+      }, delay + 560 + psLines.length * 350 + 200);
 
       // todo checklist (decision #15)
       const todoId = nid("td");

@@ -236,6 +236,10 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **`tool.output` (host → web, 2026-09-23)** — `{ id, text, start? }`: a chunk of live console output of
+  the running Bash/PowerShell command whose card has tool_use id `id`. Appended, never replaces; ignored
+  once the card has its `tool.result`. `start: true` (empty `text`) is sent at `task_started` and only opens
+  the empty console. See "CLI integration → Live console output".
 - **`models.list` (host → web, 2026-09-23)** — `{ models: [{ id, label, family, primary }] }`, the list
   the Model·Mode picker renders. `primary: true` = top-level row (newest model of its family the CLI
   accepts), `false` = "More models" submenu. Sent on `ready`, again after an options change, and once
@@ -616,6 +620,10 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   discarded and the turn is **automatically restarted fresh once**.
 
 ## Transcript display (decisions from 2026-06-03)
+- **Full width (2026-09-24):** `.transcript-inner` used to cap itself at a centred 900 px column from a
+  521 px container width up. Dropped — in a wide tool window messages and cards ended well short of the
+  composer below, which spans the full panel. The transcript now always uses the full width.
+
 | Event | Display |
 |---|---|
 | Slash/result-only turns (`result.result` without stream) | full assistant block (fallback) |
@@ -641,8 +649,49 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   `task_notification` and emits the next zero-turn, non-subagent result as
   **`NotificationTurnResultEvent`**, which bridge and session service ignore. A zero-turn result
   **without** a preceding notification (`/help`, `/usage` …) still ends the turn; the flag is consumed by
-  the first result either way. Fixture `turn-task-notification.ndjson`. The doubled `system/init` is
+  the first result either way. Note that `task_notification` **also fires after every ordinary foreground
+  command mid-turn** (see "Live console output" below) — harmless, because such a turn always ends with
+  `num_turns ≥ 1`. Fixture `turn-task-notification.ndjson`. The doubled `system/init` is
   harmless (the "Session started" note is announced once). Re-verify on a CLI update.
+- **Live console output of shell commands (2026-09-23, `Core/TaskOutputWatcher`).** The stream is
+  silent while a Bash/PowerShell command runs; the output only arrives with the `tool_result`. But the
+  CLI announces every command with **`system/task_started`** (`task_id`, **`tool_use_id`** = the card,
+  `task_type: "local_bash"` for both tools, `is_backgrounded`) and writes its output **live** to
+  **`%TEMP%\claude\<MungePath(cwd)>\<session_id>\tasks\<task_id>.output`** — **UTF-8** (measured: 22 bytes
+  per `Größe äöü € N\r\n` line), opened by the CLI for writing, **deleted** when the command ends; then
+  `task_notification` (`status: completed`) + the `tool_result`. Measured against CLI 2.1.280.
+  - **Host:** on `task_started` (foreground `local_bash` only) the bridge starts tailing with session id +
+    cwd from the turn's `system/init`; `TaskOutputWatcher` polls every 300 ms, opens with
+    `FileShare.ReadWrite | Delete` (a plain `ReadAllBytes` fails on the CLI's write handle), reads only new
+    bytes through a **stateful UTF-8 decoder** (a character split across two reads survives), caps 64 KB per
+    poll and skips ahead when > 512 KB behind. If the expected path is missing it searches
+    `<root>\*\<session>\tasks\<task>.output` (cwd munged differently); no file within 15 s ⇒ give up.
+    Stops on `task_notification` / `tool_result` (with a final read, so nothing before the result is lost),
+    `StopAll` on turn end, `Dispose` with the window. Background tasks are not tailed (their tool_use is
+    answered immediately and they die with the per-turn process anyway).
+  - **Contract:** host→web **`tool.output { id, text }`** (see "Contract additions").
+  - **WebUI:** `toolOutput` appends to a `pre.tool-console.live` in the card body (created on the first
+    chunk, blinking block cursor while running), keeps the last 60 000 chars, sticks to the bottom only
+    while the user is at the bottom. `consoleText` strips ANSI escapes and honours a bare `\r` the way a
+    terminal does (progress bars overwrite their line). On `tool.result` the console is finished in place —
+    it keeps whichever is longer, the live text or the (10 000-char-capped) result — instead of adding the
+    old `pre.tool-output` copy; a chunk arriving after the result is ignored.
+  - **Console opens at `task_started`, not at the first byte:** the bridge posts
+    `tool.output { id, text: "", start: true }` together with starting the tail, so the card shows an empty
+    live console with a "waiting for output…" placeholder (`.tool-console.live:empty::before`); a command
+    that finished without output shows "(no output)". Reason (user report, 0.8.2): Claude often writes
+    `… 2>&1 | Select-Object -Last 8` to keep its own context small — **`Select-Object -Last` holds every
+    line back until the pipeline ends**, the `.output` file stays at 0 bytes, and a console that only
+    appeared with the first byte looked like the feature was broken. Same for `Sort-Object`, `-Tail`-style
+    filters etc.
+  - **Limits:** undocumented CLI internals — if the layout changes, the card simply behaves as before
+    (re-verify on a CLI update). A program that **buffers its own stdout** when it is not attached to a
+    console (e.g. a nested `powershell -File …`, Python without `-u`) delivers in chunks or only at the end:
+    measured, the `.output` file stayed at 0 bytes until the nested `powershell -File` exited, while the same
+    script run in-process (`& .\script.ps1`) streamed line by line. Nothing to fix on our side.
+  - **Tests:** `TaskOutputWatcherTests` (layout, incremental reads, split UTF-8, delete ⇒ end, flush on stop,
+    fallback search), `NdjsonParserTests.ForegroundCommand_…`; mock turn has a PowerShell deploy with a `\r`
+    progress bar and an ANSI colour code.
 - **Background tasks do not survive the turn.** The notification above reads `"status": "stopped"`,
   `"summary": "Background shell command didn't finish before the previous session ended"`: every turn is
   its own `claude -p` process, and a `run_in_background` shell still running when that process exits is
@@ -834,7 +883,10 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   carry theirs — so both levels show the selection.
 - **Wiring:** `RefreshAsync` runs off the UI thread behind a semaphore, reports after **every** probe
   (`models.list` fills in progressively — a first-run sweep is ~4 s per model), writes the cache and
-  remembers the swept executable for the process; `Invalidate()` + re-send on an options change. All
+  remembers the swept executable for the process. **`SendModelCatalog` must also post the RETURN value**
+  (fix 0.8.1): with a complete cache — every start after the first sweep — nothing is probed, the
+  progress callback never fires, and the WebUI stayed on its built-in fallback (Opus 5 on top, the
+  selected `claude-opus-5-5` shown as an unknown extra row with its raw ID); `Invalidate()` + re-send on an options change. All
   processes are hidden (`CreateNoWindow`), stdin closed, 30 s timeout, with the shared no-hooks
   `--settings` file from `ClaudeUsageClient` so no hook can flash a console window. A cold start with
   a valid cache costs ~60 ms (measured), no CLI process at all.

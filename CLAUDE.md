@@ -106,6 +106,10 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   Header sofort, alle 25 s ein `: keep-alive`, dann das Ergebnis als `data:`-Event → der Inaktivitäts-Timer
   läuft nie ab. Betrifft Permission-Prompts **und** AskUserQuestion (gleicher `tools/call`-Pfad). Beim
   CLI-Update gegentesten, ob die CLI das SSE-gelieferte Tool-Result akzeptiert.
+- **Live-Konsole der Shell-Cards** liest eine **undokumentierte** CLI-Datei:
+  `%TEMP%\claude\<MungePath(cwd)>\<session>\tasks\<task_id>.output` (UTF-8, angekündigt per
+  `system/task_started` mit `tool_use_id`, s. NOTES „Live console output", `TaskOutputWatcher`). Beim
+  CLI-Update gegentesten; fällt sie weg, zeigt die Card einfach wieder nur das Endergebnis.
 - Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
   `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
   des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.
