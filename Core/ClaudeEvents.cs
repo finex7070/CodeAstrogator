@@ -81,6 +81,34 @@ namespace CodeAstrogator.Core
         public string? Status { get; set; }
     }
 
+    /// <summary>
+    /// <c>system/task_started</c> — the CLI started running a shell command (Bash / PowerShell tool,
+    /// <c>task_type: "local_bash"</c>). While it runs, the CLI writes the command's output live to
+    /// <c>%TEMP%\claude\&lt;munged cwd&gt;\&lt;session&gt;\tasks\&lt;task_id&gt;.output</c> (see
+    /// <see cref="TaskOutputWatcher"/>); the stream itself stays silent until the tool_result.
+    /// </summary>
+    public sealed class TaskStartedEvent : ClaudeEvent
+    {
+        public string TaskId { get; set; } = "";
+        /// <summary>The tool_use this task runs for — i.e. the tool card to stream into.</summary>
+        public string ToolUseId { get; set; } = "";
+        public string? TaskType { get; set; }
+        public bool IsBackgrounded { get; set; }
+        public string? SessionId { get; set; }
+    }
+
+    /// <summary>
+    /// <c>system/task_notification</c> — a task reached a final state (<c>completed</c>,
+    /// <c>stopped</c>, …). Fires after every foreground command as well as for background tasks
+    /// (including the queued one that opens a later run, see <see cref="NotificationTurnResultEvent"/>).
+    /// </summary>
+    public sealed class TaskNotificationEvent : ClaudeEvent
+    {
+        public string TaskId { get; set; } = "";
+        public string? ToolUseId { get; set; }
+        public string? Status { get; set; }
+    }
+
     /// <summary>Claude invoked a tool (maps to tool.use).</summary>
     public sealed class ToolUseEvent : ClaudeEvent
     {
@@ -135,6 +163,9 @@ namespace CodeAstrogator.Core
     /// turn end drew a "0s · $x" footer the moment a prompt was sent and ran the end-of-turn
     /// bookkeeping (changed-files review, usage refresh) before the turn had even begun — so it gets
     /// its own event, which the bridge and session service ignore.
+    /// <para>Note: <c>task_notification</c> also fires after every ordinary foreground command
+    /// mid-turn. That is harmless here — only a result with <c>num_turns: 0</c> is diverted, and a
+    /// turn that ran a command always reports at least one turn.</para>
     /// </summary>
     public sealed class NotificationTurnResultEvent : ClaudeEvent
     {
