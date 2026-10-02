@@ -893,6 +893,15 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
 - **Failure behaviour:** probe fails ⇒ entry stays unknown and is retried next time; no CLI at all ⇒
   nothing is reported and the WebUI keeps its built-in list; cache unwritable ⇒ the sweep just runs
   again next time.
+- **Catalog updates:**
+  - **2026-10-02 — Claude Sonnet 5.5** (`claude-sonnet-5-5`, released ~2026-09-28) added as the newest
+    sonnet; Sonnet 5 moved behind Fable 5 into the older generations. CLI 2.1.280 does **not** know the ID
+    yet (probe echoes it raw) ⇒ hidden, Sonnet 5 stays on top until a CLI update.
+  - **Where the remote catalog comes from:** `noticeBranch` in `WebUI/config.js` is still `"master"`, but the
+    repo only has `main` + `develope`. `raw.githubusercontent.com` serves `master` as the alias of the
+    renamed default branch (`…/master/models.json` → 200, same content as `main`), so the fetch works — but
+    it means a catalog change reaches installed extensions **only once it is on `main`**; committing it on
+    `develope` alone is not enough.
 - **Re-verify on a CLI update:** that the label-vs-echo distinction still holds and that the probe
   stays free of API calls.
 

@@ -17,10 +17,11 @@
   "models": [
     { "id": "claude-opus-5-5", "label": "Opus 5.5", "family": "opus" },
     { "id": "claude-fable-5-1", "label": "Fable 5.1", "family": "fable" },
-    { "id": "claude-sonnet-5", "label": "Sonnet 5", "family": "sonnet" },
+    { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "family": "sonnet" },
     { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "family": "haiku" },
     { "id": "claude-opus-5", "label": "Opus 5", "family": "opus" },
     { "id": "claude-fable-5", "label": "Fable 5", "family": "fable" },
+    { "id": "claude-sonnet-5", "label": "Sonnet 5", "family": "sonnet" },
     { "id": "claude-opus-4-8", "label": "Opus 4.8", "family": "opus" },
     { "id": "claude-opus-4-7", "label": "Opus 4.7", "family": "opus" },
     { "id": "claude-opus-4-6", "label": "Opus 4.6", "family": "opus" },
