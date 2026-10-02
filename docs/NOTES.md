@@ -181,6 +181,100 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
   in the **system browser** (`Process.Start`, `UseShellExecute=true`; http/https only) instead of in a
   bare WebView2 popup.
 
+## Auto-update (2026-10-02, `Core/ExtensionUpdater`)
+- **Why:** Visual Studio's own extension updater only picks up a new Marketplace version once the
+  Extensions dialog has been opened (and then not while a VS update is pending) — installs lagged behind.
+- **On by default (user's call, 2026-10-02):** `AutoUpdateEnabled` defaults to **true** and is
+  **pre-ticked** in the consent popup (5th row) — but nothing is fetched, staged or installed until
+  `AutoUpdateDecided` is set (popup answered or settings saved): `RunAutoUpdateCheck` and the package's
+  shutdown hook both require it, so no download starts behind a not-yet-answered first-run popup. Settings
+  window: indented under "Notify me about new versions". Adding the option re-opens the consent popup once
+  for existing installs (as intended).
+- **Check + stage (host, off the UI thread):** on window open, after a consent answer, after an options
+  change and on the settings window's update "Check now" (forced): `GET api.github.com/repos/<repo>/releases/latest`
+  (repo from `WebUI/config.js`), throttled to **3 h** (`updates\state.json`). Newer than installed **and**
+  a `.vsix` asset attached ⇒ download to `%LocalAppData%\CodeAstrogator\updates\CodeAstrogator-<v>.vsix`
+  and **verify**: the package's `extension.vsixmanifest` must carry the installed extension's **Identity Id**
+  and **exactly the release's version** — otherwise it is deleted and nothing is staged. Success ⇒
+  `updates\pending.json` + host→web `update.staged` ⇒ banner "Update ready — installs when you close Visual
+  Studio [Restart now] What's new ↗" (it owns the update banner; the WebUI's own release check no longer
+  overwrites it). Measured against the real `v0.8.2` release: 0.9 s, 771 887 bytes, identity verified;
+  a wrong id is rejected and cleaned up.
+- **Install (only possible once VS is gone — a loaded extension cannot be replaced):** the package hooks
+  `DTEEvents.OnBeginShutdown`; with auto-update on and a pending update newer than installed it starts
+  `powershell.exe -WindowStyle Hidden -File updates\install-update.ps1` (the script is written from
+  `ExtensionUpdater.HelperScript`): waits for **this** devenv PID to exit, then runs
+  `<IDE>\VSIXInstaller.exe /quiet /instanceIds:<id> /logFile:"…\vsixinstaller.log" "<vsix>"` — switch syntax
+  verified against VSIXInstaller 18.10 (it echoes its parsed command line and usage into the log; exit 2001 =
+  bad command line). The instance id comes from `vswhere -all -prerelease -format json` by matching the
+  running `devenv.exe` path against `installationPath` (this machine: `d0daee8a` = VS 2026, `c71b4c8f` =
+  VS 2022) — only the running instance is updated. Same identity id ⇒ also replaces a Marketplace install.
+  Exit code goes to `updates\install.log`; `pending.json` is left in place.
+- **Progress window (user feedback after the first real test: "no window that shows the update is
+  done"):** once devenv has exited, the helper shows a small WinForms window (the PowerShell console stays
+  hidden): "Installing the Code Astrogator update to version X …" with a marquee bar → on exit code 0 "Code
+  Astrogator X is installed. You can start Visual Studio again." (or "… Starting Visual Studio …" for
+  "Restart now"), auto-closing after 8 s; on failure the exit code, "tried again the next time you close
+  Visual Studio" and the `vsixinstaller.log` path, staying up until OK. VSIXInstaller is started with
+  `-PassThru` (no `-Wait`) and polled by a WinForms timer; `$p.Handle` is touched right after the start —
+  without it `ExitCode` is empty once the process has ended. No WinForms ⇒ silent install as before. All
+  three states were captured from a run against a fake installer.
+- **Next start:** `TakeAppliedUpdate` — pending version == installed ⇒ system note "Code Astrogator was
+  updated to X." + cleanup; still newer (install failed) ⇒ banner again, retried at the next close.
+- **"Restart now":** web→host `update.restart` ⇒ `pending.Relaunch = true` + `DTE.ExecuteCommand("File.Exit")`
+  (unsaved files are prompted for as usual); the helper starts devenv again after installing.
+- **Verified:** unit tests (parse, version compare, identity, rejection, throttle, no re-download,
+  announce-once, helper args); real GitHub download + verification; the helper script with a fake devenv
+  (waited 4 s, then called the installer with correctly quoted paths containing spaces) and a fake installer.
+  **Real end-to-end test passed (2026-10-02, user):** a 0.8.1 test build updated itself to the published
+  0.8.2 on closing VS — so the `OnBeginShutdown` hook, the helper surviving devenv's exit and the quiet
+  VSIXInstaller run all work. Test recipe: build with a manifest version below the latest release
+  (`bin\AutoUpdateTest\`), install into VS 2026 only, answer the consent popup with auto-update ticked, wait
+  for the "Update ready" banner, close VS.
+- **Open / known:** cancelling the save prompt after "Restart now" leaves `Relaunch` set — the next normal
+  close then restarts VS after installing. Unsigned VSIX (as published) installs fine per-user.
+
+## Settings window layout (2026-10-02)
+- Every block is a **card** (`Section(title, params UIElement[])` in `AstrogatorSettingsWindow`): bold
+  title, 1 px rounded border in `VsBrushes.ToolWindowBorderKey`, 12 px padding, 12 px gap below.
+- Columns: **left** Claude CLI · Appearance & transcript · Behavior · Announcements & updates · History &
+  storage; **right** Permissions · Checkpoints (rewind). Permissions moved right because "Announcements &
+  updates" grew (Check now buttons, auto-update) and the left column had become much longer than the right.
+- "Update ready" banner order: text · "What's new ↗" · **Restart now** last (it closes Visual Studio).
+
+## Manual "Check now" (settings window, 2026-10-02)
+- **What:** a "Check now" button on the right of each of the three "Announcements & updates" options, with
+  a result line below it (`WithCheckNow` in `AstrogatorSettingsWindow`). The check runs **regardless of
+  the checkbox** — the click is the consent for that one request.
+- **Flow:** window → `CodeAstrogatorPackage.RequestManualCheck(kind)` → `ManualCheckRequested` (handled by the
+  chat bridge; returns false when no chat window is open → "Open the Code Astrogator chat window first") →
+  result via `ReportManualCheck` → `ManualCheckCompleted` → window (marshalled onto its dispatcher; the
+  settings dialog is modal, its nested loop keeps the WebView and JTF switches running).
+  - `notice` / `update`: the bridge posts `check.run`; the WebUI owns those fetches (URL, cache,
+    rendering), so `runManualCheck` fetches past the throttle, updates the localStorage cache + the
+    banner (`renderNotice`/`renderUpdate` now return whether they showed something) and answers
+    `check.result`. Messages: "No current announcement." / "Announcement found: “…” — shown at the top of
+    the chat." / "Up to date — the latest release is X, you have Y." / "Version X is available (you have
+    Y) — shown at the top of the chat." / "Could not reach GitHub …".
+  - `models`: host-side `RefreshAsync` with `ModelCatalogContext.ForceRemoteFetch` (ignores the 12 h
+    throttle, the opt-in and the per-session "already swept" shortcut), then posts `models.list`;
+    `ModelCatalogReport.Describe` builds the line, e.g. "Fetched the latest list from GitHub · 10 of 11
+    models available · not yet supported by your CLI 2.1.280: Sonnet 5.5 (hidden until you update the
+    CLI)". New models are probed as usual; already-checked ones are not re-probed (results are exact per
+    CLI version).
+- **Timeout:** the button frees up after 90 s without an answer ("No answer from the chat window").
+- **Pitfall (fixed 0.8.3, user report "stuck on Checking…"):** the settings window used to be opened
+  *inside* the `WebMessageReceived` handler (`options.open` → `OpenOptions()` → `ShowModal()`). WebView2
+  does not re-enter its event handlers, so while that modal loop ran, **no further page → host message was
+  delivered** — the banners' `check.result` sat in the queue until the window closed, while the host-side
+  model check worked. `options.open` now opens the window after the callback returned
+  (`SwitchToMainThreadAsync(alwaysYield: true)`). **Rule: never run a modal loop inside a WebView2 event
+  handler if anything in it needs messages from the page.**
+- **Verified:** model check end-to-end against GitHub + CLI 2.1.287 (3.8 s, "11 of 11 models available ·
+  all supported"); banner checks against the live GitHub endpoints through a fake host page (both "up to
+  date" and — with a faked older installed version — "Version 0.8.2 is available" + banner). The WPF
+  layout of the window itself was only built, not looked at.
+
 ## Tasks banner (2026-06-24)
 - **What:** A third banner below the header (`#tasks-banner`, class `notice-banner tasks-banner`)
   that aggregates the CLI's **`Task*` tool calls** into a live, collapsible checklist (☐ pending /
@@ -236,6 +330,14 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **`update.staged` (host → web) / `update.restart` (web → host), 2026-10-02** — auto-update.
+  `update.staged { version, installed, url }`: a verified update is downloaded and installs when VS closes →
+  "Update ready" banner with "Restart now"; `update.restart` closes VS for an immediate install + relaunch.
+  `session.init` / `consent.set` carry `autoUpdateEnabled` (+ `autoUpdateDecided` in session.init).
+- **`check.run` (host → web) / `check.result` (web → host), 2026-10-02** — manual "Check now" from the
+  settings window. `check.run { kind: "notice" | "update" }` makes the WebUI fetch right away (past the 1 h
+  throttle), refresh cache + banner, and answer `check.result { kind, ok, message }` with a ready-to-show
+  line. The model catalog check never touches the WebUI (host-side). See "Manual Check now".
 - **`tool.output` (host → web, 2026-09-23)** — `{ id, text, start? }`: a chunk of live console output of
   the running Bash/PowerShell command whose card has tool_use id `id`. Appended, never replaces; ignored
   once the card has its `tool.result`. `start: true` (empty `text`) is sent at `task_started` and only opens

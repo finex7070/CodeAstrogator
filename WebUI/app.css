@@ -185,6 +185,19 @@ button { font-family: inherit; }
 }
 .notice-text a { color: var(--accent); text-decoration: none; white-space: nowrap; }
 .notice-text a:hover { color: var(--accent-hover); text-decoration: underline; }
+/* "Restart now" in the "Update ready" banner — a small accent button inline with the text */
+.notice-action {
+  margin: 0 2px 0 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+.notice-action:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.notice-action:disabled { opacity: 0.6; cursor: default; }
 .notice-close {
   flex: 0 0 auto;
   display: flex;
