@@ -4,6 +4,17 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.9.0] – 2026-10-02
+
+### Changed
+- **The settings window is easier to scan.** Each group of settings now sits in its own framed box, and the two columns are better balanced: "Permissions" moved to the right above "Checkpoints", "History & storage" to the bottom of the left column.
+
+### Added
+- **Automatic updates.** Visual Studio's own extension updater tends to lag behind — in practice it only picks up a new version once you have opened the Extensions dialog. Code Astrogator now updates itself instead. "Install updates automatically" is on by default; the getting-started dialog appears once more so you can see the new option (it is ticked there) and switch it off if you prefer, and nothing is downloaded before you have answered it. You can change it any time in the settings. With it on, Code Astrogator looks for a new release on the project's GitHub every few hours, downloads it and checks that the package really is Code Astrogator in exactly that version. A banner tells you it is ready, and it installs by itself the next time you close Visual Studio — or right away with **Restart now**, which closes Visual Studio (asking about unsaved files as usual), installs the update and starts it again. While it installs, a small window shows the progress and then confirms that the new version is installed (or, if something went wrong, says so and that it will try again next time). After the update the chat confirms the new version. Only the Visual Studio you are using is updated, and it works no matter whether you installed from the Marketplace or from a downloaded file.
+- **"Check now" buttons in the settings.** Each of the three options under "Announcements & updates" now has a button that runs the check right away instead of waiting for the next scheduled one, with the result shown right below it: whether there is a current announcement, whether a newer version is out ("Up to date — the latest release is 0.8.2" or "Version … is available — shown at the top of the chat"), and for the model list where it came from, how many models your Claude CLI can run and which ones it does not support yet. Clicking a button counts as permission for that one check, so it works even while the option itself is switched off. The chat window has to be open, because that is where the checks run. (The settings window now also opens a moment after the click on "Advanced options…" instead of from inside the chat window's own message handling — otherwise the chat window could not answer the announcement and update checks while the settings were open, and those two stayed on "Checking…".)
+
+---
+
 ## [0.8.2] – 2026-09-23
 
 ### Changed

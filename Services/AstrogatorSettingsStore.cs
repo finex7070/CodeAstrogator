@@ -53,6 +53,8 @@ namespace CodeAstrogator.Services
                 UpdateCheckDecided = GetBool(nameof(AstrogatorOptions.UpdateCheckDecided), d.UpdateCheckDecided),
                 ModelCatalogFetchEnabled = GetBool(nameof(AstrogatorOptions.ModelCatalogFetchEnabled), d.ModelCatalogFetchEnabled),
                 ModelCatalogFetchDecided = GetBool(nameof(AstrogatorOptions.ModelCatalogFetchDecided), d.ModelCatalogFetchDecided),
+                AutoUpdateEnabled = GetBool(nameof(AstrogatorOptions.AutoUpdateEnabled), d.AutoUpdateEnabled),
+                AutoUpdateDecided = GetBool(nameof(AstrogatorOptions.AutoUpdateDecided), d.AutoUpdateDecided),
                 PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(
                     GetInt(nameof(AstrogatorOptions.PromptTimeoutMinutes), d.PromptTimeoutMinutes)),
                 RestoreLastSession = GetBool(nameof(AstrogatorOptions.RestoreLastSession), d.RestoreLastSession),
@@ -100,6 +102,8 @@ namespace CodeAstrogator.Services
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.NoticeFetchDecided), o.NoticeFetchDecided);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ModelCatalogFetchEnabled), o.ModelCatalogFetchEnabled);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ModelCatalogFetchDecided), o.ModelCatalogFetchDecided);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.AutoUpdateEnabled), o.AutoUpdateEnabled);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.AutoUpdateDecided), o.AutoUpdateDecided);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UpdateCheckEnabled), o.UpdateCheckEnabled);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UpdateCheckDecided), o.UpdateCheckDecided);
             _store.SetInt32(Collection, nameof(AstrogatorOptions.PromptTimeoutMinutes),

@@ -257,6 +257,47 @@ namespace CodeAstrogator.Tests
             Assert.Equal(new[] { "claude-opus-5", "my-model" }, rows.Where(r => r.Primary).Select(r => r.Id));
         }
 
+        // ── manual "Check now" result line ───────────────────────────────────
+
+        [Fact]
+        public void Report_NamesTheModelsTheCliDoesNotKnowYet()
+        {
+            var report = new ModelCatalogReport
+            {
+                DefaultsSource = "remote",
+                CliVersion = "2.1.280",
+                TotalModels = 11,
+                Unsupported = new[] { "Sonnet 5.5" },
+            };
+
+            var text = report.Describe(offered: 10);
+
+            Assert.True(report.Succeeded);
+            Assert.Contains("Fetched the latest list from GitHub", text);
+            Assert.Contains("10 of 11 models available", text);
+            Assert.Contains("not yet supported by your CLI 2.1.280: Sonnet 5.5", text);
+        }
+
+        [Fact]
+        public void Report_FailedFetch_FallsBackToTheShippedList()
+        {
+            var report = new ModelCatalogReport { DefaultsSource = "bundled", RemoteFailed = true, CliVersion = "2.1.280", TotalModels = 11 };
+
+            Assert.False(report.Succeeded);
+            var text = report.Describe(offered: 11);
+            Assert.Contains("Could not reach GitHub", text);
+            Assert.Contains("all supported by your CLI 2.1.280", text);
+        }
+
+        [Fact]
+        public void Report_WithoutCli_SaysNothingCouldBeVerified()
+        {
+            var report = new ModelCatalogReport { DefaultsSource = "remote", NoCli = true, TotalModels = 11 };
+
+            Assert.False(report.Succeeded);
+            Assert.Contains("no Claude CLI found", report.Describe(offered: 0));
+        }
+
         // ── shipped catalog ──────────────────────────────────────────────────
 
         [Fact]
