@@ -7,6 +7,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.8.2] – 2026-09-23
 
 ### Changed
+- **Claude Sonnet 5.5 joined the model list.** It is the new current Sonnet and takes Sonnet 5's place at the top of the picker; Sonnet 5 stays selectable under "More models". As with every new model, it only shows up once your Claude Code CLI can run it — until then the picker keeps Sonnet 5 on top and switches over by itself after you update the CLI.
 - **The chat now uses the full width of the tool window.** In a wide window, messages and cards used to stop at a centred column about 900 px wide, well short of the input box below. They now run the full width, flush with the input box.
 
 ### Added
