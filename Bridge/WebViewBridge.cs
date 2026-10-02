@@ -157,6 +157,7 @@ namespace CodeAstrogator.Bridge
             _session.TurnCompleted += OnTurnCompleted;
             VSColorTheme.ThemeChanged += OnVsThemeChanged;
             _package.OptionsChanged += OnOptionsChanged;
+            _package.ManualCheckRequested += OnManualCheckRequested;
 
             // Keep the usage meters fresh with a once-a-minute refresh — including while a turn is
             // running, since the meters are otherwise only updated on window open (ready) and at turn
@@ -184,6 +185,7 @@ namespace CodeAstrogator.Bridge
             _usageTimer?.Dispose();
             VSColorTheme.ThemeChanged -= OnVsThemeChanged;
             _package.OptionsChanged -= OnOptionsChanged;
+            _package.ManualCheckRequested -= OnManualCheckRequested;
             _activeDocs.ActiveDocumentChanged -= OnActiveDocumentChanged;
             _activeDocs.Dispose();
             _session.EventReceived -= OnSessionEvent;
@@ -241,6 +243,8 @@ namespace CodeAstrogator.Bridge
                     SendInitialSession();
                     SendSlashCommands(); // re-send the CLI-reported list after a WebView reload
                     SendModelCatalog();  // which models the installed CLI accepts (async probe)
+                    SendUpdateState();   // staged update → banner; just-applied update → note
+                    RunAutoUpdateCheck(force: false);
                     SendActiveFile();
                     if (_package.SettingsLoadError != null)
                         PostSystemNote("⚠ Settings could not be read — using defaults. " + _package.SettingsLoadError);
@@ -334,6 +338,16 @@ namespace CodeAstrogator.Bridge
                 case "editReview.discardAll":
                     HandleDiscardAllTurnReviews();
                     break;
+                case "update.restart":
+                    HandleUpdateRestart();
+                    break;
+                case "check.result":
+                    // Answer to a manual "Check now" for a banner (the WebUI did the fetch).
+                    _package.ReportManualCheck(
+                        msg.Value<string>("kind") ?? "",
+                        msg.Value<bool?>("ok") ?? false,
+                        msg.Value<string>("message") ?? "");
+                    break;
                 case "consent.set":
                     // first-run consent popup answered (announcements + updates + model list +
                     // checkpoints) → persist the choices and that they were made (so the popup never
@@ -344,12 +358,15 @@ namespace CodeAstrogator.Bridge
                     _package.GetOptions().UpdateCheckDecided = true;
                     _package.GetOptions().ModelCatalogFetchEnabled = msg.Value<bool?>("modelsEnabled") ?? false;
                     _package.GetOptions().ModelCatalogFetchDecided = true;
+                    _package.GetOptions().AutoUpdateEnabled = msg.Value<bool?>("autoUpdateEnabled") ?? false;
+                    _package.GetOptions().AutoUpdateDecided = true;
                     _package.GetOptions().CheckpointsEnabled =
                         (msg.Value<bool?>("checkpointsEnabled") ?? false) && GitCheckpointService.IsGitAvailable();
                     _package.GetOptions().CheckpointsDecided = true;
                     _package.SaveOptions();
                     SendCheckpointSettings();
                     SendModelCatalog(); // the answer may just have allowed the repo fetch
+                    RunAutoUpdateCheck(force: false);
                     break;
                 case "checkpoint.previewRequest":
                     HandleCheckpointPreview(msg.Value<string>("sha") ?? "", msg.Value<string>("scope") ?? "turns");
@@ -376,7 +393,16 @@ namespace CodeAstrogator.Bridge
                     HandleVerbositySet(msg.Value<string>("level") ?? "normal");
                     break;
                 case "options.open":
-                    _package.OpenOptions();
+                    // Open the (modal) settings window only AFTER this WebMessageReceived callback has
+                    // returned. A modal loop running inside the callback blocks WebView2 from delivering
+                    // any further page → host message until the dialog closes (WebView2 does not re-enter
+                    // its event handlers) — the window's "Check now" for the banners waits for the page's
+                    // check.result and hung on "Checking…".
+                    _package.JoinableTaskFactory.RunAsync(async () =>
+                    {
+                        await _package.JoinableTaskFactory.SwitchToMainThreadAsync(alwaysYield: true);
+                        _package.OpenOptions();
+                    }).Task.Forget();
                     break;
                 case "slash.run":
                     HandleSlashRun(msg.Value<string>("command") ?? "", msg.Value<string>("args"));
@@ -2783,6 +2809,7 @@ namespace CodeAstrogator.Bridge
             ClaudeCliCapabilities.Invalidate();  // the executable path may have changed → re-probe its --help
             ClaudeModelCatalog.Invalidate();     // …and re-probe which models that binary knows
             SendModelCatalog();                  // push the (possibly different) picker list
+            RunAutoUpdateCheck(force: false);    // auto-update may just have been switched on (throttled)
             var promptTimeoutMs = PromptTimeoutMs(_package.GetOptions());
             _permission.UpdateToolTimeout(promptTimeoutMs);            // config `timeout` (the value the CLI prefers)
         }
@@ -3388,6 +3415,8 @@ namespace CodeAstrogator.Bridge
                 ["updateCheckDecided"] = options.UpdateCheckDecided,
                 ["modelCatalogFetchEnabled"] = options.ModelCatalogFetchEnabled,
                 ["modelCatalogFetchDecided"] = options.ModelCatalogFetchDecided,
+                ["autoUpdateEnabled"] = options.AutoUpdateEnabled,
+                ["autoUpdateDecided"] = options.AutoUpdateDecided,
                 ["checkpoints"] = BuildCheckpointsState(),
                 ["appVersion"] = GetInstalledVersion(),
             });
@@ -3430,6 +3459,153 @@ namespace CodeAstrogator.Bridge
                 // posted here — otherwise the WebUI silently stays on its built-in fallback.
                 var rows = await ClaudeModelCatalog.RefreshAsync(context, PostModelCatalog).ConfigureAwait(false);
                 PostModelCatalog(rows);
+            }).Task.Forget();
+        }
+
+        /// <summary>
+        /// Manual "Check now" from the settings window. The two banners are fetched by the WebUI (it
+        /// owns their fetch, cache and rendering) → <c>check.run</c>, answered with <c>check.result</c>;
+        /// the model catalog is the host's → forced refresh here. Either way the result goes back to
+        /// the window via <see cref="CodeAstrogatorPackage.ReportManualCheck"/>.
+        /// </summary>
+        private void OnManualCheckRequested(string kind)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            switch (kind)
+            {
+                case "notice":
+                    Post(new JObject { ["type"] = "check.run", ["kind"] = kind });
+                    break;
+                case "update":
+                    Post(new JObject { ["type"] = "check.run", ["kind"] = kind });
+                    RunAutoUpdateCheck(force: true); // with auto-update on, also fetch + stage right away
+                    break;
+                case "models":
+                    RunManualModelCheck();
+                    break;
+            }
+        }
+
+        // ── auto-update (ExtensionUpdater) ───────────────────────────────────
+
+        /// <summary>On window open: a staged update shows its banner; an update applied since the last
+        /// session is announced once and cleaned up.</summary>
+        private void SendUpdateState()
+        {
+            var installed = CodeAstrogatorPackage.InstalledVersion();
+            if (string.IsNullOrEmpty(installed))
+                return;
+            var applied = ExtensionUpdater.TakeAppliedUpdate(installed!);
+            if (applied != null)
+                PostSystemNote("Code Astrogator was updated to " + applied + ".");
+            PostStagedUpdate(ExtensionUpdater.ReadPending(), installed!);
+        }
+
+        private void PostStagedUpdate(PendingUpdate? pending, string installed)
+        {
+            if (pending == null || !ExtensionUpdater.IsNewer(pending.Version, installed))
+                return;
+            Post(new JObject
+            {
+                ["type"] = "update.staged",
+                ["version"] = pending.Version,
+                ["installed"] = installed,
+                ["url"] = pending.HtmlUrl ?? "",
+            });
+        }
+
+        /// <summary>
+        /// With auto-update on: check the newest release (throttled to 3 h unless <paramref name="force"/>),
+        /// download + verify it, and show the "ready, installs when VS closes" banner. Off the UI thread.
+        /// </summary>
+        private void RunAutoUpdateCheck(bool force)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            // On by default, but only acted on once the user has seen the choice (consent popup /
+            // settings) — no download before the first-run popup was answered.
+            var options = _package.GetOptions();
+            if (!options.AutoUpdateEnabled || !options.AutoUpdateDecided)
+                return;
+            var extensionDir = System.IO.Path.GetDirectoryName(typeof(WebViewBridge).Assembly.Location) ?? "";
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var (id, installed) = CodeAstrogatorPackage.InstalledIdentity();
+                if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(installed))
+                    return;
+                var repo = ClaudeModelCatalog.ReadRepoConfig(extensionDir).Repo;
+                var result = await ExtensionUpdater.CheckAndStageAsync(repo, id!, installed!, force).ConfigureAwait(false);
+                if (result.Staged != null)
+                    PostStagedUpdate(result.Staged, installed!);
+                else if (force && result.Error != null)
+                    PostSystemNote("Auto-update: " + result.Error);
+            }).Task.Forget();
+        }
+
+        /// <summary>"Restart now" in the update banner: mark the staged update for relaunch and close
+        /// Visual Studio the normal way (unsaved files are still prompted for). The shutdown hook starts
+        /// the installer, which restarts VS when it is done.</summary>
+        private void HandleUpdateRestart()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var installed = CodeAstrogatorPackage.InstalledVersion() ?? "";
+            var pending = ExtensionUpdater.ReadPending();
+            if (pending == null || !ExtensionUpdater.IsNewer(pending.Version, installed))
+            {
+                PostSystemNote("There is no downloaded update to install.");
+                return;
+            }
+            pending.Relaunch = true;
+            try
+            {
+                ExtensionUpdater.WritePending(ExtensionUpdater.DefaultUpdatesDir, pending);
+                if (Package.GetGlobalService(typeof(DTE)) is DTE2 dte)
+                    dte.ExecuteCommand("File.Exit");
+            }
+            catch (Exception ex)
+            {
+                PostSystemNote("Could not close Visual Studio for the update: " + ex.Message
+                               + " — it installs the next time you close Visual Studio.");
+            }
+        }
+
+        private void RunManualModelCheck()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var exeOverride = _package.GetOptions().ClaudeExecutablePath;
+            var cwd = _package.GetSolutionDirectory();
+            var extensionDir = System.IO.Path.GetDirectoryName(typeof(WebViewBridge).Assembly.Location) ?? "";
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                try
+                {
+                    var repoConfig = ClaudeModelCatalog.ReadRepoConfig(extensionDir);
+                    var context = new ModelCatalogContext
+                    {
+                        ExePath = ClaudeExecutableLocator.Locate(exeOverride),
+                        WorkingDirectory = cwd,
+                        ExtensionDirectory = extensionDir,
+                        AllowRemoteDefaults = true,
+                        ForceRemoteFetch = true, // the click is the consent for this one request
+                        GitHubRepo = repoConfig.Repo,
+                        Branch = repoConfig.Branch,
+                    };
+                    var rows = await ClaudeModelCatalog.RefreshAsync(context, PostModelCatalog).ConfigureAwait(false);
+                    PostModelCatalog(rows);
+
+                    var report = ClaudeModelCatalog.LastReport;
+                    if (report == null)
+                        _package.ReportManualCheck("models", false, "No result — try again.");
+                    else
+                        _package.ReportManualCheck("models", report.Succeeded, report.Describe(rows.Count));
+                }
+                catch (Exception ex)
+                {
+                    _package.ReportManualCheck("models", false, "Check failed: " + ex.Message);
+                }
             }).Task.Forget();
         }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
@@ -39,6 +40,10 @@ namespace CodeAstrogator.ToolWindows
         private readonly CheckBox _noticeFetch;
         private readonly CheckBox _updateCheck;
         private readonly CheckBox _modelCatalogFetch;
+        private readonly CheckBox _autoUpdate;
+
+        /// <summary>"Check now" button + result line per check kind ("notice", "update", "models").</summary>
+        private readonly Dictionary<string, CheckNowUi> _checkUi = new Dictionary<string, CheckNowUi>();
         private readonly TextBox _promptTimeout;
         private readonly ComboBox _historyRetention;
         private readonly ComboBox _pastedRetention;
@@ -58,6 +63,13 @@ namespace CodeAstrogator.ToolWindows
         {
             _package = package;
             _current = current;
+            _package.ManualCheckCompleted += OnManualCheckCompleted;
+            Closed += (_, __) =>
+            {
+                _package.ManualCheckCompleted -= OnManualCheckCompleted;
+                foreach (var ui in _checkUi.Values)
+                    ui.Timeout?.Stop();
+            };
 
             Title = "Code Astrogator — Settings";
             Width = 980; // two columns — wide instead of a single very long list
@@ -89,6 +101,7 @@ namespace CodeAstrogator.ToolWindows
             _autoAdd.Unchecked += (_, __) => { _includeLines.IsEnabled = false; _activeFileDefault.IsEnabled = false; };
             _noticeFetch = MakeCheck("Periodically check the project's GitHub for announcements and show them as a banner (makes a network request)", new Thickness(0, 8, 0, 0));
             _updateCheck = MakeCheck("Notify me about new versions (checks the project's GitHub for updates and shows a banner)", new Thickness(0, 8, 0, 0));
+            _autoUpdate = MakeCheck("Install updates automatically: download new releases from the project's GitHub and install them when Visual Studio closes (checked at most every 3 h)", new Thickness(20, 6, 0, 0));
             _modelCatalogFetch = MakeCheck("Keep the model list up to date from the project's GitHub, so newly released Claude models appear in the picker without an extension update (checked at most every 12 h; off = the list shipped with this version is used)", new Thickness(0, 8, 0, 0));
             _promptTimeout = MakeTextBox();
             _promptTimeout.HorizontalAlignment = HorizontalAlignment.Left;
@@ -117,60 +130,62 @@ namespace CodeAstrogator.ToolWindows
             _deleteCheckpoints.Click += (_, __) => DeleteAllCheckpoints();
             UpdateCheckpointSizeLabel();
 
-            // Two columns instead of one very long list — the window is wide rather than tall.
+            // Two columns instead of one very long list — the window is wide rather than tall. Every
+            // block is its own card (Section) so the groups read apart at a glance. The tall blocks are
+            // spread over both columns: Permissions (pattern list) sits on the right above Checkpoints,
+            // History & storage closes the left column.
             var left = new StackPanel();
-            left.Children.Add(Header("Claude CLI"));
-            left.Children.Add(Labeled("Claude executable path (optional override; empty = resolve automatically):", WithBrowse(_exePath)));
+            left.Children.Add(Section("Claude CLI",
+                Labeled("Claude executable path (optional override; empty = resolve automatically):", WithBrowse(_exePath))));
             // Model & effort moved to the in-chat Model·Mode popover (sticky/persisted there).
-            left.Children.Add(Header("Appearance & transcript"));
-            left.Children.Add(Labeled("Theme:", _theme));
-            left.Children.Add(Labeled("Transcript verbosity:", _verbosity));
-            left.Children.Add(Header("Behavior"));
-            left.Children.Add(_restore);
-            left.Children.Add(_autoAdd);
-            left.Children.Add(_includeLines);
-            left.Children.Add(_activeFileDefault);
-            left.Children.Add(Header("Announcements & updates"));
-            left.Children.Add(_noticeFetch);
-            left.Children.Add(_updateCheck);
-            left.Children.Add(_modelCatalogFetch);
-            left.Children.Add(Header("Permissions"));
-            left.Children.Add(Labeled(
-                "Auto-approve patterns (* = wildcard) — matching Bash/PowerShell commands and MCP tools "
-                + "skip the permission prompt. The \"Always\" button on a prompt adds the command/tool here.",
-                _autoApprove));
-            left.Children.Add(GridButtons(_autoApprove, _patterns, _removePattern));
-            left.Children.Add(Labeled(
-                $"Prompt timeout — how long a permission prompt / question waits for your answer "
-                + $"before it expires (minutes, {AstrogatorOptions.MinPromptTimeoutMinutes}–{AstrogatorOptions.MaxPromptTimeoutMinutes}):",
-                _promptTimeout));
+            left.Children.Add(Section("Appearance & transcript",
+                Labeled("Theme:", _theme),
+                Labeled("Transcript verbosity:", _verbosity)));
+            left.Children.Add(Section("Behavior",
+                _restore, _autoAdd, _includeLines, _activeFileDefault));
+            left.Children.Add(Section("Announcements & updates",
+                WithCheckNow(_noticeFetch, "notice"),
+                WithCheckNow(_updateCheck, "update"),
+                _autoUpdate,
+                WithCheckNow(_modelCatalogFetch, "models")));
+            left.Children.Add(Section("History & storage",
+                Labeled(
+                    "Automatically delete chat history older than (by last activity; \"Never\" keeps it forever):",
+                    _historyRetention),
+                Labeled(
+                    "Automatically delete pasted images older than (files under …\\CodeAstrogator\\pasted):",
+                    _pastedRetention)));
 
             var right = new StackPanel();
-            right.Children.Add(Header("History & storage"));
-            right.Children.Add(Labeled(
-                "Automatically delete chat history older than (by last activity; \"Never\" keeps it forever):",
-                _historyRetention));
-            right.Children.Add(Labeled(
-                "Automatically delete pasted images older than (files under …\\CodeAstrogator\\pasted):",
-                _pastedRetention));
-            right.Children.Add(Header("Checkpoints (rewind)"));
-            right.Children.Add(_checkpoints);
+            right.Children.Add(Section("Permissions",
+                Labeled(
+                    "Auto-approve patterns (* = wildcard) — matching Bash/PowerShell commands and MCP tools "
+                    + "skip the permission prompt. The \"Always\" button on a prompt adds the command/tool here.",
+                    _autoApprove),
+                GridButtons(_autoApprove, _patterns, _removePattern),
+                Labeled(
+                    $"Prompt timeout — how long a permission prompt / question waits for your answer "
+                    + $"before it expires (minutes, {AstrogatorOptions.MinPromptTimeoutMinutes}–{AstrogatorOptions.MaxPromptTimeoutMinutes}):",
+                    _promptTimeout)));
+
+            var checkpointItems = new List<UIElement> { _checkpoints };
             if (!gitAvailable)
-                right.Children.Add(Hint("Git was not found on PATH — checkpoints are unavailable. "
+                checkpointItems.Add(Hint("Git was not found on PATH — checkpoints are unavailable. "
                     + "Install Git for Windows and restart Visual Studio."));
-            right.Children.Add(Labeled(
+            checkpointItems.Add(Labeled(
                 $"Skip files larger than (MB, 0 = no limit, max {AstrogatorOptions.MaxCheckpointFileMb}):",
                 _checkpointMaxMb));
-            right.Children.Add(Labeled("Extension filter:", _checkpointFilterMode));
-            right.Children.Add(Labeled("File extensions (empty list = no extension filter):",
+            checkpointItems.Add(Labeled("Extension filter:", _checkpointFilterMode));
+            checkpointItems.Add(Labeled("File extensions (empty list = no extension filter):",
                 _checkpointExtensions));
-            right.Children.Add(GridButtons(_checkpointExtensions, _extensions, _removeExtension));
-            right.Children.Add(Hint("Large binaries are what makes a snapshot expensive — a rewind is "
+            checkpointItems.Add(GridButtons(_checkpointExtensions, _extensions, _removeExtension));
+            checkpointItems.Add(Hint("Large binaries are what makes a snapshot expensive — a rewind is "
                 + "meant for source code. Files excluded here are never restored by a rewind."));
-            right.Children.Add(Labeled("Keep checkpoints for:", _checkpointRetention));
-            right.Children.Add(Hint("\"Never\" keeps them until you delete them. Checkpoints take disk space, "
+            checkpointItems.Add(Labeled("Keep checkpoints for:", _checkpointRetention));
+            checkpointItems.Add(Hint("\"Never\" keeps them until you delete them. Checkpoints take disk space, "
                 + "so they can expire before the chat history they belong to."));
-            right.Children.Add(_deleteCheckpoints);
+            checkpointItems.Add(_deleteCheckpoints);
+            right.Children.Add(Section("Checkpoints (rewind)", checkpointItems.ToArray()));
 
             var columns = new Grid { Margin = new Thickness(16) };
             columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -236,6 +251,7 @@ namespace CodeAstrogator.ToolWindows
             _noticeFetch.IsChecked = o.NoticeFetchEnabled;
             _updateCheck.IsChecked = o.UpdateCheckEnabled;
             _modelCatalogFetch.IsChecked = o.ModelCatalogFetchEnabled;
+            _autoUpdate.IsChecked = o.AutoUpdateEnabled;
             _promptTimeout.Text = AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes).ToString();
             SelectRetention(_historyRetention, o.HistoryRetentionDays);
             SelectRetention(_pastedRetention, o.PastedRetentionDays);
@@ -327,6 +343,8 @@ namespace CodeAstrogator.ToolWindows
                 UpdateCheckDecided = true,
                 ModelCatalogFetchEnabled = _modelCatalogFetch.IsChecked == true,
                 ModelCatalogFetchDecided = true,
+                AutoUpdateEnabled = _autoUpdate.IsChecked == true,
+                AutoUpdateDecided = true,
                 PromptTimeoutMinutes = ParsePromptTimeout(_promptTimeout.Text),
                 HistoryRetentionDays = SelectedRetention(_historyRetention),
                 PastedRetentionDays = SelectedRetention(_pastedRetention),
@@ -519,6 +537,35 @@ namespace CodeAstrogator.ToolWindows
             Margin = new Thickness(0, 14, 0, 2),
         };
 
+        /// <summary>
+        /// One settings block as a card: bold title, thin rounded border in the theme's tool-window
+        /// border colour, own padding, and space below — so the groups stand apart instead of running
+        /// into each other as one long list.
+        /// </summary>
+        private static FrameworkElement Section(string title, params UIElement[] content)
+        {
+            var panel = new StackPanel();
+            var header = Header(title);
+            header.Margin = new Thickness(0, 0, 0, 2); // the card's padding provides the space above
+            panel.Children.Add(header);
+            foreach (var item in content)
+            {
+                if (item != null)
+                    panel.Children.Add(item);
+            }
+
+            var card = new Border
+            {
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(12, 10, 12, 12),
+                Margin = new Thickness(0, 0, 0, 12),
+                Child = panel,
+            };
+            card.SetResourceReference(Border.BorderBrushProperty, VsBrushes.ToolWindowBorderKey);
+            return card;
+        }
+
         /// <summary>Dim explanatory line under a control (no own label, wraps).</summary>
         private static TextBlock Hint(string text)
         {
@@ -539,6 +586,103 @@ namespace CodeAstrogator.ToolWindows
             sp.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 0, 0, 3), TextWrapping = TextWrapping.Wrap });
             sp.Children.Add(field);
             return sp;
+        }
+
+        // ── manual "Check now" ──────────────────────────────────────────────
+
+        /// <summary>The check takes at most this long; past it the button frees up again.
+        /// (A model check re-probes new models against the CLI, ~4 s each.)</summary>
+        private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(90);
+
+        private sealed class CheckNowUi
+        {
+            public CheckNowUi(Button button, TextBlock status)
+            {
+                Button = button;
+                Status = status;
+            }
+
+            public Button Button { get; }
+            public TextBlock Status { get; }
+            public System.Windows.Threading.DispatcherTimer? Timeout { get; set; }
+        }
+
+        /// <summary>A checkbox with a "Check now" button on its right and a result line below it. The
+        /// check runs regardless of the checkbox: clicking it is the consent for that one request.</summary>
+        private FrameworkElement WithCheckNow(CheckBox cb, string kind)
+        {
+            var outer = new StackPanel { Margin = cb.Margin };
+            cb.Margin = new Thickness(0);
+
+            var row = new DockPanel();
+            var button = MakeButton("Check now", minWidth: 0);
+            button.Margin = new Thickness(10, 0, 0, 0);
+            button.Padding = new Thickness(8, 2, 8, 2);
+            button.VerticalAlignment = VerticalAlignment.Top;
+            DockPanel.SetDock(button, Dock.Right);
+            row.Children.Add(button);
+            row.Children.Add(cb);
+            outer.Children.Add(row);
+
+            var status = Hint("");
+            status.Margin = new Thickness(20, 3, 0, 0); // aligned with the checkbox text
+            status.Visibility = Visibility.Collapsed;
+            outer.Children.Add(status);
+
+            var ui = new CheckNowUi(button, status);
+            _checkUi[kind] = ui;
+            button.Click += (_, __) => StartCheck(kind);
+            return outer;
+        }
+
+        private void StartCheck(string kind)
+        {
+            if (!_checkUi.TryGetValue(kind, out var ui))
+                return;
+
+            ui.Button.IsEnabled = false;
+            ShowCheckStatus(ui, kind == "models"
+                ? "Checking… (fetching the list and asking your Claude CLI which models it can run)"
+                : "Checking…", ok: true);
+
+            if (!_package.RequestManualCheck(kind))
+            {
+                ui.Button.IsEnabled = true;
+                ShowCheckStatus(ui, "Open the Code Astrogator chat window first — it runs the check.", ok: false);
+                return;
+            }
+
+            ui.Timeout?.Stop();
+            ui.Timeout = new System.Windows.Threading.DispatcherTimer { Interval = CheckTimeout };
+            ui.Timeout.Tick += (_, __) =>
+            {
+                ui.Timeout?.Stop();
+                if (ui.Button.IsEnabled)
+                    return;
+                ui.Button.IsEnabled = true;
+                ShowCheckStatus(ui, "No answer from the chat window — try again.", ok: false);
+            };
+            ui.Timeout.Start();
+        }
+
+        private void OnManualCheckCompleted(string kind, bool ok, string message)
+        {
+            // Raised from the bridge (any thread) → back onto this window's dispatcher.
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!_checkUi.TryGetValue(kind, out var ui))
+                    return;
+                ui.Timeout?.Stop();
+                ui.Button.IsEnabled = true;
+                ShowCheckStatus(ui, (ok ? "✓ " : "⚠ ") + message, ok);
+            }));
+        }
+
+        private static void ShowCheckStatus(CheckNowUi ui, string text, bool ok)
+        {
+            ui.Status.Text = text;
+            ui.Status.Opacity = ok ? 0.75 : 1.0; // a failure reads a little louder than routine output
+            ui.Status.Visibility = string.IsNullOrEmpty(text) ? Visibility.Collapsed : Visibility.Visible;
         }
 
         private FrameworkElement WithBrowse(TextBox tb)

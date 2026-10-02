@@ -24,6 +24,9 @@
   <ItemGroup>
     <Reference Include="System.Design" />
     <Reference Include="System.Net.Http" />
+    <!-- ExtensionUpdater reads the downloaded VSIX's manifest (a VSIX is a zip). -->
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
     <!-- MEF attributes ([Export]/[Import]) for the inline edit-review editor adornments -->
     <Reference Include="System.ComponentModel.Composition" />
   </ItemGroup>

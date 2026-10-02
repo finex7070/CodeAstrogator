@@ -68,6 +68,15 @@ namespace CodeAstrogator.Options
         /// sees it once more after updating to the version that introduced this option.</summary>
         public bool ModelCatalogFetchDecided { get; set; } = false;
 
+        /// <summary>Whether new releases are downloaded from the project's GitHub and installed when
+        /// Visual Studio closes (<c>ExtensionUpdater</c>). <b>On by default</b> (pre-ticked in the consent
+        /// popup), but nothing is fetched or installed until <see cref="AutoUpdateDecided"/> — the user
+        /// has seen the choice once (consent popup or settings window).</summary>
+        public bool AutoUpdateEnabled { get; set; } = true;
+
+        /// <summary>Whether the user has decided the auto-update opt-in (consent popup or settings).</summary>
+        public bool AutoUpdateDecided { get; set; } = false;
+
         /// <summary>How long (minutes) the CLI waits on a permission/AskUserQuestion prompt before
         /// it times out (applied via MCP_TOOL_TIMEOUT). Clamped to [<see cref="MinPromptTimeoutMinutes"/>,
         /// <see cref="MaxPromptTimeoutMinutes"/>]. Default 60 (1 h).</summary>

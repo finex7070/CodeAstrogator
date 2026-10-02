@@ -34,6 +34,62 @@ namespace CodeAstrogator.Core
         /// (from <c>WebUI/config.js</c>, same source as notice.json).</summary>
         public string GitHubRepo { get; set; } = "";
         public string Branch { get; set; } = "";
+
+        /// <summary>Manual "Check now" from the settings window: fetch the repo catalog right away,
+        /// ignoring both the 12 h throttle and the opt-in (the click is the consent for this one
+        /// request), and ignore the per-session "already swept" shortcut.</summary>
+        public bool ForceRemoteFetch { get; set; }
+    }
+
+    /// <summary>What the last <see cref="ClaudeModelCatalog.RefreshAsync"/> did — feeds the result line
+    /// of the settings window's "Check now" button.</summary>
+    public sealed class ModelCatalogReport
+    {
+        /// <summary>Where the defaults came from this time: <c>remote</c>, <c>bundled</c>, or
+        /// <c>cache</c> (repo fetch not due / not allowed, cached catalog used as-is).</summary>
+        public string DefaultsSource { get; set; } = "";
+        /// <summary>A repo fetch was attempted and failed (offline, blocked, 404 …).</summary>
+        public bool RemoteFailed { get; set; }
+        public string CliVersion { get; set; } = "";
+        public int TotalModels { get; set; }
+        /// <summary>Labels of catalog models the installed CLI rejects (hidden from the picker).</summary>
+        public IReadOnlyList<string> Unsupported { get; set; } = Array.Empty<string>();
+        /// <summary>Labels of models that could not be probed (probe failed — retried next time).</summary>
+        public IReadOnlyList<string> Unknown { get; set; } = Array.Empty<string>();
+        /// <summary>No CLI was found, so nothing could be verified.</summary>
+        public bool NoCli { get; set; }
+
+        /// <summary>The check did what it was asked to: reached GitHub and had a CLI to verify against.</summary>
+        public bool Succeeded => !RemoteFailed && !NoCli;
+
+        /// <summary>One line for the settings window, e.g. "Fetched the latest list from GitHub · 10 of
+        /// 11 models available · not yet supported by your CLI 2.1.280: Sonnet 5.5 (hidden until you
+        /// update the CLI)". <paramref name="offered"/> = rows the picker now shows.</summary>
+        public string Describe(int offered)
+        {
+            var parts = new List<string>();
+            if (DefaultsSource == "remote")
+                parts.Add("Fetched the latest list from GitHub");
+            else if (RemoteFailed)
+                parts.Add("Could not reach GitHub — used the list shipped with this version");
+            else
+                parts.Add("Used the list shipped with this version");
+
+            if (NoCli)
+            {
+                parts.Add("no Claude CLI found, so nothing could be verified");
+                return string.Join(" · ", parts);
+            }
+
+            parts.Add(offered + " of " + TotalModels + " models available");
+            var cli = string.IsNullOrEmpty(CliVersion) ? "your CLI" : "your CLI " + CliVersion;
+            parts.Add(Unsupported.Count > 0
+                ? "not yet supported by " + cli + ": " + string.Join(", ", Unsupported) + " (hidden until you update the CLI)"
+                : "all supported by " + cli);
+            if (Unknown.Count > 0)
+                parts.Add("could not be checked: " + string.Join(", ", Unknown));
+            return string.Join(" · ", parts);
+        }
     }
 
     /// <summary>
@@ -75,10 +131,18 @@ namespace CodeAstrogator.Core
         private static IReadOnlyList<PickerModel> _current = Array.Empty<PickerModel>();
         private static string? _probedForExe;
 
+        private static ModelCatalogReport? _lastReport;
+
         /// <summary>Last resolved picker list (empty until the first refresh finished).</summary>
         public static IReadOnlyList<PickerModel> Current
         {
             get { lock (CacheLock) return _current; }
+        }
+
+        /// <summary>What the most recent refresh did (null until one completed past the shortcut).</summary>
+        public static ModelCatalogReport? LastReport
+        {
+            get { lock (CacheLock) return _lastReport; }
         }
 
         /// <summary>Forces the next <see cref="RefreshAsync"/> to re-read and re-probe everything
@@ -115,8 +179,9 @@ namespace CodeAstrogator.Core
             {
                 lock (CacheLock)
                 {
-                    // Already swept for this executable in this VS session → serve the cached result.
-                    if (_probedForExe != null &&
+                    // Already swept for this executable in this VS session → serve the cached result
+                    // (a manual "Check now" always runs).
+                    if (!context.ForceRemoteFetch && _probedForExe != null &&
                         string.Equals(_probedForExe, context.ExePath ?? "", StringComparison.OrdinalIgnoreCase))
                         return _current;
                 }
@@ -131,13 +196,17 @@ namespace CodeAstrogator.Core
                         data.DefaultsFetchedAt = defaults.FetchedAt;
                 }
                 if (data == null || data.Models.Count == 0)
+                {
+                    SetReport(new ModelCatalogReport { DefaultsSource = defaults.Source, RemoteFailed = defaults.RemoteFailed });
                     return Publish(context.ExePath, Array.Empty<PickerModel>(), probed: false);
+                }
 
                 if (string.IsNullOrEmpty(context.ExePath))
                 {
                     // No CLI at all: nothing can be verified. Persist the merged catalog, report
                     // nothing, and let the UI keep its built-in fallback list.
                     WriteCache(data);
+                    SetReport(BuildReport(data, defaults, "", noCli: true));
                     return Publish(context.ExePath, Array.Empty<PickerModel>(), probed: false);
                 }
 
@@ -163,6 +232,7 @@ namespace CodeAstrogator.Core
                 }
 
                 WriteCache(data);
+                SetReport(BuildReport(data, defaults, cliVersion, noCli: false));
                 return Publish(
                     context.ExePath,
                     ModelCatalog.BuildPicker(data.Models),
@@ -176,6 +246,24 @@ namespace CodeAstrogator.Core
             {
                 RefreshGate.Release();
             }
+        }
+
+        private static ModelCatalogReport BuildReport(ModelCatalogData data, DefaultCatalog defaults, string cliVersion, bool noCli) =>
+            new ModelCatalogReport
+            {
+                DefaultsSource = defaults.Source,
+                RemoteFailed = defaults.RemoteFailed,
+                CliVersion = cliVersion,
+                TotalModels = data.Models.Count,
+                Unsupported = data.Models.Where(m => m.Available == false).Select(m => m.Label).ToList(),
+                Unknown = noCli ? Array.Empty<string>() : data.Models.Where(m => m.Available == null).Select(m => m.Label).ToList(),
+                NoCli = noCli,
+            };
+
+        private static void SetReport(ModelCatalogReport report)
+        {
+            lock (CacheLock)
+                _lastReport = report;
         }
 
         private static IReadOnlyList<PickerModel> Publish(string? exePath, IReadOnlyList<PickerModel> rows, bool probed)
@@ -198,16 +286,20 @@ namespace CodeAstrogator.Core
         private static async Task<DefaultCatalog> LoadDefaultsAsync(
             ModelCatalogContext context, ModelCatalogData? cache, CancellationToken ct)
         {
-            var due = cache?.DefaultsFetchedAt == null ||
+            var due = context.ForceRemoteFetch ||
+                      cache?.DefaultsFetchedAt == null ||
                       DateTimeOffset.Now - cache.DefaultsFetchedAt.Value >= RemoteRefreshInterval;
+            var allowed = context.AllowRemoteDefaults || context.ForceRemoteFetch;
 
-            if (context.AllowRemoteDefaults && due && !string.IsNullOrEmpty(context.GitHubRepo))
+            var remoteFailed = false;
+            if (allowed && due && !string.IsNullOrEmpty(context.GitHubRepo))
             {
                 var url = "https://raw.githubusercontent.com/" + context.GitHubRepo.Trim('/') + "/" +
                           (string.IsNullOrEmpty(context.Branch) ? "master" : context.Branch) + "/" + CatalogFileName;
                 var remote = ModelCatalog.ParseDefaults(await FetchAsync(url, ct).ConfigureAwait(false) ?? "");
                 if (remote.Count > 0)
-                    return new DefaultCatalog(remote, "remote", DateTimeOffset.Now);
+                    return new DefaultCatalog(remote, "remote", DateTimeOffset.Now, remoteFailed: false);
+                remoteFailed = true;
             }
 
             var bundled = string.IsNullOrEmpty(context.ExtensionDirectory)
@@ -215,21 +307,24 @@ namespace CodeAstrogator.Core
                 : ReadFileOrNull(Path.Combine(context.ExtensionDirectory!, CatalogFileName));
             // The bundled file is not a fetch: leave the throttle stamp alone so the next start
             // (or the next options change) tries the repo again.
-            return new DefaultCatalog(ModelCatalog.ParseDefaults(bundled ?? ""), "bundled", null);
+            return new DefaultCatalog(ModelCatalog.ParseDefaults(bundled ?? ""), "bundled", null, remoteFailed);
         }
 
         private sealed class DefaultCatalog
         {
-            public DefaultCatalog(IReadOnlyList<ModelEntry> entries, string source, DateTimeOffset? fetchedAt)
+            public DefaultCatalog(IReadOnlyList<ModelEntry> entries, string source, DateTimeOffset? fetchedAt, bool remoteFailed)
             {
                 Entries = entries;
                 Source = source;
                 FetchedAt = fetchedAt;
+                RemoteFailed = remoteFailed;
             }
 
             public IReadOnlyList<ModelEntry> Entries { get; }
             public string Source { get; }
             public DateTimeOffset? FetchedAt { get; }
+            /// <summary>A repo fetch was attempted and came back empty/failed.</summary>
+            public bool RemoteFailed { get; }
         }
 
         private static async Task<string?> FetchAsync(string url, CancellationToken ct)
