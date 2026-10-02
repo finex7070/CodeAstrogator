@@ -298,6 +298,7 @@
 
   let bannersEvaluated = false; // run the consent/fetch flow at most once per window load
   let appVersion = "";          // installed extension version (from session.init)
+  let stagedUpdateVersion = ""; // set by update.staged — a downloaded update owns the update banner
 
   // localStorage cache (persists across window opens via the fixed WebView2 user-data folder).
   // Fetch policy for BOTH banners: on each window open fetch from GitHub, but at most once per
@@ -351,12 +352,13 @@
     if (cfg.to) { const t = Date.parse(cfg.to); if (!isNaN(t) && now > t) return false; }
     return true;
   }
+  // Returns true when a banner is now shown (the manual "Check now" reports that back).
   function renderNotice(cfg) {
-    if (!noticeBanner || !noticeText || !cfg || cfg.enabled !== true) return;
-    if (!noticeWithinWindow(cfg)) return; // outside the scheduled from/to window
+    if (!noticeBanner || !noticeText || !cfg || cfg.enabled !== true) return false;
+    if (!noticeWithinWindow(cfg)) return false; // outside the scheduled from/to window
     const title = typeof cfg.title === "string" ? cfg.title.trim() : "";
     const content = typeof cfg.content === "string" ? cfg.content.trim() : "";
-    if (!title && !content) return; // nothing to show
+    if (!title && !content) return false; // nothing to show
     noticeText.innerHTML = "";
     if (title) {
       const strong = document.createElement("strong");
@@ -370,6 +372,7 @@
       noticeText.appendChild(renderMarkdown(content));
     }
     noticeBanner.hidden = false;
+    return true;
   }
   function loadNotice() {
     return fetchThrottledCached(NOTICE_SOURCE_URL, NOTICE_LASTFETCH_KEY, NOTICE_CACHE_KEY, renderNotice);
@@ -391,10 +394,12 @@
     return false;
   }
   function renderUpdate(info) {
-    if (!updateBanner || !updateText || !info) return;
+    if (!updateBanner || !updateText || !info) return false;
+    // An update that is already downloaded keeps its "Update ready / Restart now" banner.
+    if (stagedUpdateVersion) return false;
     // GitHub /releases/latest payload: tag_name = the version, html_url = the release page.
     const remote = typeof info.tag_name === "string" ? info.tag_name.trim() : "";
-    if (!remote || !appVersion || !isNewerVersion(remote, appVersion)) return;
+    if (!remote || !appVersion || !isNewerVersion(remote, appVersion)) return false;
     const shown = remote.replace(/^v/i, ""); // display without a leading "v"
     updateText.innerHTML = "";
     const strong = document.createElement("strong");
@@ -410,9 +415,73 @@
       updateText.appendChild(a);
     }
     updateBanner.hidden = false;
+    return true;
   }
   function loadUpdate() {
     return fetchThrottledCached(UPDATE_SOURCE_URL, UPDATE_LASTFETCH_KEY, UPDATE_CACHE_KEY, renderUpdate);
+  }
+
+  // ── auto-update: a downloaded, verified update waits for Visual Studio to close ──
+  // Replaces the plain "Update available" banner (the host only stages with auto-update on).
+  function updateStaged(m) {
+    if (!updateBanner || !updateText || !m || !m.version) return;
+    stagedUpdateVersion = m.version;
+    updateText.innerHTML = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "Update ready";
+    updateText.appendChild(strong);
+    updateText.appendChild(document.createTextNode(
+      " Version " + m.version + " is downloaded and installs when you close Visual Studio. "));
+    const restart = el("button", "notice-action", "Restart now");
+    restart.title = "Close Visual Studio, install the update and start it again (you are asked about unsaved files as usual)";
+    restart.addEventListener("click", () => {
+      restart.disabled = true;
+      restart.textContent = "Closing Visual Studio…";
+      post("update.restart");
+    });
+    // Link first, then the action — "Restart now" closes Visual Studio, so it comes last.
+    if (m.url && /^https?:\/\//i.test(m.url)) {
+      const a = document.createElement("a");
+      a.href = m.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      a.textContent = "What's new ↗";
+      updateText.appendChild(a);
+      updateText.appendChild(document.createTextNode(" "));
+    }
+    updateText.appendChild(restart);
+    updateBanner.hidden = false;
+  }
+
+  // ── manual "Check now" (settings window → host → check.run) ──────────────
+  // Fetches right away, past the 1 h throttle (the click is the consent for this one request),
+  // refreshes the cache + banner, and reports a human-readable line back for the settings window.
+  async function runManualCheck(kind) {
+    const isNotice = kind === "notice";
+    if (!isNotice && kind !== "update") return;
+    const fetched = await fetchJsonQuietly(isNotice ? NOTICE_SOURCE_URL : UPDATE_SOURCE_URL);
+    lsWriteTs(isNotice ? NOTICE_LASTFETCH_KEY : UPDATE_LASTFETCH_KEY, Date.now());
+    if (!fetched) {
+      post("check.result", { kind, ok: false, message: "Could not reach GitHub (offline or blocked) — try again later." });
+      return;
+    }
+    lsWriteJson(isNotice ? NOTICE_CACHE_KEY : UPDATE_CACHE_KEY, fetched);
+
+    let message;
+    if (isNotice) {
+      const shown = renderNotice(fetched);
+      const title = typeof fetched.title === "string" ? fetched.title.trim() : "";
+      message = shown
+        ? "Announcement found" + (title ? ": “" + title + "”" : "") + " — shown at the top of the chat."
+        : "No current announcement.";
+    } else {
+      const remote = typeof fetched.tag_name === "string" ? fetched.tag_name.trim().replace(/^v/i, "") : "";
+      const shown = renderUpdate(fetched);
+      if (!remote) message = "No published release found.";
+      else if (stagedUpdateVersion && stagedUpdateVersion === remote)
+        message = "Version " + remote + " is downloaded — it installs when you close Visual Studio.";
+      else if (shown) message = "Version " + remote + " is available (you have " + appVersion + ") — shown at the top of the chat.";
+      else message = "Up to date — the latest release is " + remote + (appVersion ? ", you have " + appVersion : "") + ".";
+    }
+    post("check.result", { kind, ok: true, message });
   }
 
   // ── consent + evaluation ───────────────────────────────────────────────────
@@ -426,7 +495,7 @@
     // The same popup also carries the checkpoint and model-list opt-ins, so an undecided one of those
     // opens it as well (an existing install therefore sees the dialog once more after an update that
     // introduces a new opt-in).
-    if (!s.noticeDecided || !s.updateDecided || !s.checkpointsDecided || !s.modelsDecided) {
+    if (!s.noticeDecided || !s.updateDecided || !s.checkpointsDecided || !s.modelsDecided || !s.autoUpdateDecided) {
       openConsentPopup(s);
       return;
     }
@@ -445,8 +514,8 @@
 
     const body = el("div", "modal-body");
     body.textContent =
-      "Choose what Code Astrogator should do for you. The first three check the project's GitHub (a "
-      + "small network request); the last one is local only. All of them can be changed anytime in "
+      "Choose what Code Astrogator should do for you. All but the last one use the project's GitHub "
+      + "(a small network request); the last one is local only. All of them can be changed anytime in "
       + "the settings.";
     modal.appendChild(body);
 
@@ -460,8 +529,13 @@
     const mdl = consentRow(
       "Keep the list of selectable Claude models up to date from the project's GitHub",
       s.modelsDecided ? !!s.modelsEnabled : true);
+    // Auto-update is on by default (pre-ticked); the host only acts on it once this popup was answered.
+    const aup = consentRow(
+      "Install updates automatically when Visual Studio closes (downloads the release from the project's GitHub)",
+      s.autoUpdateDecided ? !!s.autoUpdateEnabled : true);
     modal.appendChild(ann.row);
     modal.appendChild(upd.row);
+    modal.appendChild(aup.row);
     modal.appendChild(mdl.row);
 
     // Checkpoints: needs git, so the row is disabled (and forced off) when the host reports none.
@@ -487,6 +561,7 @@
         noticeEnabled: noticeEnabled,
         updateEnabled: updateEnabled,
         modelsEnabled: mdl.input.checked,
+        autoUpdateEnabled: aup.input.checked,
         checkpointsEnabled: checkpointsEnabled,
       });
       state.checkpoints.enabled = checkpointsEnabled;
@@ -594,6 +669,8 @@
       case "activeFile": return applyActiveFile(m);
       case "composer.append": return appendToComposer(m.text);
       case "banner.settings": return applyBannerSettings(m);
+      case "check.run": return runManualCheck(m.kind);
+      case "update.staged": return updateStaged(m);
       case "checkpoint.settings": return applyCheckpointSettings(m);
       case "checkpoint.created": return checkpointCreated(m);
       case "checkpoint.expired": return checkpointExpired(m.shas || []);
@@ -744,6 +821,8 @@
       updateDecided: !!m.updateCheckDecided,
       modelsEnabled: !!m.modelCatalogFetchEnabled,
       modelsDecided: !!m.modelCatalogFetchDecided,
+      autoUpdateEnabled: !!m.autoUpdateEnabled,
+      autoUpdateDecided: !!m.autoUpdateDecided,
       checkpointsEnabled: !!state.checkpoints.enabled,
       checkpointsDecided: !!state.checkpoints.decided,
       checkpointsGitAvailable: !!state.checkpoints.gitAvailable,

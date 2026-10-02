@@ -42,6 +42,29 @@ namespace CodeAstrogator
         /// <summary>Raised on the UI thread whenever a persisted setting changes.</summary>
         internal event Action? OptionsChanged;
 
+        // ── manual "Check now" (settings window → chat bridge → result back to the window) ──────
+        // Kinds: "notice" (announcement banner), "update" (new release), "models" (model catalog).
+        // The bridge does the work — the banners are fetched by the WebUI, the catalog by the host.
+
+        /// <summary>Raised when the settings window asks for a check. Handled by the chat bridge.</summary>
+        internal event Action<string>? ManualCheckRequested;
+
+        /// <summary>Raised (any thread) with (kind, ok, message) when a requested check finished.</summary>
+        internal event Action<string, bool, string>? ManualCheckCompleted;
+
+        /// <summary>Asks the chat window to run a check; false when no chat window is open to do it.</summary>
+        internal bool RequestManualCheck(string kind)
+        {
+            var handler = ManualCheckRequested;
+            if (handler == null)
+                return false;
+            handler(kind);
+            return true;
+        }
+
+        internal void ReportManualCheck(string kind, bool ok, string message) =>
+            ManualCheckCompleted?.Invoke(kind, ok, message);
+
         /// <summary>Non-null when loading/saving settings failed (shown in the chat for diagnosis).</summary>
         internal string? SettingsLoadError { get; private set; }
 
@@ -81,6 +104,48 @@ namespace CodeAstrogator
             }
 
             RunRetentionCleanup(); // prune old history / pasted files per the retention settings
+
+            // Auto-update: a downloaded, verified update is installed when Visual Studio closes
+            // (a loaded extension cannot be replaced while VS runs). Keep the events object alive —
+            // DTE drops the handler when its COM wrapper is collected.
+            if (await GetServiceAsync(typeof(EnvDTE.DTE)) is DTE2 dte)
+            {
+                _dteEvents = dte.Events.DTEEvents;
+                _dteEvents.OnBeginShutdown += OnBeginShutdown;
+            }
+        }
+
+        private EnvDTE.DTEEvents? _dteEvents;
+
+        /// <summary>
+        /// Visual Studio is shutting down: if auto-update is on and an update is staged, start the
+        /// hidden helper that waits for this devenv to exit and then installs it (see ExtensionUpdater).
+        /// Cheap and never throws — shutdown must not be held up.
+        /// </summary>
+        private void OnBeginShutdown()
+        {
+            try
+            {
+                if (!_options.AutoUpdateEnabled || !_options.AutoUpdateDecided)
+                    return; // on by default, but only once the user has seen the choice
+                var installed = InstalledVersion();
+                if (!string.IsNullOrEmpty(installed))
+                    Core.ExtensionUpdater.StartInstallHelper(installed!);
+            }
+            catch
+            {
+                // never block VS from closing
+            }
+        }
+
+        /// <summary>Version of the deployed extension (its extension.vsixmanifest next to the assembly).</summary>
+        internal static string? InstalledVersion() => InstalledIdentity().Version;
+
+        /// <summary>Identity (id + version) of the deployed extension.</summary>
+        internal static (string? Id, string? Version) InstalledIdentity()
+        {
+            var dir = System.IO.Path.GetDirectoryName(typeof(CodeAstrogatorPackage).Assembly.Location) ?? "";
+            return Core.ExtensionUpdater.ReadManifestIdentity(System.IO.Path.Combine(dir, "extension.vsixmanifest"));
         }
 
         /// <summary>Kicks off the best-effort on-disk cleanup (old chat history, pasted images and file
@@ -233,6 +298,8 @@ namespace CodeAstrogator
             to.UpdateCheckDecided = from.UpdateCheckDecided;
             to.ModelCatalogFetchEnabled = from.ModelCatalogFetchEnabled;
             to.ModelCatalogFetchDecided = from.ModelCatalogFetchDecided;
+            to.AutoUpdateEnabled = from.AutoUpdateEnabled;
+            to.AutoUpdateDecided = from.AutoUpdateDecided;
             to.PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(from.PromptTimeoutMinutes);
             to.RestoreLastSession = from.RestoreLastSession;
             to.AutoAddActiveFile = from.AutoAddActiveFile;

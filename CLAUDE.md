@@ -106,6 +106,10 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   Header sofort, alle 25 s ein `: keep-alive`, dann das Ergebnis als `data:`-Event → der Inaktivitäts-Timer
   läuft nie ab. Betrifft Permission-Prompts **und** AskUserQuestion (gleicher `tools/call`-Pfad). Beim
   CLI-Update gegentesten, ob die CLI das SSE-gelieferte Tool-Result akzeptiert.
+- **Keine modale Schleife im WebView2-Event-Handler** (`ShowModal`/`ShowDialog` direkt aus
+  `OnWebMessageReceived`), wenn währenddessen Nachrichten von der Seite gebraucht werden: WebView2
+  re-entert seine Handler nicht, `WebMessageReceived` bleibt bis zum Schließen blockiert. Erst per
+  `SwitchToMainThreadAsync(alwaysYield: true)` aus dem Callback raus, dann öffnen (s. `options.open`).
 - **Live-Konsole der Shell-Cards** liest eine **undokumentierte** CLI-Datei:
   `%TEMP%\claude\<MungePath(cwd)>\<session>\tasks\<task_id>.output` (UTF-8, angekündigt per
   `system/task_started` mit `tool_use_id`, s. NOTES „Live console output", `TaskOutputWatcher`). Beim
