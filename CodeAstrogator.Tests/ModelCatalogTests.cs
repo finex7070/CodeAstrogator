@@ -316,7 +316,7 @@ namespace CodeAstrogator.Tests
             Assert.Equal("claude-opus-5-5", defaults.First(m => m.Family == "opus").Id);
             Assert.Equal("claude-fable-5-1", defaults.First(m => m.Family == "fable").Id);
             Assert.Equal("claude-sonnet-5-5", defaults.First(m => m.Family == "sonnet").Id);
-            Assert.Equal("claude-haiku-4-5", defaults.First(m => m.Family == "haiku").Id);
+            Assert.Equal("claude-haiku-5-5", defaults.First(m => m.Family == "haiku").Id);
         }
     }
 }

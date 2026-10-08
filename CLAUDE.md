@@ -1,10 +1,11 @@
 # CodeAstrogator — Claude Code Chat für Visual Studio 2026
 
 VSIX-Extension (VSSDK in-process, net472, ein Projekt): Chat-Tool-Window auf WebView2-Basis,
-das die **Claude Code CLI** integriert (`claude -p --output-format stream-json`, ein Prozess
-pro Turn, Prompt via stdin) plus **MCP-Permission-Hook** (`--permission-prompt-tool` → in-process
+das die **Claude Code CLI** integriert (`claude -p --input-format stream-json --output-format stream-json`,
+ein Prozess pro Turn, Prompt als eine User-Message via stdin) plus **MCP-Permission-Hook** (`--permission-prompt-tool` → in-process
 Localhost-MCP-Server für interaktive Diff-Approvals). Der frühere persistente bidirektionale Modus
-(`--input-format stream-json`) wurde in 0.8.0 entfernt — nicht wieder einführen (s. NOTES).
+(ein langlebiger Prozess über mehrere Turns) wurde in 0.8.0 entfernt — nicht wieder einführen (s. NOTES).
+stream-json-**Input** pro Turn (seit 2026-10-08) ist davon unabhängig: eine Message, stdin zu, Prozess endet.
 
 ## Pflichtlektüre vor Änderungen
 - `docs/claude-vs-2026-plan.md` — verbindliche Spec (Teil A Architektur, Teil B UI-Kontrakt).
@@ -114,6 +115,13 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   `%TEMP%\claude\<MungePath(cwd)>\<session>\tasks\<task_id>.output` (UTF-8, angekündigt per
   `system/task_started` mit `tool_use_id`, s. NOTES „Live console output", `TaskOutputWatcher`). Beim
   CLI-Update gegentesten; fällt sie weg, zeigt die Card einfach wieder nur das Endergebnis.
+- **Prompt-Suggestions + stream-json-Input (2026-10-08, CLI 2.1.287):** Der Prompt geht als **stream-json-
+  User-Message** über stdin (`--input-format stream-json`, `Core/StreamJsonInput`, danach stdin zu — weiterhin
+  ein Prozess pro Turn, NICHT der entfernte persistente Modus). Nur so liefert die CLI `prompt_suggestion`
+  (Textmodus: erzeugt, aber nie ausgegeben). Die Suggestion kommt 4–11 s **nach** `result`; deshalb endet der
+  Turn bei `result` (Session-Service gibt den Turn früh zurück, Restprozess liefert nur noch die Suggestion und
+  wird vom nächsten Turn gekillt) — außer es laufen Background-Tasks (dann Folge-Turn im selben Prozess, s.
+  NOTES „Prompt suggestions"). Beim CLI-Update gegentesten.
 - Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
   `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
   des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.

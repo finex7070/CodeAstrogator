@@ -217,6 +217,7 @@ namespace CodeAstrogator.Bridge
             _session.Settings.PermissionMode = opt.PermissionModeString;
             _session.Settings.ReviewEditsAtTurnEnd = opt.ReviewEditsAtTurnEnd;
             _session.Settings.McpToolTimeoutMs = PromptTimeoutMs(opt);
+            _session.Settings.PromptSuggestions = opt.PromptSuggestions;
         }
 
         // ── web → host ────────────────────────────────────────────────────────
@@ -508,17 +509,30 @@ namespace CodeAstrogator.Bridge
                         : ":" + sel.Value.top + "-" + sel.Value.bottom;
                 display.Add(new JObject { ["name"] = afName, ["path"] = _activeDocs.CurrentPath! + lineSuffix });
             }
+            // Images go along as base64 image blocks in the stream-json message — the CLI downscales them
+            // itself (an @-referenced image is only expanded up to 256 KiB). Their path stays in the list
+            // as plain text, so the model still knows where the file lives.
+            var inlineImages = Core.CliImageAttachments.SelectInline(
+                references.Where(r => string.IsNullOrEmpty(r.suffix)).Select(r => r.path));
             if (references.Count > 0)
             {
                 var sb = new System.Text.StringBuilder(text);
                 sb.Append("\n\nAttached files:");
                 foreach (var r in references)
-                    sb.Append('\n').Append(Core.CliReferenceFormatter.FormatFileReference(r.path, r.suffix));
-                // The CLI expands an @-referenced image into an image block only up to 256 KiB and
-                // drops bigger ones without a word (a pasted screenshot is usually 0.4-2.4 MB), so the
-                // model saw the path as text and nothing else. It can still see the file via Read - say so.
+                {
+                    sb.Append('\n');
+                    if (string.IsNullOrEmpty(r.suffix) && inlineImages.Contains(r.path, StringComparer.OrdinalIgnoreCase))
+                        sb.Append(r.path).Append(" (image, included in this message)");
+                    else
+                        sb.Append(Core.CliReferenceFormatter.FormatFileReference(r.path, r.suffix));
+                }
+                // Whatever image could not go inline (beyond the size caps, or a format like TIFF) is an
+                // @-reference again, which the CLI drops silently above 256 KiB. The model can still see
+                // the file via Read - say so.
                 var hint = Core.CliAttachmentHint.BuildReadHint(
-                    references.Select(r => r.path).Where(Core.CliAttachmentHint.IsOversizedImage));
+                    references.Select(r => r.path)
+                        .Where(p => !inlineImages.Contains(p, StringComparer.OrdinalIgnoreCase))
+                        .Where(Core.CliAttachmentHint.IsOversizedImage));
                 if (hint != null)
                     sb.Append("\n\n").Append(hint);
                 text = sb.ToString();
@@ -541,10 +555,10 @@ namespace CodeAstrogator.Bridge
             _checkpointTurnMessage = userMsg;
 
             PostStatus("working");
-            RunPrompt(text);
+            RunPrompt(text, inlineImages);
         }
 
-        private void RunPrompt(string text)
+        private void RunPrompt(string text, System.Collections.Generic.IReadOnlyList<string>? images = null)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
@@ -596,7 +610,7 @@ namespace CodeAstrogator.Bridge
                 }
                 try
                 {
-                    await _session.RunTurnAsync(text, options.ClaudeExecutablePath, cwd);
+                    await _session.RunTurnAsync(text, options.ClaudeExecutablePath, cwd, images);
                 }
                 catch (Exception ex)
                 {
@@ -2653,6 +2667,17 @@ namespace CodeAstrogator.Bridge
 #pragma warning restore VSTHRD010
                     break;
 
+                case PromptSuggestionEvent suggestion:
+                    // Arrives after the turn was already handed back (see ClaudeSessionService). The UI
+                    // shows it as ghost text in the empty composer; Tab takes it over.
+                    Post(new JObject
+                    {
+                        ["type"] = "prompt.suggestion",
+                        ["text"] = suggestion.Suggestion,
+                        ["sessionId"] = suggestion.SessionId,
+                    });
+                    break;
+
                 case ApiRetryEvent retry:
                     Post(new JObject
                     {
@@ -2812,6 +2837,8 @@ namespace CodeAstrogator.Bridge
             RunAutoUpdateCheck(force: false);    // auto-update may just have been switched on (throttled)
             var promptTimeoutMs = PromptTimeoutMs(_package.GetOptions());
             _permission.UpdateToolTimeout(promptTimeoutMs);            // config `timeout` (the value the CLI prefers)
+            if (!_package.GetOptions().PromptSuggestions)
+                Post(new JObject { ["type"] = "prompt.suggestion", ["text"] = "" }); // just switched off → drop the shown one
         }
 
         /// <summary>Configured prompt timeout (settings, minutes) as milliseconds for the CLI env var.</summary>

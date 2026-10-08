@@ -41,6 +41,10 @@ namespace CodeAstrogator.Core
         /// <summary>Drops the cache (used when the configured executable path changes).</summary>
         public static void Invalidate() => Cache.Clear();
 
+        /// <summary>Pins the capabilities of <paramref name="exePath"/> without probing (tests only).</summary>
+        internal static void SetForTesting(string exePath, CliCapabilities capabilities) =>
+            Cache[exePath] = Task.FromResult(capabilities);
+
         private static async Task<CliCapabilities> ProbeAsync(string exePath, CancellationToken ct)
         {
             var help = await RunHelpAsync(exePath, ct).ConfigureAwait(false);
@@ -57,6 +61,10 @@ namespace CodeAstrogator.Core
             //   --permission-mode <mode>   Permission mode to use for the session
             //                              (choices: "acceptEdits", "auto",
             //                              "bypassPermissions", "manual", …)
+            // --prompt-suggestions (2.1.28x): an unknown flag would fail the whole turn, so only pass
+            // it when this binary lists it.
+            var promptSuggestions = help.IndexOf("--prompt-suggestions", StringComparison.Ordinal) >= 0;
+
             var start = help.IndexOf("--permission-mode", StringComparison.Ordinal);
             if (start < 0)
                 return CliCapabilities.Unknown;
@@ -79,6 +87,7 @@ namespace CodeAstrogator.Core
                 Known = true,
                 SupportsManualPermissionMode = modes.Contains("manual"),
                 SupportsDefaultPermissionMode = modes.Contains("default"),
+                SupportsPromptSuggestions = promptSuggestions,
             };
         }
 
@@ -159,6 +168,10 @@ namespace CodeAstrogator.Core
 
         /// <summary>CLI still accepts the legacy <c>--permission-mode default</c> (≤ 2.1.1xx).</summary>
         public bool SupportsDefaultPermissionMode { get; set; }
+
+        /// <summary>CLI accepts <c>--prompt-suggestions</c> (emits <c>prompt_suggestion</c> after each
+        /// turn in stream-json mode).</summary>
+        public bool SupportsPromptSuggestions { get; set; }
 
         /// <summary>The value to pass for "ask the user about everything", or null to omit the flag
         /// (legacy CLIs, where omission still means exactly that).</summary>

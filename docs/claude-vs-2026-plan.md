@@ -135,6 +135,7 @@ Every message: `{ "type": "<name>", ...payload }`. Identifiers in English.
 | `tool.result` | `{ id, status:"ok"\|"error", summary }` | Updates the tool card. |
 | `permission.request` | `{ requestId, toolName, input, diff?:{ path, oldText, newText } }` | Permission/diff card with Approve/Reject (see §5.2). |
 | `turn.result` | `{ sessionId, costUsd, tokens:{input,output,total}, durationMs, limits:{sessionPct,weeklyPct} }` | Turn end; updates tokens/limits. |
+| `prompt.suggestion` | `{ text, sessionId? }` | Predicted next prompt (after the turn end); ghost text in the empty composer, Tab takes it over. `""` clears. |
 | `usage.update` | `{ tokens, sessionPct, weeklyPct }` | Pure status bar update (also outside of turns). |
 | `error` | `{ message }` | Error block in the transcript + status `error`. |
 

@@ -34,6 +34,7 @@ namespace CodeAstrogator.ToolWindows
         private readonly ComboBox _theme;
         private readonly ComboBox _verbosity;
         private readonly CheckBox _restore;
+        private readonly CheckBox _promptSuggestions;
         private readonly CheckBox _autoAdd;
         private readonly CheckBox _includeLines;
         private readonly CheckBox _activeFileDefault;
@@ -94,6 +95,7 @@ namespace CodeAstrogator.ToolWindows
             _theme = MakeCombo("auto", "dark", "light");
             _verbosity = MakeCombo("compact", "normal", "detailed");
             _restore = MakeCheck("Restore the last session when the chat window opens", new Thickness(0, 8, 0, 0));
+            _promptSuggestions = MakeCheck("Suggest the next prompt after each turn (shown as grey text in the empty input; Tab takes it over). Costs one extra, mostly cached request per turn", new Thickness(0, 8, 0, 0));
             _autoAdd = MakeCheck("Reference the active editor file in each prompt", new Thickness(0, 8, 0, 0));
             _includeLines = MakeCheck("Include the selected line range in the file reference", new Thickness(20, 6, 0, 0));
             _activeFileDefault = MakeCheck("Reference it by default in new chats (otherwise a new chat starts with the reference off; toggle it on via the chip)", new Thickness(20, 6, 0, 0));
@@ -142,7 +144,7 @@ namespace CodeAstrogator.ToolWindows
                 Labeled("Theme:", _theme),
                 Labeled("Transcript verbosity:", _verbosity)));
             left.Children.Add(Section("Behavior",
-                _restore, _autoAdd, _includeLines, _activeFileDefault));
+                _restore, _promptSuggestions, _autoAdd, _includeLines, _activeFileDefault));
             left.Children.Add(Section("Announcements & updates",
                 WithCheckNow(_noticeFetch, "notice"),
                 WithCheckNow(_updateCheck, "update"),
@@ -243,6 +245,7 @@ namespace CodeAstrogator.ToolWindows
             SelectCombo(_theme, o.ThemeModeString, "auto");
             SelectCombo(_verbosity, o.VerbosityString, "normal");
             _restore.IsChecked = o.RestoreLastSession;
+            _promptSuggestions.IsChecked = o.PromptSuggestions;
             _autoAdd.IsChecked = o.AutoAddActiveFile;
             _includeLines.IsChecked = o.IncludeSelectedLines;
             _includeLines.IsEnabled = o.AutoAddActiveFile;
@@ -334,6 +337,7 @@ namespace CodeAstrogator.ToolWindows
                 ThemeModeString = Selected(_theme, "auto"),
                 VerbosityString = Selected(_verbosity, "normal"),
                 RestoreLastSession = _restore.IsChecked == true,
+                PromptSuggestions = _promptSuggestions.IsChecked == true,
                 AutoAddActiveFile = _autoAdd.IsChecked == true,
                 IncludeSelectedLines = _includeLines.IsChecked == true,
                 ActiveFileOnByDefault = _activeFileDefault.IsChecked == true,

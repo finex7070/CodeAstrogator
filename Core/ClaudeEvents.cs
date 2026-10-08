@@ -173,6 +173,28 @@ namespace CodeAstrogator.Core
         public long DurationMs { get; set; }
     }
 
+    /// <summary>
+    /// <c>prompt_suggestion</c> — the CLI's prediction of the user's next prompt (2-12 words), emitted
+    /// after the turn's <c>result</c> when launched with <c>--prompt-suggestions true</c>. Only surfaced
+    /// with <c>--input-format stream-json</c>; arrives ~4-11 s after the result, after which the
+    /// process exits (measured against CLI 2.1.287). The CLI stays silent when no next step is obvious.
+    /// </summary>
+    public sealed class PromptSuggestionEvent : ClaudeEvent
+    {
+        public string Suggestion { get; set; } = "";
+        public string? SessionId { get; set; }
+    }
+
+    /// <summary>
+    /// <c>system/background_tasks_changed</c> — the set of running background tasks changed. While any
+    /// is running, the CLI keeps the process alive past the turn's <c>result</c> and answers the task's
+    /// completion with a follow-up turn of its own (CLI 2.1.287).
+    /// </summary>
+    public sealed class BackgroundTasksChangedEvent : ClaudeEvent
+    {
+        public int Count { get; set; }
+    }
+
     /// <summary>The CLI is retrying an API call (informational).</summary>
     public sealed class ApiRetryEvent : ClaudeEvent
     {
