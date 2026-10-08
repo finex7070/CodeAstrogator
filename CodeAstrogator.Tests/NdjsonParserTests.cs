@@ -111,6 +111,36 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void PromptSuggestion_FollowsTheResult()
+        {
+            // Shape measured against CLI 2.1.287 (--input-format stream-json --prompt-suggestions true):
+            // the suggestion arrives a few seconds AFTER the result, as its own top-level line.
+            var events = ParseFixture("turn-prompt-suggestion.ndjson");
+
+            var suggestion = events.OfType<PromptSuggestionEvent>().Single();
+            Assert.Equal("python calc.py", suggestion.Suggestion);
+            Assert.Equal("sess-sug", suggestion.SessionId);
+
+            var kinds = events.Select(e => e.GetType().Name).ToList();
+            Assert.Equal(nameof(PromptSuggestionEvent), kinds.Last());
+            Assert.Equal(kinds.Count - 2, kinds.IndexOf(nameof(TurnResultEvent)));
+        }
+
+        [Fact]
+        public void PromptSuggestion_EmptyText_IsDropped()
+        {
+            var events = new NdjsonParser().ParseLine("{\"type\":\"prompt_suggestion\",\"suggestion\":\"  \",\"session_id\":\"s\"}");
+            Assert.Empty(events);
+        }
+
+        [Fact]
+        public void BackgroundTasksChanged_CarriesTheRunningCount()
+        {
+            var events = ParseFixture("turn-background-task.ndjson").OfType<BackgroundTasksChangedEvent>().ToList();
+            Assert.Equal(new[] { 1, 0 }, events.Select(e => e.Count));
+        }
+
+        [Fact]
         public void QueuedTaskNotification_ResultIsNotTheTurnEnd()
         {
             // Shape measured against CLI 2.1.280 (2026-09-23): a background task from the previous

@@ -4,6 +4,18 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [0.10.0] – 2026-10-08
+
+### Added
+- **Prompt suggestions.** After each turn, Claude Code predicts what you are likely to type next — "run the tests", "python calc.py", "commit this" — and it appears as grey text in the empty input box, with a small "Tab to use" hint next to it. Press **Tab** to take it over into the input, then edit it or send it with Enter; **Esc** dismisses it. It is never sent on its own. The suggestion arrives a few seconds after Claude has finished, and sometimes none comes at all — Claude Code only suggests something when the next step is obvious from the conversation. It costs one small extra request per turn (it mostly reuses the cached conversation); you can switch it off under Settings → Behavior → "Suggest the next prompt". It needs a recent Claude Code CLI — with an older one the option simply does nothing.
+
+### Changed
+- **Claude Haiku 5.5 joined the model list.** It is the new current Haiku and takes Haiku 4.5's place at the top of the picker; Haiku 4.5 stays selectable under "More models". As with every new model, it only shows up once your Claude Code CLI can run it — until then the picker keeps Haiku 4.5 on top and switches over by itself after you update the CLI.
+- **A turn now counts as finished as soon as Claude's answer is complete.** Until now the chat waited for the Claude Code process to exit. With prompt suggestions the process stays alive a few seconds longer to work out the suggestion, and the chat would have shown "Working…" all that time. If Claude started a command in the background, the old behaviour stays: the turn only ends after Claude's follow-up to that command.
+- **Attached images now always reach Claude.** Images used to be passed to Claude Code as file references, which it only reads up to 256 KB — anything bigger (almost every pasted screenshot) arrived as a bare file name, so Code Astrogator told Claude to open those files itself. Images in the usual formats (PNG, JPEG, GIF, WebP, BMP) up to 32 MB each and 36 MB per message are now sent along with your message directly, and Claude sees them right away, without an extra step. Tested with screenshots of every size, a 35 MB image, very wide images and five large images in one message. Only images beyond those limits or in other formats (such as TIFF) still use the old route.
+
+---
+
 ## [0.9.0] – 2026-10-02
 
 ### Changed

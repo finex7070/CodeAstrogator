@@ -91,6 +91,9 @@ namespace CodeAstrogator.Options
             : minutes;
 
         public bool RestoreLastSession { get; set; } = true;
+        /// <summary>After each turn, ask the CLI for a predicted next prompt and show it as ghost text
+        /// in the empty composer (Tab takes it over). Costs one extra, mostly cached API call per turn.</summary>
+        public bool PromptSuggestions { get; set; } = true;
         public bool AutoAddActiveFile { get; set; } = true;
         public bool IncludeSelectedLines { get; set; } = true;
         /// <summary>Default state of the per-chat active-file reference: true = a new chat starts

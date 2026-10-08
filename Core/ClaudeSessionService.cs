@@ -28,6 +28,11 @@ namespace CodeAstrogator.Core
         /// MCP_TOOL_TIMEOUT env var). Driven by the settings window; defaults to
         /// <see cref="McpPermissionBridge.DefaultToolTimeoutMs"/>.</summary>
         public int McpToolTimeoutMs { get; set; } = McpPermissionBridge.DefaultToolTimeoutMs;
+
+        /// <summary>Ask the CLI for a predicted next prompt after each turn (<c>--prompt-suggestions</c>,
+        /// only passed when the installed CLI knows the flag). Costs one extra, mostly cached API call
+        /// per turn.</summary>
+        public bool PromptSuggestions { get; set; } = true;
     }
 
     /// <summary>
@@ -40,6 +45,12 @@ namespace CodeAstrogator.Core
         private readonly IClaudeProcessHost _processHost;
         private CancellationTokenSource? _turnCts;
         private int _busy; // 0 = idle, 1 = turn running
+
+        // A turn that was handed back at its `result` while its process keeps running to deliver the
+        // prompt suggestion (see RunTurnAsync). Killed when the next turn starts or the session changes.
+        private readonly object _drainLock = new object();
+        private CancellationTokenSource? _drainCts;
+        private Task? _drainDone;
 
         // The result-event error text of the current turn (e.g. "API Error: …",
         // "Credit balance is too low"). The CLI reports many failures here on stdout
@@ -100,6 +111,7 @@ namespace CodeAstrogator.Core
         /// <summary>Forgets the session id so the next turn starts a fresh conversation.</summary>
         public void ResetSession()
         {
+            CancelDrain();
             SessionId = null;
             TotalTokens = 0;
         }
@@ -107,8 +119,26 @@ namespace CodeAstrogator.Core
         /// <summary>Attaches to an existing CLI session (history → --resume).</summary>
         public void AttachSession(string sessionId)
         {
+            CancelDrain();
             SessionId = sessionId;
             TotalTokens = 0;
+        }
+
+        /// <summary>Kills the process of an already-completed turn that is still waiting for its
+        /// prompt suggestion (nothing else of that process is forwarded any more).</summary>
+        private Task? CancelDrain()
+        {
+            CancellationTokenSource? cts;
+            Task? done;
+            lock (_drainLock)
+            {
+                cts = _drainCts;
+                done = _drainDone;
+            }
+            // outside the lock: cancelling may run the turn's continuation (and its cleanup) inline
+            try { cts?.Cancel(); }
+            catch (ObjectDisposedException) { } // the process exited on its own in the meantime
+            return done;
         }
 
         public void StopTurn()
@@ -121,13 +151,24 @@ namespace CodeAstrogator.Core
         /// Runs one prompt. Throws <see cref="InvalidOperationException"/> when a turn
         /// is already running or the executable cannot be resolved.
         /// </summary>
-        public async Task RunTurnAsync(string prompt, string? executableOverride, string? workingDirectory)
+        public async Task RunTurnAsync(string prompt, string? executableOverride, string? workingDirectory,
+            System.Collections.Generic.IReadOnlyList<string>? imagePaths = null)
         {
             if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
                 throw new InvalidOperationException("A turn is already running.");
 
+            // Set once this turn was handed back early (at its result) — from then on the busy flag and
+            // TurnCompleted belong to whoever runs next, and only the prompt suggestion is forwarded.
+            var completedEarly = false;
+            var processDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             try
             {
+                // The previous turn's process may still be generating its suggestion — end it first,
+                // so two processes never write the same session.
+                var draining = CancelDrain();
+                if (draining != null)
+                    await Task.WhenAny(draining, Task.Delay(5000)).ConfigureAwait(false);
+
                 var exe = ClaudeExecutableLocator.Locate(executableOverride)
                           ?? throw new InvalidOperationException(
                               "Claude Code CLI not found. Install it (npm i -g @anthropic-ai/claude-code) " +
@@ -135,8 +176,9 @@ namespace CodeAstrogator.Core
 
                 // Which value means "ask about everything" depends on the installed CLI — probe it
                 // (cached per executable, hidden process) BEFORE mapping the mode below.
-                AskPermissionModeArg = (await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false))
-                    .AskPermissionModeArg;
+                var capabilities = await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false);
+                AskPermissionModeArg = capabilities.AskPermissionModeArg;
+                var suggestions = Settings.PromptSuggestions && capabilities.SupportsPromptSuggestions;
 
                 // Pin the mode for this turn: the process below keeps it for its whole lifetime,
                 // even if the UI changes Settings.PermissionMode mid-turn (see LaunchedPermissionMode).
@@ -158,6 +200,11 @@ namespace CodeAstrogator.Core
                         WorkingDirectory = workingDirectory,
                         PermissionMode = MapPermissionMode(),
                     };
+                    if (imagePaths != null)
+                    {
+                        foreach (var image in imagePaths)
+                            request.ImagePaths.Add(image);
+                    }
 
                     // Route tool permissions through the in-process MCP bridge (Teil A §A5),
                     // except in bypass mode (the CLI ignores the prompt tool there anyway).
@@ -181,24 +228,71 @@ namespace CodeAstrogator.Core
                         request.Environment["MCP_TIMEOUT"] = timeoutMs; // server-startup grace too
                     }
 
+                    if (suggestions)
+                    {
+                        request.ExtraArgs.Add("--prompt-suggestions");
+                        request.ExtraArgs.Add("true");
+                    }
+
                     var parser = new NdjsonParser();
-                    _turnCts = new CancellationTokenSource();
+                    var backgroundTasks = 0;
+                    var cts = new CancellationTokenSource();
+                    _turnCts = cts;
                     try
                     {
                         exit = await _processHost.RunTurnAsync(request, line =>
                         {
                             foreach (var ev in parser.ParseLine(line))
                             {
+                                if (completedEarly)
+                                {
+                                    if (ev is PromptSuggestionEvent)
+                                        EventReceived?.Invoke(ev);
+                                    continue;
+                                }
+
                                 Bookkeep(ev);
+                                if (ev is BackgroundTasksChangedEvent bg)
+                                    backgroundTasks = bg.Count;
                                 EventReceived?.Invoke(ev);
+
+                                // With suggestions on, the process lives on for ~4-11 s after the result
+                                // to generate one. Hand the turn back right here instead of at exit, or the
+                                // UI would sit on "working" that long. Not while background tasks run: the
+                                // CLI then answers their completion with a follow-up turn in this process
+                                // (2.1.287), which must still be shown — exit stays the turn end there.
+                                if (suggestions && ev is TurnResultEvent r && string.IsNullOrEmpty(r.ParentToolUseId)
+                                    && !r.IsError && backgroundTasks == 0)
+                                {
+                                    completedEarly = true;
+                                    lock (_drainLock)
+                                    {
+                                        _drainCts = cts;
+                                        _drainDone = processDone.Task;
+                                    }
+                                    Interlocked.CompareExchange(ref _turnCts, null, cts);
+                                    TurnCompleted?.Invoke(new ClaudeTurnExit { ExitCode = 0 }, null);
+                                    Volatile.Write(ref _busy, 0);
+                                }
                             }
-                        }, _turnCts.Token).ConfigureAwait(false);
+                        }, cts.Token).ConfigureAwait(false);
                     }
                     finally
                     {
-                        _turnCts.Dispose();
-                        _turnCts = null;
+                        Interlocked.CompareExchange(ref _turnCts, null, cts);
+                        lock (_drainLock)
+                        {
+                            if (_drainCts == cts)
+                            {
+                                _drainCts = null;
+                                _drainDone = null;
+                            }
+                        }
+                        cts.Dispose();
                     }
+
+                    if (completedEarly)
+                        return;
 
                     // Stale --resume id (e.g. CLI history pruned): drop the session
                     // and retry once as a fresh conversation instead of failing.
@@ -229,7 +323,9 @@ namespace CodeAstrogator.Core
             }
             finally
             {
-                Volatile.Write(ref _busy, 0);
+                if (!completedEarly)
+                    Volatile.Write(ref _busy, 0);
+                processDone.TrySetResult(true);
             }
         }
 

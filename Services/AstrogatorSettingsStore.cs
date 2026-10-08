@@ -58,6 +58,7 @@ namespace CodeAstrogator.Services
                 PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(
                     GetInt(nameof(AstrogatorOptions.PromptTimeoutMinutes), d.PromptTimeoutMinutes)),
                 RestoreLastSession = GetBool(nameof(AstrogatorOptions.RestoreLastSession), d.RestoreLastSession),
+                PromptSuggestions = GetBool(nameof(AstrogatorOptions.PromptSuggestions), d.PromptSuggestions),
                 AutoAddActiveFile = GetBool(nameof(AstrogatorOptions.AutoAddActiveFile), d.AutoAddActiveFile),
                 IncludeSelectedLines = GetBool(nameof(AstrogatorOptions.IncludeSelectedLines), d.IncludeSelectedLines),
                 ActiveFileOnByDefault = GetBool(nameof(AstrogatorOptions.ActiveFileOnByDefault), d.ActiveFileOnByDefault),
@@ -109,6 +110,7 @@ namespace CodeAstrogator.Services
             _store.SetInt32(Collection, nameof(AstrogatorOptions.PromptTimeoutMinutes),
                 AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes));
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.RestoreLastSession), o.RestoreLastSession);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.PromptSuggestions), o.PromptSuggestions);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.AutoAddActiveFile), o.AutoAddActiveFile);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.IncludeSelectedLines), o.IncludeSelectedLines);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ActiveFileOnByDefault), o.ActiveFileOnByDefault);

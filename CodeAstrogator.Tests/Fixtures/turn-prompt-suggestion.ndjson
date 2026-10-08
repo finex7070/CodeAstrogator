@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","cwd":"C:\\repo","session_id":"sess-sug","tools":["Write","Bash"],"model":"claude-haiku-4-5-20251001","permissionMode":"acceptEdits"}
+{"type":"stream_event","session_id":"sess-sug","event":{"type":"message_start","message":{"id":"msg_s1","type":"message","role":"assistant","content":[]}}}
+{"type":"stream_event","session_id":"sess-sug","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","session_id":"sess-sug","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Created calc.py."}}}
+{"type":"stream_event","session_id":"sess-sug","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","session_id":"sess-sug","event":{"type":"message_stop"}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":12800,"num_turns":2,"result":"Created calc.py.","session_id":"sess-sug","total_cost_usd":0.0269,"usage":{"input_tokens":18,"cache_creation_input_tokens":9956,"cache_read_input_tokens":50515,"output_tokens":390}}
+{"type":"prompt_suggestion","suggestion":"python calc.py","uuid":"7e3c4540-1c80-41e7-8f82-226816065198","session_id":"sess-sug"}

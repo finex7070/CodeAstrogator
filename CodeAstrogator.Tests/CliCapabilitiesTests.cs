@@ -52,6 +52,17 @@ Options:
         }
 
         [Fact]
+        public void ParseHelp_PromptSuggestions_OnlyWhenListed()
+        {
+            Assert.False(ClaudeCliCapabilities.ParseHelp(Help2_1_263).SupportsPromptSuggestions);
+
+            var withFlag = Help2_1_263 +
+                "  --prompt-suggestions [value]          Enable prompt suggestions. In print/SDK\n" +
+                "                                        mode, emits a prompt_suggestion message\n";
+            Assert.True(ClaudeCliCapabilities.ParseHelp(withFlag).SupportsPromptSuggestions);
+        }
+
+        [Fact]
         public void ParseHelp_LegacyCli_HasNoManual_SoTheFlagIsOmitted()
         {
             var caps = ClaudeCliCapabilities.ParseHelp(HelpLegacy);
