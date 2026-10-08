@@ -82,7 +82,7 @@ namespace CodeAstrogator.Tests
         {
             var hint = CliAttachmentHint.BuildReadHint(new[] { @"C:\p\shot.png" });
             Assert.NotNull(hint);
-            Assert.Contains("image file is larger", hint!);
+            Assert.Contains("image file is too large", hint!);
             Assert.Contains("Open it with the Read tool", hint);
             Assert.Contains(@"C:\p\shot.png", hint);
         }
@@ -95,7 +95,7 @@ namespace CodeAstrogator.Tests
                 @"C:\p\a.png", @"C:\p\b.png", @"C:\P\A.PNG", // same file, different casing
             });
             Assert.NotNull(hint);
-            Assert.Contains("image files are larger", hint!);
+            Assert.Contains("image files are too large", hint!);
             Assert.Contains("Open them with the Read tool", hint);
             var lines = hint!.Split('\n');
             Assert.Equal(3, lines.Length); // the note + two paths

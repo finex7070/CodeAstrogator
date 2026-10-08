@@ -302,6 +302,7 @@ namespace CodeAstrogator
             to.AutoUpdateDecided = from.AutoUpdateDecided;
             to.PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(from.PromptTimeoutMinutes);
             to.RestoreLastSession = from.RestoreLastSession;
+            to.PromptSuggestions = from.PromptSuggestions;
             to.AutoAddActiveFile = from.AutoAddActiveFile;
             to.ActiveFileOnByDefault = from.ActiveFileOnByDefault;
             to.IncludeSelectedLines = from.IncludeSelectedLines;

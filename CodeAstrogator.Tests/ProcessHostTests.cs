@@ -1,3 +1,4 @@
+using System.Linq;
 using CodeAstrogator.Core;
 using Xunit;
 
@@ -14,8 +15,25 @@ namespace CodeAstrogator.Tests
                 ExecutablePath = "claude.exe",
             });
 
-            // prompt is piped via stdin, never via argv
-            Assert.Equal("-p --output-format stream-json --verbose --include-partial-messages", args);
+            // prompt is piped via stdin (as a stream-json user message), never via argv
+            Assert.Equal("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages", args);
+        }
+
+        [Fact]
+        public void StreamJsonInput_IsOneAsciiOnlyUserMessageLine()
+        {
+            var line = StreamJsonInput.BuildUserMessage("Größe \"ok\"\nzweite Zeile 🚀");
+
+            Assert.EndsWith("\n", line);
+            Assert.Equal(1, line.Count(c => c == '\n')); // the prompt's own newline is escaped
+            Assert.True(line.All(c => c < 128), "non-ASCII must be \\u-escaped");
+
+            var obj = Newtonsoft.Json.Linq.JObject.Parse(line);
+            Assert.Equal("user", obj.Value<string>("type"));
+            Assert.Equal("user", obj["message"]!.Value<string>("role"));
+            var block = (Newtonsoft.Json.Linq.JObject)obj["message"]!["content"]![0]!;
+            Assert.Equal("text", block.Value<string>("type"));
+            Assert.Equal("Größe \"ok\"\nzweite Zeile 🚀", block.Value<string>("text"));
         }
 
         [Fact]

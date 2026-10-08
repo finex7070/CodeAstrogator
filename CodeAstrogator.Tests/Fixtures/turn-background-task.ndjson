@@ -1,0 +1,11 @@
+{"type":"system","subtype":"init","cwd":"C:\\repo","session_id":"sess-bg","tools":["Bash"],"model":"claude-haiku-4-5-20251001","permissionMode":"bypassPermissions"}
+{"type":"assistant","session_id":"sess-bg","message":{"id":"msg_b1","role":"assistant","content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 8 && echo BG-DONE","run_in_background":true}}]}}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bmg9ki3jo","task_type":"local_bash","description":"Background task"}],"session_id":"sess-bg"}
+{"type":"system","subtype":"task_started","task_id":"bmg9ki3jo","tool_use_id":"toolu_bg","description":"Background task","is_backgrounded":true,"task_type":"local_bash","session_id":"sess-bg"}
+{"type":"user","session_id":"sess-bg","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bmg9ki3jo."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":10500,"num_turns":2,"result":"Started.","session_id":"sess-bg","total_cost_usd":0.02,"usage":{"input_tokens":10,"output_tokens":20}}
+{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"sess-bg"}
+{"type":"system","subtype":"task_notification","task_id":"bmg9ki3jo","tool_use_id":"toolu_bg","status":"completed","session_id":"sess-bg"}
+{"type":"system","subtype":"init","cwd":"C:\\repo","session_id":"sess-bg","tools":["Bash"],"model":"claude-haiku-4-5-20251001","permissionMode":"bypassPermissions"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":2600,"num_turns":1,"result":"Background task completed.","session_id":"sess-bg","total_cost_usd":0.03,"usage":{"input_tokens":5,"output_tokens":9}}
+{"type":"prompt_suggestion","suggestion":"show the output","uuid":"0b1c","session_id":"sess-bg"}

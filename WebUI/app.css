@@ -1374,6 +1374,23 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .toolbar-right { display: flex; gap: 6px; align-items: center; margin-left: auto; }
 
+/* Prompt suggestion: the ghost text itself is the textarea placeholder; this is the Tab hint. */
+.suggestion-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  user-select: none;
+}
+.suggestion-hint[hidden] { display: none; }
+.suggestion-hint kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted, var(--text-faint));
+}
+
 .modelmode-btn {
   display: inline-flex;
   align-items: center;
