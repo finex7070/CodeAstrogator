@@ -15,6 +15,8 @@ namespace CodeAstrogator.Core
     /// size). Pasted screenshots are routinely 0.4–2.4 MB, so this hit almost every screenshot.
     /// The model <em>can</em> see such a file when it opens it with the Read tool, so the prompt gets
     /// an explicit instruction to do exactly that for the affected files.
+    /// <para>Since 2026-10-08 images normally go as base64 blocks instead (<see cref="CliImageAttachments"/>);
+    /// this hint is only the fallback for images beyond those caps or in formats like TIFF.</para>
     /// </summary>
     public static class CliAttachmentHint
     {
@@ -71,7 +73,7 @@ namespace CodeAstrogator.Core
             var sb = new StringBuilder();
             sb.Append("Note: the following image file")
               .Append(paths.Count == 1 ? " is" : "s are")
-              .Append(" larger than the CLI's 256 KiB inline limit, so ")
+              .Append(" too large to include in this message, so ")
               .Append(paths.Count == 1 ? "its" : "their")
               .Append(" content is NOT part of this prompt — only the path")
               .Append(paths.Count == 1 ? "" : "s")

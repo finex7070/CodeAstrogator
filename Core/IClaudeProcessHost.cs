@@ -11,6 +11,9 @@ namespace CodeAstrogator.Core
     {
         public string Prompt { get; set; } = "";
 
+        /// <summary>Images sent as base64 blocks with the prompt (see <see cref="CliImageAttachments"/>).</summary>
+        public IList<string> ImagePaths { get; } = new List<string>();
+
         /// <summary>Resolved path to the claude executable (claude.exe / claude.cmd).</summary>
         public string ExecutablePath { get; set; } = "";
 

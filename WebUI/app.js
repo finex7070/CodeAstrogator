@@ -109,6 +109,9 @@
   const jumpPill = $("jump-pill");
   const composer = $("composer");
   const input = $("input");
+  const defaultPlaceholder = input.placeholder;
+  const suggestionHint = $("suggestion-hint");
+  let promptSuggestion = ""; // CLI-predicted next prompt (prompt.suggestion), "" = none
   const attachmentsEl = $("attachments");
   const turnReviewEl = $("turn-review");
   const notifyStackEl = $("notify-stack");
@@ -668,6 +671,7 @@
       case "remote.state": return applyRemoteState(m);
       case "activeFile": return applyActiveFile(m);
       case "composer.append": return appendToComposer(m.text);
+      case "prompt.suggestion": return onPromptSuggestion(m.text);
       case "banner.settings": return applyBannerSettings(m);
       case "check.run": return runManualCheck(m.kind);
       case "update.staged": return updateStaged(m);
@@ -777,6 +781,7 @@
   }
 
   function applySessionInit(m) {
+    setPromptSuggestion(""); // belongs to the conversation being left
     state.sessionId = m.sessionId;
     state.title = m.title || "Untitled";
     state.model = m.model || state.model;
@@ -832,6 +837,7 @@
   }
 
   function loadTranscript(m) {
+    setPromptSuggestion("");
     state.sessionId = m.sessionId;
     state.title = m.title || state.title;
     state.messages = [];
@@ -1244,6 +1250,7 @@
     if (s === "working" && prev !== "working" && prev !== "waiting-permission") {
       curTurnDivider = null;
       curTurnFooter = null;
+      setPromptSuggestion(""); // a suggestion predicts the prompt for the turn that just ended
     }
     // Turn no longer active (ended / errored / interrupted) → clear the running-agents list; a stray
     // agent whose result was missed can't outlive the turn.
@@ -3440,6 +3447,7 @@
     renderUserMessage(text, display);
     scrollToBottom(); // the user just sent → always pin to bottom (even after a long prompt)
     post("prompt.send", { text, attachments: attachments.length ? attachments : undefined });
+    setPromptSuggestion("");
     input.value = "";
     state.attachments = [];
     renderAttachments();
@@ -3455,6 +3463,7 @@
   input.addEventListener("input", () => {
     autoGrow();
     updateSendEnabled();
+    refreshSuggestionHint();
     maybeOpenSlashAutocomplete();
     maybeOpenAtAutocomplete();
   });
@@ -3462,6 +3471,14 @@
   input.addEventListener("keydown", (e) => {
     if (atAutoOpen && handleAtAutocompleteKey(e)) return;
     if (slashAutocompleteOpen && handleAutocompleteKey(e)) return;
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && acceptPromptSuggestion()) {
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "Escape" && promptSuggestion && input.value === "") {
+      setPromptSuggestion("");
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendPrompt();
@@ -3517,6 +3534,37 @@
     input.style.maxHeight = maxInputHeight + "px";
     autoGrow();
   }
+  // -------------------------------------------------------------------------
+  // Prompt suggestion (host→web prompt.suggestion): the CLI's prediction of the next prompt, shown
+  // as ghost text (the placeholder) while the composer is empty. Tab takes it over into the input
+  // (edit it or send it with Enter), Escape drops it. Never sent on its own — Tab only.
+  // -------------------------------------------------------------------------
+  function onPromptSuggestion(text) {
+    // arrives a few seconds after the turn — ignore it if the next turn already started
+    if (isTurnActive() || state.remoteActive) return;
+    setPromptSuggestion(text);
+  }
+  function setPromptSuggestion(text) {
+    promptSuggestion = (text || "").trim();
+    input.placeholder = promptSuggestion || defaultPlaceholder;
+    composer.classList.toggle("has-suggestion", !!promptSuggestion);
+    refreshSuggestionHint();
+  }
+  function refreshSuggestionHint() {
+    // the Tab hint only makes sense while the ghost text is actually visible
+    suggestionHint.hidden = !(promptSuggestion && input.value === "");
+  }
+  function acceptPromptSuggestion() {
+    if (!promptSuggestion || input.value !== "") return false;
+    const text = promptSuggestion;
+    setPromptSuggestion(""); // consumed — clearing the input again shows the normal placeholder
+    input.value = text;
+    input.selectionStart = input.selectionEnd = text.length;
+    autoGrow();
+    updateSendEnabled();
+    return true;
+  }
+
   // host→web composer.append: append text (e.g. an editor selection added via the right-click
   // menu) to the composer, on its own line, then focus the composer with the caret at the end.
   function appendToComposer(text) {
@@ -4063,6 +4111,7 @@
     }
 
     state.remoteActive = true;
+    setPromptSuggestion(""); // the terminal owns the session now
     remotePanel.hidden = false;
     btnRemote.classList.add("active");
     setRemoteLocked(true);
@@ -5290,6 +5339,8 @@
           limits: mockLimits(15, 35),
         });
         handle({ type: "status", state: "ready" });
+        // the CLI delivers its next-prompt prediction a few seconds after the result
+        sendIn("prompt.suggestion", { text: "run the program", sessionId: state.sessionId }, 1500);
       }, delay + 140);
     }
 

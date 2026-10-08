@@ -10,7 +10,8 @@ namespace CodeAstrogator.Core
     /// <summary>
     /// Runs <c>claude -p</c> with stream-json output, one process per turn (Teil A §A3).
     /// The prompt is written to stdin (not argv) so multiline prompts survive the
-    /// Windows command line and the npm .cmd shim unscathed.
+    /// Windows command line and the npm .cmd shim unscathed — as one stream-json user message
+    /// (<see cref="StreamJsonInput"/>), after which stdin is closed.
     /// </summary>
     public sealed class ClaudeCliProcessHost : IClaudeProcessHost
     {
@@ -66,8 +67,10 @@ namespace CodeAstrogator.Core
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            // -p without a prompt argument reads the prompt from stdin until EOF.
-            await process.StandardInput.WriteAsync(request.Prompt).ConfigureAwait(false);
+            // One stream-json user message, then EOF. The CLI still finishes the turn (and delivers
+            // its prompt suggestion) before exiting. stdout is already being read above, so a large
+            // message cannot deadlock against a full stdout pipe.
+            await process.StandardInput.WriteAsync(StreamJsonInput.BuildUserMessage(request.Prompt, request.ImagePaths)).ConfigureAwait(false);
             process.StandardInput.Close();
 
             var cancelled = false;
@@ -103,6 +106,7 @@ namespace CodeAstrogator.Core
             var args = new List<string>
             {
                 "-p", // prompt arrives via stdin
+                "--input-format", "stream-json",
                 "--output-format", "stream-json",
                 "--verbose",
                 "--include-partial-messages",

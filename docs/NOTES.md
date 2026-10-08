@@ -330,6 +330,12 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **`prompt.suggestion` (host → web, 2026-10-08)** — `{ text, sessionId? }`: the CLI's predicted next prompt,
+  sent a few seconds after `turn.result`/`status: ready`. The WebUI shows it as the composer placeholder
+  (ghost text) while the input is empty, with a "Tab to use" hint; **Tab** copies it into the input (then edit
+  or Enter), **Esc** drops it. Never sent on its own. Ignored while a turn runs / remote control is active;
+  cleared by `prompt.send`, `status: working`, `session.init`, `transcript.load`. `text: ""` clears it (sent
+  when the option is switched off). See "CLI integration → Prompt suggestions".
 - **`update.staged` (host → web) / `update.restart` (web → host), 2026-10-02** — auto-update.
   `update.staged { version, installed, url }`: a verified update is downloaded and installs when VS closes →
   "Update ready" banner with "Restart now"; `update.restart` closes VS for an immediate install + relaunch.
@@ -392,6 +398,20 @@ compact_boundary evaluation) — details in the respective sections below.
   "COUNT=0" now yields two Read calls (`num_turns: 4`) and correct descriptions of both screenshots.
   The image-block route (`stream-json` input) stays the deterministic long-term option if the hint ever
   proves too soft. Re-test the 256 KiB limit on a CLI update — if it rises, the hint simply stops firing.
+  - **Superseded 2026-10-08: images go as base64 `image` blocks** (the prompt is a stream-json message
+    now anyway, see "CLI integration"). `Core/CliImageAttachments.SelectInline` picks the attachments
+    (png/jpg/jpeg/gif/webp/bmp, no `#L` suffix, ≤ 32 MiB each, ≤ 36 MiB per prompt, original order);
+    `StreamJsonInput` appends them as `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`
+    after the text block (an unreadable file becomes a short text note). In "Attached files:" such an
+    image is listed as `<path> (image, included in this message)` — plain path, no `@`, so the CLI does
+    not expand it a second time but the model still knows where the file is. Measured against CLI 2.1.287
+    with Read disabled and a word printed on each image: PNG 0.19 / 0.61 / 1.5 / 3.3 / 4.3 MB (1920×1080),
+    6.7 / 9.3 / 14.3 MB (up to 3400×2000), **34.6 MB** (5000×3200), 9000×1400 px (> the API's 8000 px),
+    JPEG, GIF, **BMP** (the CLI converts it) and **5 images / 38 MB in one prompt** — every word read
+    correctly, in order. The CLI downscales on its own; the session JSONL keeps the downscaled copy
+    (~0.6–0.8 MB per image), and `--resume` as well as `/compact` keep the images. No upper limit was
+    found; the caps simply stay inside the tested range. **The Read hint is now only the fallback** for
+    images beyond the caps or in other formats (TIFF, ICO, AVIF …), which still go as `@path`.
 - **`system.note` (host → web)** `{ id, text }` — dimmed one-liners in the transcript
   (session start, the turn footer source is `turn.result`, "Turn stopped", "Context compacted",
   "Permission denied by user"). Stored as role `system` in the history. (Auto-approved edits are
@@ -739,7 +759,35 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
 
 ## CLI integration (Part A §A3)
 - The prompt is passed to `claude -p` via **stdin** (not argv) — robust against
-  multiline prompts and the npm `claude.cmd` shim.
+  multiline prompts and the npm `claude.cmd` shim. **Since 2026-10-08 as one stream-json user message**
+  (`--input-format stream-json`, `Core/StreamJsonInput`): `{"type":"user","message":{"role":"user",
+  "content":[{"type":"text","text":…}]}}` + `\n`, non-ASCII escaped as `\uXXXX` (stdin encoding under
+  net472 is not UTF-8), then stdin is closed — **still one process per turn**, not the removed persistent
+  mode. Verified against CLI 2.1.287: `@path` expansion ("Attached files:"), custom and built-in slash
+  commands (`/context`, `/compact` incl. `compact_boundary`), `--resume` all behave as with plain text.
+  Reason: only this input mode surfaces `prompt_suggestion` (plain text: the suggestion is generated but
+  never printed).
+- **Prompt suggestions (2026-10-08, CLI 2.1.287).** `--prompt-suggestions true` (only passed when the
+  binary's `--help` lists it — `CliCapabilities.SupportsPromptSuggestions`; option "Suggest the next prompt",
+  default on) makes the CLI fork a small agent after the turn ("[SUGGESTION MODE: Suggest what the user
+  might naturally type next…]", 2-12 words or nothing; it filters "thanks"/"looks good"/Claude-voice itself
+  and stays silent when the next step is unclear). It arrives as
+  `{"type":"prompt_suggestion","suggestion":"python calc.py","uuid":…,"session_id":…}` **4-11 s after the
+  `result`**, then the process exits — even with stdin already closed. Cost: one extra request per turn that
+  reads the context from the cache (~32-36k cache-read tokens, 300-1000 output tokens incl. thinking).
+  - **Turn end moves to the `result`** (`ClaudeSessionService`): with suggestions on, the turn is handed
+    back (`TurnCompleted`, busy cleared → `status: ready`) at the top-level, non-error `result` instead of at
+    process exit, or the UI would sit on "working" for those seconds. The process keeps running only to
+    deliver the suggestion: from then on **only `PromptSuggestionEvent`s are forwarded**, everything else of
+    that process is dropped. The next `RunTurnAsync` (and `ResetSession`/`AttachSession`) kills it first
+    and waits ≤ 5 s for it to exit, so two processes never write the same session.
+  - **Not while background tasks run** (`system/background_tasks_changed`, tracked as a count): CLI 2.1.287
+    keeps the process alive until a `run_in_background` task finishes and then answers its
+    `task_notification` with a **follow-up turn in the same process** (`init` → answer → second `result`) —
+    in plain-text mode too, so this is not caused by stream-json. That follow-up must still be shown, so the
+    turn end stays at the next result with no task running (or at exit). Note: a never-ending background
+    task (dev server) therefore keeps the turn "working" — pre-existing, separate issue.
+  - Off (option or old CLI): no flag, no early hand-back — behaviour as before.
 - **Queued background-task notification = its own zero-turn `result` (CLI 2.1.280, 2026-09-23).**
   When a `run_in_background` task from an earlier turn has reported back, the next `-p` run opens with
   `system/task_notification` → `system/init` → **`result`** (`num_turns: 0`, `result: ""`,
@@ -770,7 +818,8 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     `<root>\*\<session>\tasks\<task>.output` (cwd munged differently); no file within 15 s ⇒ give up.
     Stops on `task_notification` / `tool_result` (with a final read, so nothing before the result is lost),
     `StopAll` on turn end, `Dispose` with the window. Background tasks are not tailed (their tool_use is
-    answered immediately and they die with the per-turn process anyway).
+    answered immediately; since CLI 2.1.287 the process outlives the result until they finish — see
+    "Prompt suggestions" above).
   - **Contract:** host→web **`tool.output { id, text }`** (see "Contract additions").
   - **WebUI:** `toolOutput` appends to a `pre.tool-console.live` in the card body (created on the first
     chunk, blinking block cursor while running), keeps the last 60 000 chars, sticks to the bottom only
@@ -999,6 +1048,10 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **2026-10-02 — Claude Sonnet 5.5** (`claude-sonnet-5-5`, released ~2026-09-28) added as the newest
     sonnet; Sonnet 5 moved behind Fable 5 into the older generations. CLI 2.1.280 does **not** know the ID
     yet (probe echoes it raw) ⇒ hidden, Sonnet 5 stays on top until a CLI update.
+  - **2026-10-08 — Claude Haiku 5.5** (`claude-haiku-5-5`) added as the newest haiku; Haiku 4.5 moved behind
+    Sonnet 5 into the older generations. CLI 2.1.294 knows it (probe renders the label `Haiku 5.5`); an older
+    CLI echoes the ID raw ⇒ hidden, Haiku 4.5 stays on top. The WebUI's built-in fallback list keeps Haiku 4.5
+    (models every shipped CLI runs).
   - **Where the remote catalog comes from:** `noticeBranch` in `WebUI/config.js` is still `"master"`, but the
     repo only has `main` + `develope`. `raw.githubusercontent.com` serves `master` as the alias of the
     renamed default branch (`…/master/models.json` → 200, same content as `main`), so the fetch works — but

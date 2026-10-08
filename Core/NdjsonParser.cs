@@ -68,6 +68,19 @@ namespace CodeAstrogator.Core
                 case "result":
                     ParseResult(obj, events);
                     break;
+                case "prompt_suggestion":
+                {
+                    var suggestion = obj.Value<string>("suggestion");
+                    if (!string.IsNullOrWhiteSpace(suggestion))
+                    {
+                        events.Add(new PromptSuggestionEvent
+                        {
+                            Suggestion = suggestion!.Trim(),
+                            SessionId = obj.Value<string>("session_id"),
+                        });
+                    }
+                    break;
+                }
                 case "error":
                     events.Add(new StreamErrorEvent
                     {
@@ -135,6 +148,10 @@ namespace CodeAstrogator.Core
                     IsBackgrounded = obj.Value<bool?>("is_backgrounded") ?? false,
                     SessionId = obj.Value<string>("session_id"),
                 });
+            }
+            else if (subtype == "background_tasks_changed")
+            {
+                events.Add(new BackgroundTasksChangedEvent { Count = (obj["tasks"] as JArray)?.Count ?? 0 });
             }
             else if (subtype == "task_notification")
             {
