@@ -412,7 +412,7 @@ namespace CodeAstrogator.Tests
         // ── background tasks: the turn is handed back, process + stdin stay open ─────────────────
 
         private const string InitLine = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-bg\",\"cwd\":\"C:\\\\w\"}";
-        private const string TasksRunningLine = "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[{\"task_id\":\"t1\",\"task_type\":\"local_bash\",\"description\":\"Capture staging log\"}]}";
+        private const string TasksRunningLine = "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[{\"task_id\":\"t1\",\"task_type\":\"local_bash\",\"description\":\"Tail the API log\"}]}";
         private const string TasksDoneLine = "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[]}";
         private const string TaskCompletedLine = "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"t1\",\"status\":\"completed\"}";
         private const string ResultLine = "{\"type\":\"result\",\"subtype\":\"success\",\"num_turns\":1,\"session_id\":\"s-bg\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}";
@@ -504,7 +504,7 @@ namespace CodeAstrogator.Tests
             Assert.False(session.IsBusy);
             Assert.Equal(1, completions);
             Assert.False(host.InputClosed);
-            Assert.Equal("Capture staging log", events.OfType<BackgroundTasksChangedEvent>().Single().Tasks.Single().Description);
+            Assert.Equal("Tail the API log", events.OfType<BackgroundTasksChangedEvent>().Single().Tasks.Single().Description);
 
             await session.RunTurnAsync("done testing", exe, null);
 
