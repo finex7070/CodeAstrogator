@@ -28,10 +28,10 @@ namespace CodeAstrogator.Tests
         {
             const string connecting = "\u001b[2J\u001b[H ~\\work \u00b7 /rc connecting\u2026\u001b[K\n";
             const string active = connecting +
-                "  /remote-control is active \u00b7 Continue here, on your phone, or at https://claude.ai/code/session_01UYTEfqc2mYE1YV5CaWox1M\u001b[K\n";
+                "  /remote-control is active \u00b7 Continue here, on your phone, or at https://claude.ai/code/session_01AstrogatorDemoSession42\u001b[K\n";
 
             Assert.Null(ClaudeBackgroundSessions.ExtractRemoteUrl(connecting));
-            Assert.Equal("https://claude.ai/code/session_01UYTEfqc2mYE1YV5CaWox1M", ClaudeBackgroundSessions.ExtractRemoteUrl(active));
+            Assert.Equal("https://claude.ai/code/session_01AstrogatorDemoSession42", ClaudeBackgroundSessions.ExtractRemoteUrl(active));
         }
 
         [Fact]

@@ -5319,6 +5319,9 @@
   let mock = null;
   if (!hasHost) {
     mock = createMock();
+    // Browser-only hook to stage exact UI states (e.g. for README screenshots): inject host→web messages
+    // directly, bypassing the mock's timeline. Never present inside Visual Studio (hasHost).
+    window.astrogatorMock = { send: (m) => handle(m) };
   }
 
   function createMock() {
@@ -5493,7 +5496,7 @@
     let mockRemote = false;
     function onRemoteStart() {
       mockRemote = true;
-      const url = "https://claude.ai/code/session_01UYTEfqc2mYE1YV5CaWox1M";
+      const url = "https://claude.ai/code/session_01AstrogatorDemoSession42";
       const base = { inTerminal: false, canOpenTerminal: true };
       sendIn("remote.state", Object.assign({ state: "starting" }, base), 100);
       sendIn("remote.state", Object.assign({ state: "ready", message: "Connecting to Remote Control…", activity: "idle" }, base), 600);
@@ -5548,7 +5551,7 @@
       sendIn("theme", { mode: "auto", resolved, vars: {} }, 0);
       sendIn("auth.state", { loggedIn: true, mode: "oauth" }, 10);
       sendIn("session.init", {
-        sessionId: "mock-1", title: "Untitled", model: "claude-opus-4-8",
+        sessionId: "mock-1", title: "Untitled", model: "claude-opus-5-5",
         effort: "high", planMode: false, ultracode: false, permissionMode: "ask",
         verbosity: "normal",
         cwd: "C:/Users/Jan/source/repos/CodeAstrogator",
@@ -5560,6 +5563,17 @@
         "clear", "compact", "context", "init", "usage", "review", "security-review", "deep-research",
       ] }, 30);
       sendIn("activeFile", { name: "GameManager.cs", path: "C:/repo/Assets/GameManager.cs", optionEnabled: true, enabled: mockActiveFileEnabled, lines: "42-58" }, 40);
+      // what the host reports from models.json for a current CLI (the static MODELS list stays conservative)
+      sendIn("models.list", { models: [
+        { id: "claude-opus-5-5", label: "Opus 5.5", family: "opus", primary: true },
+        { id: "claude-fable-5-1", label: "Fable 5.1", family: "fable", primary: true },
+        { id: "claude-sonnet-5-5", label: "Sonnet 5.5", family: "sonnet", primary: true },
+        { id: "claude-haiku-5-5", label: "Haiku 5.5", family: "haiku", primary: true },
+        { id: "claude-opus-5", label: "Opus 5", family: "opus", primary: false },
+        { id: "claude-fable-5", label: "Fable 5", family: "fable", primary: false },
+        { id: "claude-sonnet-5", label: "Sonnet 5", family: "sonnet", primary: false },
+        { id: "claude-haiku-4-5", label: "Haiku 4.5", family: "haiku", primary: false },
+      ] }, 45);
     }
 
     function onThemeMode(mode) {
@@ -5653,7 +5667,7 @@
       // session-start note, once (host does this on the first system/init)
       if (!announced) {
         announced = true;
-        sendIn("system.note", { id: nid("n"), text: "Session started · claude-opus-4-8 · C:/Users/Jan/source/repos/CodeAstrogator" }, 60);
+        sendIn("system.note", { id: nid("n"), text: "Session started · claude-opus-5-5 · C:/Users/Jan/source/repos/CodeAstrogator" }, 60);
       }
 
       // thinking block before the answer (decision #13) — mirrors the real
