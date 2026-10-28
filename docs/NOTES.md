@@ -939,7 +939,7 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     fallback search), `NdjsonParserTests.ForegroundCommand_…`; mock turn has a PowerShell deploy with a `\r`
     progress bar and an ANSI colour code.
 - **Stopping commands (2026-10-28, `Core/ProcessTree`, `Core/ShellTaskProcess`).** User report: after
-  **Stop**, a long Bash command (`timeout 540 ./logcapture.exe …`) kept running and its card kept spinning on
+  **Stop**, a long Bash command (`timeout 540 <log capture tool> …`) kept running and its card kept spinning on
   "waiting for output…" forever. Two causes: (1) `Process.Kill()` on `claude.exe` (net472 has no
   `entireProcessTree`) orphaned the CLI's shell children and everything they launched; (2) a killed CLI sends
   no `tool_result`, so nothing ever finished the card.
@@ -967,7 +967,7 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **Tests:** `ShellTaskProcessTests` (real command lines: PowerShell wrapper, quoted bash command incl.
     single quotes, fallback, ambiguity, MCP children ignored).
 - **Background tasks outlive the turn (2026-10-28, `ClaudeSessionService`).** User report: Claude started a
-  staging log capture with `run_in_background` ("tell me when you're done testing") — the chat stayed on
+  log capture with `run_in_background` ("tell me when you're done testing") — the chat stayed on
   "Working…" and the only way to answer was Stop, which killed the capture ("Background shell command didn't
   finish before the previous session ended", `status: stopped`).
   - **Measured against CLI 2.1.287** (probe: `claude -p --input-format stream-json`, stdin kept open, Haiku,
@@ -1010,7 +1010,7 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     `PromptInTheRaceWindow_IsQueuedBehindTheFollowUp_NothingLost`.
   - **Tests:** `SessionServiceTests` (`LiveProcessHost` with a scripted stdin): prompt goes into the same
     process, follow-up turn shown then exit, changed settings → new process + `ProcessEnded`,
-    `StopBackgroundTasks`. Mock: the demo turn leaves a "Capture staging log" task in the bar.
+    `StopBackgroundTasks`. Mock: the demo turn leaves a "Tail the API log" task in the bar.
 - **Effort:** 5 levels instead of the 3 from §5.4 — the CLI (checked against 2.1.161) knows
   `--effort low|medium|high|xhigh|max`; passed through per turn
   (default **high**, configurable in Tools → Options).
