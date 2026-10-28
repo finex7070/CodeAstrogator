@@ -29,6 +29,8 @@
     cwd: "",
     tokens: 0,
     contextTokens: 0,        // context size after the last turn (input incl. cache + output)
+    contextWindow: 0,        // the model's context-window size (CLI-reported), 0 = unknown
+    contextUsage: null,      // the CLI's context breakdown after the last turn (context.usage), null = none yet
     limits: { sessionPct: 0, weeklyPct: 0, sessionFetchedAt: null, weeklyFetchedAt: null },
     plan: "",
     themeMode: "auto",
@@ -110,12 +112,14 @@
   const composer = $("composer");
   const input = $("input");
   const defaultPlaceholder = input.placeholder;
-  const suggestionHint = $("suggestion-hint");
+  const suggestionGhost = $("suggestion-ghost");
+  const suggestionText = $("suggestion-text");
   let promptSuggestion = ""; // CLI-predicted next prompt (prompt.suggestion), "" = none
   const attachmentsEl = $("attachments");
   const turnReviewEl = $("turn-review");
   const notifyStackEl = $("notify-stack");
   const agentsRunningEl = $("agents-running");
+  const bgTasksEl = $("bg-tasks");
   const sendBtn = $("btn-send");
   const activeFileChip = $("active-file");
   const activeFileName = $("active-file-name");
@@ -131,6 +135,9 @@
   const meterWeekly = $("meter-weekly");
   const labelSession = $("label-session");
   const labelWeekly = $("label-weekly");
+  const statusContext = $("status-context");
+  const meterContext = $("meter-context");
+  const labelContext = $("label-context");
   const planBadge = $("plan-badge");
   const planLabel = $("plan-label");
   const overlayLayer = $("overlay-layer");
@@ -138,6 +145,11 @@
   const remotePanel = $("remote-panel");
   const remoteStatus = $("remote-status");
   const btnRemoteEnd = $("btn-remote-end");
+  const remoteActivity = $("remote-activity");
+  const remoteQr = $("remote-qr");
+  const remoteLink = $("remote-link");
+  const btnRemoteCopy = $("btn-remote-copy");
+  const btnRemoteTerminal = $("btn-remote-terminal");
 
   // Notice / announcement banner — content + on/off come from a remote JSON file fetched from
   // the project's GitHub (the "source of truth"), so announcements can be pushed without a VSIX
@@ -646,6 +658,8 @@
       case "tool.use": return toolUse(m);
       case "tool.result": return toolResult(m);
       case "tool.output": return toolOutput(m);
+      case "tool.stopFailed": return toolStopFailed(m);
+      case "background.tasks": return renderBackgroundTasks(m.tasks || []);
       case "permission.request": return permissionRequest(m);
       case "permission.result": return applyPermissionResult(m);
       case "permission.finalize": return finalizePermissionCard(m.requestId, m.status);
@@ -672,6 +686,7 @@
       case "activeFile": return applyActiveFile(m);
       case "composer.append": return appendToComposer(m.text);
       case "prompt.suggestion": return onPromptSuggestion(m.text);
+      case "context.usage": return onContextUsage(m);
       case "banner.settings": return applyBannerSettings(m);
       case "check.run": return runManualCheck(m.kind);
       case "update.staged": return updateStaged(m);
@@ -799,6 +814,8 @@
     state.cwd = m.cwd || "";
     state.tokens = m.tokens || 0;
     state.contextTokens = m.contextTokens || 0;
+    state.contextWindow = m.contextWindow || 0;
+    state.contextUsage = m.contextUsage || null;
     state.limits = m.limits || { sessionPct: 0, weeklyPct: 0 };
     state.plan = m.plan || "";
     state.messages = [];
@@ -1279,6 +1296,8 @@
     // orphaned thinking: the turn reached a terminal state (Stop/error/normal end) — drop any
     // "✻ Thinking…" line that never got a thinking.end (interrupted turns emit none).
     if (s !== "working" && s !== "waiting-permission") finalizeActiveThinking();
+    // same for tool cards that never got a tool.result (Stop mid-command: the killed CLI sends none)
+    if (s === "ready" || s === "error") finalizeRunningToolCards();
   }
 
   // "Working" indicator — a flying rocket + a random Space-Astrogator one-liner, pinned to the
@@ -1335,6 +1354,7 @@
       state.limits.sessionPct, state.limits.sessionResetsAt, state.limits.sessionFetchedAt);
     renderMeter(statusWeekly, meterWeekly, labelWeekly, "Weekly",
       state.limits.weeklyPct, state.limits.weeklyResetsAt, state.limits.weeklyFetchedAt);
+    renderContextMeter();
     if (state.plan) {
       planLabel.textContent = state.plan;
       planBadge.hidden = false;
@@ -1370,6 +1390,196 @@
   function hasUsageData(fetchedAt) {
     if (!fetchedAt) return false;
     return !isNaN(Date.parse(fetchedAt));
+  }
+
+  // -------------------------------------------------------------------------
+  // Context meter (statusbar) + breakdown popover. The CLI answers a get_context_usage request after
+  // every turn (host→web context.usage); without one yet (old CLI, session from before) the meter
+  // falls back to the last turn's context size against the model's context window.
+  // -------------------------------------------------------------------------
+  function contextFigures() {
+    const u = state.contextUsage;
+    if (u && u.maxTokens > 0) return { used: u.totalTokens || 0, max: u.maxTokens };
+    if (state.contextWindow > 0 && state.contextTokens > 0) return { used: state.contextTokens, max: state.contextWindow };
+    return null;
+  }
+
+  function renderContextMeter() {
+    if (!statusContext) return;
+    const f = contextFigures();
+    if (!f) {
+      meterContext.style.width = "0%";
+      labelContext.textContent = "Context —";
+      statusContext.classList.remove("warn", "crit");
+      statusContext.classList.add("stale");
+      statusContext.title = "Context usage: available after the first turn";
+      return;
+    }
+    // CLI percentage when present (matches its own /context), else computed
+    const raw = state.contextUsage && state.contextUsage.maxTokens > 0 && state.contextUsage.percentage != null
+      ? state.contextUsage.percentage : f.used / f.max * 100;
+    const p = clampPct(raw);
+    meterContext.style.width = p + "%";
+    labelContext.textContent = "Context " + p + "%";
+    statusContext.classList.remove("stale");
+    setMeterLevel(statusContext, p);
+    statusContext.title = "Context: " + formatTokensShort(f.used) + " / " + formatTokensShort(f.max)
+      + " tokens (" + p + "%) · click for the breakdown";
+  }
+
+  function onContextUsage(m) {
+    // (no session check here: the host stops forwarding a process's events once it switches sessions)
+    if (!m.usage) return;
+    state.contextUsage = m.usage;
+    if (m.usage.maxTokens > 0) state.contextWindow = m.usage.maxTokens;
+    renderContextMeter();
+    // refresh an open breakdown in place
+    if (openOverlay && openOverlay.el.classList.contains("ctx-pop")) openContextPopover();
+  }
+
+  /** 188934 → "188.9k", 1000000 → "1M", 900 → "900". */
+  function formatTokensShort(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (Math.round(n / 1e5) / 10).toString().replace(/\.0$/, "") + "M";
+    if (n >= 1e4) return (Math.round(n / 100) / 10).toFixed(1).replace(/\.0$/, "") + "k";
+    if (n >= 1e3) return (Math.round(n / 100) / 10).toFixed(1) + "k";
+    return String(Math.round(n));
+  }
+
+  // Category → swatch colour (like the CLI's /context grid: the big four coloured, the rest grey).
+  const CTX_COLORS = {
+    "Messages": "var(--ctx-messages)",
+    "System tools": "var(--ctx-system-tools)",
+    "MCP tools": "var(--ctx-mcp-tools)",
+    "System prompt": "var(--ctx-system-prompt)",
+  };
+  function ctxColor(cat) {
+    if (cat.kind === "free") return "var(--ctx-free)";
+    if (cat.kind === "buffer") return "var(--ctx-buffer)";
+    if (cat.kind === "deferred") return "var(--ctx-deferred)";
+    return CTX_COLORS[cat.name] || "var(--ctx-other)";
+  }
+
+  function openContextPopover() {
+    const pop = el("div", "popover ctx-pop");
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", "Context usage");
+    const u = state.contextUsage;
+    const f = contextFigures();
+
+    pop.appendChild(el("div", "ctx-title", "Context"));
+    if (!f) {
+      pop.appendChild(el("div", "ctx-note", "Shown after the first turn of this conversation."));
+      openPopover(statusContext, pop, { side: "top", align: "end", grow: true });
+      return;
+    }
+    const pct = clampPct(u && u.maxTokens > 0 && u.percentage != null ? u.percentage : f.used / f.max * 100);
+    const head = el("div", "ctx-head");
+    head.appendChild(el("span", "ctx-used", pct + "% used"));
+    head.appendChild(el("span", "ctx-total", formatTokensShort(f.used) + " / " + formatTokensShort(f.max)));
+    pop.appendChild(head);
+
+    const bar = el("div", "ctx-bar");
+    pop.appendChild(bar);
+    const seg = (tokens, color, title) => {
+      const s = el("span", "ctx-seg");
+      s.style.width = Math.max(0, Math.min(100, tokens / f.max * 100)) + "%";
+      s.style.background = color;
+      if (title) s.title = title;
+      bar.appendChild(s);
+    };
+
+    if (!u || !Array.isArray(u.categories) || !u.categories.length) {
+      seg(f.used, "var(--ctx-messages)");
+      pop.appendChild(ctxFooter("The breakdown by category follows after the next turn.", pct));
+      openPopover(statusContext, pop, { side: "top", align: "end", grow: true });
+      return;
+    }
+
+    // used (largest first) → autocompact buffer → free → deferred tool definitions (not in the context)
+    const rank = { used: 0, buffer: 1, free: 2, deferred: 3 };
+    const cats = u.categories.slice().sort((a, b) =>
+      (rank[a.kind] ?? 0) - (rank[b.kind] ?? 0) || (a.kind === "used" ? b.tokens - a.tokens : 0));
+    cats.filter((c) => c.kind === "used" || c.kind === "buffer").forEach((c) =>
+      seg(c.tokens, ctxColor(c), c.name + " · " + formatTokensShort(c.tokens)));
+
+    const table = el("div", "ctx-rows");
+    cats.forEach((c) => {
+      if (c.kind === "deferred" && !table.querySelector(".ctx-sep")) table.appendChild(el("div", "ctx-sep"));
+      const row = el("div", "ctx-row" + (c.kind === "deferred" ? " deferred" : ""));
+      const sw = el("span", "ctx-swatch");
+      sw.style.background = ctxColor(c);
+      row.appendChild(sw);
+      row.appendChild(el("span", "ctx-name", c.name));
+      row.appendChild(el("span", "ctx-tok", formatTokensShort(c.tokens)));
+      row.appendChild(el("span", "ctx-pct", c.kind === "deferred" ? "—" : (c.tokens / f.max * 100).toFixed(1) + "%"));
+      if (c.kind === "deferred") row.title = "Tool definitions loaded only when needed — not part of the context yet";
+      table.appendChild(row);
+    });
+    pop.appendChild(table);
+
+    // detail lists, collapsed (like the app's "MCP tools / Memory files / Custom agents" expanders)
+    const details = [
+      ["MCP servers", u.mcpServers, (i) => i.count ? i.count + (i.count === 1 ? " tool" : " tools") : ""],
+      ["Memory files", u.memoryFiles, (i) => i.detail || ""],
+      ["Custom agents", u.agents, (i) => i.detail || ""],
+      ["Skills", u.skills, (i) => i.detail || ""],
+    ];
+    details.forEach(([label, items, sub]) => {
+      if (!Array.isArray(items) || !items.length) return;
+      const d = el("details", "ctx-details");
+      const sum = el("summary", null);
+      sum.appendChild(el("span", "ctx-name", label));
+      sum.appendChild(el("span", "ctx-count", String(items.length)));
+      d.appendChild(sum);
+      items.slice().sort((a, b) => (b.tokens || 0) - (a.tokens || 0)).forEach((i) => {
+        const r = el("div", "ctx-item");
+        const name = el("span", "ctx-item-name", i.name);
+        const s = sub(i);
+        name.title = s ? i.name + "\n" + s : i.name;
+        r.appendChild(name);
+        r.appendChild(el("span", "ctx-tok", formatTokensShort(i.tokens)));
+        d.appendChild(r);
+      });
+      d.addEventListener("toggle", () => openOverlay && openOverlay.reposition());
+      pop.appendChild(d);
+    });
+
+    const foot = [];
+    if (u.model) foot.push(u.model);
+    if (u.autoCompactEnabled && u.autoCompactThreshold > 0) foot.push("autocompact at " + formatTokensShort(u.autoCompactThreshold));
+    foot.push("as of the last turn");
+    pop.appendChild(ctxFooter(foot.join(" · "), pct));
+
+    openPopover(statusContext, pop, { side: "top", align: "end", grow: true });
+  }
+
+  // Footer of the breakdown: the note plus "Compact" (runs /compact like the slash menu — without the
+  // active-file reference a typed prompt would get). Highlighted from 75 %, locked while a turn runs.
+  function ctxFooter(note, pct) {
+    const foot = el("div", "ctx-foot");
+    foot.appendChild(el("div", "ctx-note", note));
+    const btn = el("button", "ctx-compact" + (pct >= 75 ? " hot" : ""), "Compact");
+    btn.type = "button";
+    const locked = isTurnActive() || state.remoteActive;
+    btn.disabled = locked;
+    btn.title = locked
+      ? "Available once the current turn has finished"
+      : "Run /compact: Claude summarizes the conversation so far to free up context";
+    btn.addEventListener("click", () => {
+      if (isTurnActive() || state.remoteActive) return;
+      closeAllOverlays();
+      runSlash("/compact");
+    });
+    foot.appendChild(btn);
+    return foot;
+  }
+
+  if (statusContext) {
+    statusContext.addEventListener("click", () => {
+      if (openOverlay && openOverlay.el.classList.contains("ctx-pop")) { closeAllOverlays(); return; }
+      openContextPopover();
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -2033,7 +2243,8 @@
     if (!m.id || (!m.text && !m.start)) return;
     const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     // A late chunk after the result (host posts race) must not re-open a finished console.
-    if (!card || card.classList.contains("tool-ok") || card.classList.contains("tool-err")) return;
+    if (!card || isToolCardFinished(card)) return;
+    ensureToolStopButton(card); // a live console = a running shell command the host can kill
     const con = ensureToolConsole(card);
     if (!con || !m.text) return; // `start`: the empty console (with its placeholder) is all we need
     con._raw = (con._raw || "") + m.text;
@@ -2049,6 +2260,80 @@
     con = el("pre", "tool-console live");
     body.appendChild(con);
     return con;
+  }
+
+  // Finishes a live console in place with the tool result. Keeps whichever text is more complete —
+  // the live tail can hold more than the (length-capped) result, the result wins when the live file
+  // was missed or cut short. Returns false when the card has no console.
+  function finishToolConsole(con, summary) {
+    if (!con) return false;
+    con.classList.remove("live");
+    const live = consoleText(con._raw || "");
+    const final = summary != null ? consoleText(summary) : "";
+    renderToolConsole(con, final.length > live.length ? final : (con._raw || ""));
+    return true;
+  }
+
+  function isToolCardFinished(card) {
+    return card.classList.contains("tool-ok") || card.classList.contains("tool-err")
+      || card.classList.contains("tool-stopped");
+  }
+
+  // ───────── Stop button for a running shell command ─────────
+  // Sits in the card head while the live console runs. tool.stop makes the host kill just this
+  // command's process tree; the CLI then reports it as failed (exit code 1) and the turn goes on —
+  // handy when a command with a huge timeout has obviously already failed.
+  function ensureToolStopButton(card) {
+    if (card.querySelector(".tool-stop-btn")) return;
+    const head = card.querySelector(".tool-head");
+    const status = head && head.querySelector(".tool-status");
+    if (!status) return;
+    const btn = el("button", "tool-stop-btn");
+    btn.type = "button";
+    btn.title = "Stop this command";
+    btn.setAttribute("aria-label", "Stop this command");
+    btn.appendChild(iconStop());
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't toggle the card's collapse/expand
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.title = "Stopping…";
+      card.dataset.stopRequested = "1";
+      post("tool.stop", { id: card.dataset.toolId });
+    });
+    head.insertBefore(btn, status);
+  }
+
+  /** Host could not kill the command (already gone / process not found) — re-arm the button. */
+  function toolStopFailed(m) {
+    const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
+    if (!card) return;
+    delete card.dataset.stopRequested;
+    const btn = card.querySelector(".tool-stop-btn");
+    if (btn) { btn.disabled = false; btn.title = "Stop this command"; }
+  }
+
+  /** Marks a card as stopped: stop glyph instead of the spinner, console no longer live. */
+  function markToolCardStopped(card) {
+    const status = card.querySelector(".tool-status");
+    if (status) { status.innerHTML = ""; status.appendChild(iconStopped()); }
+    const btn = card.querySelector(".tool-stop-btn");
+    if (btn) btn.remove();
+    const con = card.querySelector(".tool-console");
+    if (con) con.classList.remove("live");
+    card.classList.remove("tool-ok", "tool-err");
+    card.classList.add("tool-stopped");
+    card.title = "Stopped";
+  }
+
+  // The turn is over (Stop / error / end) but a card never got its tool.result — e.g. the user
+  // stopped the turn mid-command (the killed CLI sends nothing more). Without this the spinner and
+  // "waiting for output…" would run forever.
+  function finalizeRunningToolCards() {
+    transcriptInner.querySelectorAll(".tool-card").forEach((card) => {
+      if (isToolCardFinished(card) || !card.querySelector(".tool-status .spinner")) return;
+      markToolCardStopped(card);
+    });
   }
 
   // Sticks to the bottom while the user is at the bottom; leaves a scrolled-up view alone.
@@ -2076,7 +2361,16 @@
     reconcileTaskId(m.id, m.summary); // assign a TaskCreate its real "#N" id (no-op for other tools)
     agentEnd(m.id); // if this result is for a running Task agent, drop it from the live list
     const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
-    if (!card) return;
+    if (!card || card.classList.contains("tool-stopped")) return;
+    const stopBtn = card.querySelector(".tool-stop-btn");
+    if (stopBtn) stopBtn.remove();
+    // Killed via the card's stop button: the CLI reports exit code 1 — show "stopped", not "failed",
+    // but keep the output (finish the console below).
+    if (card.dataset.stopRequested && m.status !== "ok") {
+      markToolCardStopped(card);
+      finishToolConsole(card.querySelector(".tool-console"), m.summary);
+      return;
+    }
     const status = card.querySelector(".tool-status");
     const summary = card.querySelector(".tool-summary");
     status.innerHTML = "";
@@ -2089,16 +2383,8 @@
     card.classList.add(m.status === "ok" ? "tool-ok" : "tool-err");
     if (card.classList.contains("todo-card")) return; // checklist keeps its n/m summary
     // A live console already shows the command's output: finish it in place instead of adding a
-    // second copy below. Keep whichever text is more complete — the live tail can hold more than
-    // the (length-capped) result, the result wins when the live file was missed or cut short.
-    const con = card.querySelector(".tool-console");
-    if (con) {
-      con.classList.remove("live");
-      const live = consoleText(con._raw || "");
-      const final = m.summary != null ? consoleText(m.summary) : "";
-      renderToolConsole(con, final.length > live.length ? final : (con._raw || ""));
-      return;
-    }
+    // second copy below.
+    if (finishToolConsole(card.querySelector(".tool-console"), m.summary)) return;
     if (m.summary != null) {
       // keep the input-derived title (Read filename, command, …); otherwise show the result's
       // first line. Long output always goes into the body behind "Show more" (decision #17).
@@ -2527,6 +2813,13 @@
     card.appendChild(body);
 
     const states = []; // { q, selected:Set, customGetter }
+    // Several questions are paged (one at a time, tab strip + ‹ n/m ›) instead of stacked, so a
+    // 3-4 question card doesn't take over the whole chat. A single question renders as before.
+    const paged = questions.length > 1;
+    const blocks = [];
+    const tabs = [];
+    let page = 0;
+    let counterEl = null, prevBtn = null, nextBtn = null, actionBtn = null;
     questions.forEach((q, qi) => {
       const ans = prefilled && prefilled[qi];
       const preSel = new Set((ans && ans.selected) || []);
@@ -2562,11 +2855,12 @@
             st.selected.clear();
             optsEl.querySelectorAll(".q-option").forEach((e) => setOptionSelected(e, false));
             if (!wasSel) { st.selected.add(label); setOptionSelected(btn, true); }
-            // NO auto-submit here. A single-question, single-select card used to answer the moment an
+            // NO auto-submit (and no auto-advance to the next page) here. A single-question, single-select card used to answer the moment an
             // option was clicked, which stole the chance to still type something into the "Other…" field
             // (the guard only checked whether text was ALREADY there). Answering is always an explicit
             // Submit click (or Enter in the free-text field).
           }
+          refreshTabs();
         });
         optsEl.appendChild(btn);
       });
@@ -2589,31 +2883,98 @@
       st.grow = growOther; // so re-expanding a collapsed answered card can re-measure (see head click)
       if (answered) other.disabled = true;
       else {
-        other.addEventListener("input", growOther);
+        other.addEventListener("input", () => { growOther(); refreshTabs(); });
         other.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+          if (e.key !== "Enter" || e.shiftKey) return;
+          e.preventDefault();
+          // paged: Enter moves on to the next question; only the last one submits
+          if (paged && qi < questions.length - 1) {
+            showPage(qi + 1);
+            if (states[qi + 1] && states[qi + 1].customEl) states[qi + 1].customEl.focus();
+          } else {
+            submit();
+          }
         });
       }
       st.customEl = other;
       block.appendChild(other);
       if (!answered)
-        block.appendChild(el("div", "q-hint q-other-hint", "Enter to submit · Shift+Enter for a new line"));
+        block.appendChild(el("div", "q-hint q-other-hint",
+          (paged && qi < questions.length - 1 ? "Enter for the next question" : "Enter to submit")
+            + " · Shift+Enter for a new line"));
       // Size to the prefilled (history) or empty content once it is in the DOM — scrollHeight needs layout.
       requestAnimationFrame(growOther);
 
       states.push(st);
+      blocks.push(block);
       body.appendChild(block);
     });
+
+    if (paged) {
+      // tab per question (its header, ✓ once it has an answer) + ‹ n / m › — above the blocks
+      const pager = el("div", "q-pager");
+      const tabsEl = el("div", "q-tabs");
+      questions.forEach((q, qi) => {
+        const tab = el("button", "q-tab", q.header || "Question " + (qi + 1));
+        tab.type = "button";
+        tab.title = q.question || "";
+        tab.addEventListener("click", (e) => { e.stopPropagation(); showPage(qi); });
+        tabs.push(tab);
+        tabsEl.appendChild(tab);
+      });
+      pager.appendChild(tabsEl);
+      const nav = el("div", "q-nav");
+      prevBtn = el("button", "q-nav-btn", "‹");
+      prevBtn.type = "button";
+      prevBtn.title = "Previous question";
+      prevBtn.addEventListener("click", (e) => { e.stopPropagation(); showPage(page - 1); });
+      counterEl = el("span", "q-counter");
+      nextBtn = el("button", "q-nav-btn", "›");
+      nextBtn.type = "button";
+      nextBtn.title = "Next question";
+      nextBtn.addEventListener("click", (e) => { e.stopPropagation(); showPage(page + 1); });
+      nav.appendChild(prevBtn);
+      nav.appendChild(counterEl);
+      nav.appendChild(nextBtn);
+      pager.appendChild(nav);
+      body.insertBefore(pager, body.firstChild);
+    }
 
     let warnEl = null;
     if (!answered) {
       const actions = el("div", "q-actions");
       warnEl = el("span", "q-warn", "");
       actions.appendChild(warnEl);
-      const submitBtn = el("button", "btn-approve", "Submit");
-      submitBtn.addEventListener("click", submit);
-      actions.appendChild(submitBtn);
+      // paged: "Next" until the last question, then "Submit" (the tabs still allow jumping ahead)
+      actionBtn = el("button", "btn-approve", "Submit");
+      actionBtn.addEventListener("click", () => {
+        if (paged && page < questions.length - 1) showPage(page + 1);
+        else submit();
+      });
+      actions.appendChild(actionBtn);
       body.appendChild(actions);
+    }
+    refreshTabs();
+    showPage(0);
+
+    function showPage(i) {
+      if (!paged) return;
+      page = Math.max(0, Math.min(blocks.length - 1, i));
+      blocks.forEach((b, j) => { b.hidden = j !== page; });
+      tabs.forEach((t, j) => t.classList.toggle("active", j === page));
+      counterEl.textContent = (page + 1) + " / " + blocks.length;
+      prevBtn.disabled = page === 0;
+      nextBtn.disabled = page === blocks.length - 1;
+      if (actionBtn) actionBtn.textContent = page < blocks.length - 1 ? "Next" : "Submit";
+      // a block that was hidden measured its textarea at 0 — size it now that it is visible
+      if (states[page] && states[page].grow) requestAnimationFrame(states[page].grow);
+    }
+
+    function refreshTabs() {
+      tabs.forEach((t, j) => {
+        const s = states[j];
+        t.classList.toggle("done", !!s && (s.selected.size > 0 || !!(s.customEl && s.customEl.value.trim())));
+      });
     }
 
     function submit() {
@@ -2625,6 +2986,7 @@
         s.selected.size === 0 && !((s.customEl && s.customEl.value || "").trim()));
       if (isEmpty) {
         if (warnEl) warnEl.textContent = "Pick an option or type an answer.";
+        showPage(0);
         if (states[0] && states[0].customEl) states[0].customEl.focus();
         return;
       }
@@ -2756,7 +3118,8 @@
   // Turn result / usage / error
   // -------------------------------------------------------------------------
   function turnResult(m) {
-    if (m.contextTokens != null) state.contextTokens = m.contextTokens; // kept for /compact note
+    if (m.contextTokens != null) state.contextTokens = m.contextTokens; // /compact note + Context meter
+    if (m.contextWindow) state.contextWindow = m.contextWindow;
     if (m.limits) state.limits = m.limits;
     taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     clearRunningAgents();   // turn ended → no agents can still be running
@@ -2771,9 +3134,14 @@
     const parts = [];
     if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
     if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
+    // costUsd = this turn's share (host: session total minus the previous total; null when unknown)
     if (m.costUsd) parts.push(formatCost(m.costUsd));
     if (parts.length) {
       curTurnFooter = el("div", "sys-note turn-footer", parts.join(" · "));
+      const tip = ["Duration · tokens generated in this turn · its cost"];
+      if (m.sessionCostUsd) tip.push("Session total so far: " + formatCost(m.sessionCostUsd));
+      tip.push("Cost at API list prices — with a Claude subscription this is not billed.");
+      curTurnFooter.title = tip.join("\n");
       appendNode(curTurnFooter);
     }
   }
@@ -2813,20 +3181,62 @@
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Background tasks (host→web background.tasks) — e.g. a log capture Claude started with
+  // run_in_background. They outlive the turn: the turn is handed back (you can answer right away, the
+  // message goes into the same CLI process) while the bar shows what still runs, each with a stop
+  // button (web→host background.stop). Host-driven: the list is replaced on every message.
+  // -------------------------------------------------------------------------
+  function renderBackgroundTasks(tasks) {
+    bgTasksEl.innerHTML = "";
+    if (!tasks.length) { bgTasksEl.hidden = true; return; }
+    bgTasksEl.hidden = false;
+    bgTasksEl.appendChild(el("div", "agents-running-head",
+      tasks.length === 1 ? "Background task running" : tasks.length + " background tasks running"));
+    tasks.forEach((t) => {
+      const row = el("div", "agent-run-row");
+      row.appendChild(el("span", "spinner"));
+      const label = el("span", "agent-run-label", t.description || "Background task");
+      label.title = t.description || "";
+      row.appendChild(label);
+      const stop = el("button", "tool-stop-btn");
+      stop.type = "button";
+      stop.title = "Stop this background task";
+      stop.setAttribute("aria-label", "Stop this background task");
+      stop.appendChild(iconStop());
+      stop.addEventListener("click", () => {
+        stop.disabled = true;
+        stop.title = "Stopping…";
+        post("background.stop", { id: t.id });
+      });
+      row.appendChild(stop);
+      bgTasksEl.appendChild(row);
+    });
+  }
+
   // A subagent (Task tool) finished: its own time · tokens · cost, shown as a subordinate
   // "Agent" footer (accent rail, no turn divider) so it reads as work nested inside the turn
   // rather than a second turn end. The turn's own footer (turnResult) still marks the real end,
   // and its totals include this subagent's usage.
+  // Two sources: current CLIs (2.1.287) report a subagent only through its hand-back — duration, tool
+  // uses, totalTokens (everything it processed, context included), model; no cost. Older CLIs sent a
+  // result event of their own (turnOutputTokens/costUsd).
   function agentResult(m) {
     agentEnd(m.parentToolUseId); // the subagent that produced this result is done
     const parts = [];
     if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
+    if (m.toolUses != null) parts.push(m.toolUses + (m.toolUses === 1 ? " tool use" : " tool uses"));
+    if (m.totalTokens) parts.push(formatNum(m.totalTokens) + " tok");
     if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
     if (m.costUsd) parts.push(formatCost(m.costUsd));
     if (!parts.length) return;
     const row = el("div", "sys-note agent-footer");
     row.appendChild(el("span", "agent-footer-label", m.isError ? "Agent failed" : "Agent finished"));
     row.appendChild(el("span", "agent-footer-meta", parts.join(" · ")));
+    if (m.totalTokens) {
+      row.title = "Tokens the subagent processed, its own context included"
+        + (m.model ? " · " + m.model : "") + "\nIts cost is part of the turn's cost.";
+    }
     appendNode(row);
   }
 
@@ -2850,6 +3260,7 @@
   function usageUpdate(m) {
     if (m.tokens != null) state.tokens = m.tokens;
     if (m.contextTokens != null) state.contextTokens = m.contextTokens;
+    if (m.contextWindow) state.contextWindow = m.contextWindow;
     if (m.sessionPct != null) state.limits.sessionPct = m.sessionPct;
     if (m.weeklyPct != null) state.limits.weeklyPct = m.weeklyPct;
     if (m.sessionResetsAt !== undefined) state.limits.sessionResetsAt = m.sessionResetsAt;
@@ -3330,6 +3741,8 @@
   }
   function iconCheck() { return svg('<path d="M5 13l4 4L19 7"/>', { class: "status-ok", width: 14, height: 14, "stroke-width": 2.2 }); }
   function iconCross() { return svg('<path d="M6 6l12 12M18 6L6 18"/>', { class: "status-err", width: 14, height: 14, "stroke-width": 2.2 }); }
+  function iconStop() { return svg('<rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>', { width: 13, height: 13 }); }
+  function iconStopped() { return svg('<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>', { class: "status-stopped", width: 14, height: 14, "stroke-width": 2.2 }); }
   function iconTrash() { return svg('<path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13"/>', { width: 14, height: 14, "stroke-width": 1.8 }); }
   // two offset sheets — the conventional "copy" glyph
   function iconCopy() { return svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M14 5.5A1.5 1.5 0 0012.5 4H6a2 2 0 00-2 2v6.5A1.5 1.5 0 005.5 14"/>', { width: 13, height: 13 }); }
@@ -3407,16 +3820,20 @@
     return state.status === "working" || state.status === "waiting-permission";
   }
   function canSend() {
-    return input.value.trim().length > 0 && !state.remoteActive && !isTurnActive()
-      && state.turnReview.files.length === 0; // must clear the post-turn edit review first (host also gates)
+    // A pending post-turn edit review no longer blocks the next prompt: the host keeps collecting the
+    // changes of the following turns into the same list (cumulative against the first baseline).
+    // text OR an attachment — a screenshot alone is a valid prompt
+    return (input.value.trim().length > 0 || state.attachments.length > 0)
+      && !state.remoteActive && !isTurnActive();
   }
-  // A pending post-turn edit review blocks the next prompt, so it should also block the same
-  // turn-disrupting actions a running turn does (new chat, start remote control).
+  // A pending post-turn edit review still blocks what would drop it (new chat, start remote control).
   function isBlocked() {
     return isTurnActive() || state.turnReview.files.length > 0;
   }
   function updateTurnLocks() {
     const blocked = isBlocked();
+    // while a turn runs, Claude may be editing the very files under review — no Keep/Discard/Finish then
+    turnReviewEl.classList.toggle("locked", isTurnActive());
     $("btn-new").disabled = blocked || state.remoteActive;
     btnRemote.disabled = blocked;
     // The history button stays clickable while blocked — the dropdown opens, but loading a session
@@ -3536,8 +3953,9 @@
   }
   // -------------------------------------------------------------------------
   // Prompt suggestion (host→web prompt.suggestion): the CLI's prediction of the next prompt, shown
-  // as ghost text (the placeholder) while the composer is empty. Tab takes it over into the input
-  // (edit it or send it with Enter), Escape drops it. Never sent on its own — Tab only.
+  // as ghost text (an overlay over the empty input, with the Tab hint right after the text) while
+  // the composer is empty. Tab takes it over into the input (edit it or send it with Enter), Escape
+  // drops it. Never sent on its own — Tab only.
   // -------------------------------------------------------------------------
   function onPromptSuggestion(text) {
     // arrives a few seconds after the turn — ignore it if the next turn already started
@@ -3546,13 +3964,18 @@
   }
   function setPromptSuggestion(text) {
     promptSuggestion = (text || "").trim();
-    input.placeholder = promptSuggestion || defaultPlaceholder;
+    suggestionText.textContent = promptSuggestion;
+    // the overlay replaces the placeholder while a suggestion exists (else both would show)
+    input.placeholder = promptSuggestion ? "" : defaultPlaceholder;
     composer.classList.toggle("has-suggestion", !!promptSuggestion);
     refreshSuggestionHint();
   }
   function refreshSuggestionHint() {
-    // the Tab hint only makes sense while the ghost text is actually visible
-    suggestionHint.hidden = !(promptSuggestion && input.value === "");
+    // ghost text + Tab hint only while the input is empty — typing hides them
+    const show = !!(promptSuggestion && input.value === "");
+    if (suggestionGhost.hidden === !show) return;
+    suggestionGhost.hidden = !show;
+    autoGrow(); // a long suggestion may wrap — make room for it (and shrink back once it's gone)
   }
   function acceptPromptSuggestion() {
     if (!promptSuggestion || input.value !== "") return false;
@@ -3580,7 +4003,9 @@
 
   function autoGrow() {
     input.style.height = "auto";
-    const h = Math.min(input.scrollHeight, maxInputHeight);
+    // the ghost overlay (empty input) needs as much height as its wrapped suggestion text
+    const ghostH = suggestionGhost && !suggestionGhost.hidden ? suggestionGhost.scrollHeight : 0;
+    const h = Math.min(Math.max(input.scrollHeight, ghostH), maxInputHeight);
     input.style.height = h + "px";
     input.style.overflowY = input.scrollHeight > maxInputHeight ? "auto" : "hidden";
   }
@@ -3602,6 +4027,7 @@
   }
   function renderAttachments() {
     attachmentsEl.innerHTML = "";
+    updateSendEnabled(); // an attachment alone makes the prompt sendable (and removing the last one not)
     if (!state.attachments.length) { attachmentsEl.hidden = true; return; }
     attachmentsEl.hidden = false;
     state.attachments.forEach((a) => {
@@ -3659,14 +4085,17 @@
     turnReviewEl.hidden = false;
 
     const head = el("div", "turn-review-head");
-    head.appendChild(el("span", "turn-review-title",
-      "Review " + files.length + " changed file" + (files.length === 1 ? "" : "s") + " before continuing"));
+    const title = el("span", "turn-review-title",
+      files.length + " changed file" + (files.length === 1 ? "" : "s") + " to review");
+    title.title = "You can keep prompting — the changes of further turns are added to this list. "
+      + "Each file is compared against how it was before Claude first touched it.";
+    head.appendChild(title);
     const discard = el("button", "turn-review-discard", "Discard all");
-    discard.title = "Revert every change from this turn (delete files created this turn)";
+    discard.title = "Revert every listed change (delete files Claude created since the review started)";
     discard.addEventListener("click", () => openConfirmModal({
       title: "Discard all changes",
       message: "Revert all " + files.length + " changed file" + (files.length === 1 ? "" : "s") +
-        " to how they were before this turn? Files Claude created this turn are deleted. This can't be undone.",
+        " to how they were before Claude first changed them? Files Claude created are deleted. This can't be undone.",
       confirmLabel: "Discard all",
       danger: true,
       onConfirm: () => post("editReview.discardAll", {}),
@@ -4103,6 +4532,10 @@
     if (s === "stopped") {
       state.remoteActive = false;
       remotePanel.hidden = true;
+      remotePanel.classList.remove("min");
+      remoteLink.removeAttribute("href"); // the next session draws its own code
+      remoteLink.hidden = true;
+      remoteQr.hidden = true;
       btnRemote.classList.remove("active");
       setRemoteLocked(false);
       btnRemoteEnd.disabled = false;
@@ -4110,19 +4543,36 @@
       return;
     }
 
+    const wasActive = state.remoteActive;
     state.remoteActive = true;
-    setPromptSuggestion(""); // the terminal owns the session now
-    remotePanel.hidden = false;
+    setPromptSuggestion(""); // the remote session owns the conversation now
+    remotePanel.hidden = false; // a banner above the transcript — the conversation below stays visible
     btnRemote.classList.add("active");
     setRemoteLocked(true);
     btnRemoteEnd.disabled = false;
-    closeAllOverlays();
-    applyStatus("remote", "Remote control active");
+    if (!wasActive) closeAllOverlays(); // not on every status poll
+    applyStatus("remote", m.activity === "busy" ? "Remote: Claude is working…" : "Remote control active");
     remoteStatus.classList.toggle("error", s === "error");
     btnRemoteEnd.textContent = s === "error" ? "Close" : "End remote session";
 
+    // link → QR code + copy (background session only; the console shows its own)
+    const url = m.url || "";
+    remoteLink.hidden = !url;
+    btnRemoteCopy.hidden = !url;
+    if (!url) remoteQr.hidden = true;
+    if (url && remoteLink.href !== url) {
+      remoteLink.href = url;
+      remoteLink.textContent = url.replace(/^https:\/\//, "");
+      drawQr(remoteQr, url);
+    }
+    btnRemoteTerminal.hidden = !m.canOpenTerminal;
+    remoteActivity.hidden = !m.activity;
+    remoteActivity.textContent = m.activity === "busy" ? "· working…" : m.activity === "idle" ? "· waiting" : "";
+    remoteActivity.classList.toggle("busy", m.activity === "busy");
+
     if (s === "starting") {
-      remoteStatus.textContent = "Opening the interactive session in the terminal…";
+      remoteStatus.textContent = m.inTerminal === false ? "Starting the remote session…"
+        : "Starting remote control…";
     } else if (s === "error") {
       remoteStatus.textContent = m.message || "Remote control failed.";
     } else { // ready
@@ -4130,6 +4580,38 @@
         || "Running in the terminal — scan the QR code or open the link shown there to connect from the Claude app or claude.ai/code.";
     }
   }
+
+  // QR code of the Remote Control link (qr.js: byte mode, ECC M) onto a canvas, with the quiet zone.
+  function drawQr(canvas, text) {
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    let modules;
+    try { modules = window.qrEncode(text); } catch (e) { modules = null; }
+    if (!modules) { canvas.hidden = true; return; }
+    canvas.hidden = false;
+    const n = modules.length;
+    const quiet = 2;
+    const scale = Math.floor(canvas.width / (n + quiet * 2)) || 1;
+    const offset = Math.floor((canvas.width - scale * n) / 2);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000";
+    for (let y = 0; y < n; y++)
+      for (let x = 0; x < n; x++)
+        if (modules[y][x]) ctx.fillRect(offset + x * scale, offset + y * scale, scale, scale);
+  }
+
+  btnRemoteCopy.addEventListener("click", () => {
+    const url = remoteLink.href;
+    if (!url) return;
+    copyText(url);
+    btnRemoteCopy.textContent = "Copied";
+    setTimeout(() => { btnRemoteCopy.textContent = "Copy link"; }, 1500);
+  });
+  btnRemoteTerminal.addEventListener("click", () => post("remote.openTerminal", {}));
+  // the head folds the code away (kept across status polls); its buttons don't fold
+  $("remote-head").addEventListener("click", () => remotePanel.classList.toggle("min"));
+  remotePanel.querySelector(".remote-actions").addEventListener("click", (e) => e.stopPropagation());
 
   btnRemote.addEventListener("click", () => {
     if (state.remoteActive || isTurnActive()) return;
@@ -4882,6 +5364,11 @@
         case "ready": return onReady();
         case "prompt.send": return runTurn(msg.text);
         case "turn.stop": return onStop();
+        // the host kills the command's shell → the CLI answers with a failed result (exit code 1)
+        case "tool.stop": return sendIn("tool.result", { id: msg.id, status: "error", summary: "Exit code 1" }, 150);
+        case "background.stop":
+          sendIn("background.tasks", { tasks: [] }, 200);
+          return sendIn("system.note", { id: nid("n"), text: "Background tasks stopped" }, 220);
         case "session.new": return onNew();
         case "session.listRequest": return sendIn("session.list", { sessions: fakeSessions }, 120);
         case "session.load": return onLoad(msg.sessionId);
@@ -5001,14 +5488,19 @@
 
     let mockActiveFileEnabled = true;
 
-    // ── remote control mock — link + QR, a "phone" connects after a while ──
+    // ── remote control mock — a CLI background session: banner, link + QR after "connecting",
+    //    then the "phone" works (busy) and goes idle again ──
     let mockRemote = false;
     function onRemoteStart() {
       mockRemote = true;
-      const url = "https://claude.ai/code?environment=env_mock01TTYKCwQH2jZuEBg9z2N7wB";
-      sendIn("remote.state", { state: "starting" }, 100);
-      sendIn("remote.state", { state: "ready", url, activeSessions: 0 }, 800);
-      sched(() => { if (mockRemote) handle({ type: "remote.state", state: "ready", url, activeSessions: 1 }); }, 4500);
+      const url = "https://claude.ai/code/session_01UYTEfqc2mYE1YV5CaWox1M";
+      const base = { inTerminal: false, canOpenTerminal: true };
+      sendIn("remote.state", Object.assign({ state: "starting" }, base), 100);
+      sendIn("remote.state", Object.assign({ state: "ready", message: "Connecting to Remote Control…", activity: "idle" }, base), 600);
+      const live = "This chat is live for Remote Control. Scan the code or open the link in the Claude app / claude.ai/code — what happens there shows up below. \"End remote session\" returns the chat to this window.";
+      sched(() => { if (mockRemote) handle(Object.assign({ type: "remote.state", state: "ready", url, message: live, activity: "idle" }, base)); }, 2200);
+      sched(() => { if (mockRemote) handle(Object.assign({ type: "remote.state", state: "ready", url, message: live, activity: "busy" }, base)); }, 5000);
+      sched(() => { if (mockRemote) handle(Object.assign({ type: "remote.state", state: "ready", url, message: live, activity: "idle" }, base)); }, 8000);
     }
     function onRemoteStop() {
       const wasActive = mockRemote;
@@ -5111,6 +5603,15 @@
         sendIn("usage.update", { contextTokens: post }, 1450);
         sendIn("turn.result", { sessionId: state.sessionId, costUsd: 0.198, tokens: { input: 0, output: 0, total: 0 }, turnOutputTokens: 0, contextTokens: post, durationMs: 1500, limits: state.limits }, 1500);
         sendIn("status", { state: "ready" }, 1550);
+        // fresh breakdown after the compact: the messages shrink to the summary
+        const u = mockContextUsage();
+        const msgs = u.categories.find((c) => c.name === "Messages");
+        const free = u.categories.find((c) => c.kind === "free");
+        free.tokens += msgs.tokens - 9000;
+        u.totalTokens -= msgs.tokens - 9000;
+        msgs.tokens = 9000;
+        u.percentage = Math.round(u.totalTokens / u.maxTokens * 100);
+        sendIn("context.usage", { usage: u }, 1700);
         return;
       }
       // decision #8 — slash commands answer via the result line; the host renders
@@ -5334,14 +5835,58 @@
           costUsd: 0.0123,
           tokens: { input: 1200, output: 340, total: 1540 },
           turnOutputTokens: 340,
-          contextTokens: 26540, // ≈ 13% of the 200k window
+          contextTokens: 188900,
+          contextWindow: 1000000,
           durationMs: 4200,
           limits: mockLimits(15, 35),
         });
         handle({ type: "status", state: "ready" });
+        // the CLI's answer to the get_context_usage request sent at the result
+        sendIn("context.usage", { usage: mockContextUsage() }, 250);
         // the CLI delivers its next-prompt prediction a few seconds after the result
         sendIn("prompt.suggestion", { text: "run the program", sessionId: state.sessionId }, 1500);
+        // a background task outlives the turn (bar above the composer, stop button → background.stop)
+        sendIn("background.tasks", { tasks: [{ id: "bg-mock", description: "Capture staging log (logcapture)" }] }, 300);
       }, delay + 140);
+    }
+
+    // shape of WebViewBridge.BuildContextUsage (numbers from a real 2.1.294 /context, scaled up)
+    function mockContextUsage() {
+      return {
+        totalTokens: 188900, maxTokens: 1000000, percentage: 19,
+        autoCompactThreshold: 967000, autoCompactEnabled: true, model: "claude-opus-5-5[1m]",
+        categories: [
+          { name: "System prompt", tokens: 9600, kind: "used" },
+          { name: "System tools", tokens: 25600, kind: "used" },
+          { name: "MCP tools", tokens: 14600, kind: "used" },
+          { name: "MCP server instructions", tokens: 103, kind: "used" },
+          { name: "MCP tools (deferred)", tokens: 98100, kind: "deferred" },
+          { name: "System tools (deferred)", tokens: 24700, kind: "deferred" },
+          { name: "Custom agents", tokens: 374, kind: "used" },
+          { name: "Memory files", tokens: 900, kind: "used" },
+          { name: "Skills", tokens: 7200, kind: "used" },
+          { name: "Messages", tokens: 130600, kind: "used" },
+          { name: "Free space", tokens: 778000, kind: "free" },
+          { name: "Autocompact buffer", tokens: 33000, kind: "buffer" },
+        ],
+        memoryFiles: [
+          { name: "CLAUDE.md", detail: "Project · C:\\Users\\dev\\CodeAstrogator\\CLAUDE.md", tokens: 700 },
+          { name: "MEMORY.md", detail: "AutoMem · C:\\Users\\dev\\.claude\\projects\\x\\memory\\MEMORY.md", tokens: 200 },
+        ],
+        mcpServers: [
+          { name: "unity-mcp", count: 52, tokens: 9800 },
+          { name: "claude_ai_Claude_Docs", count: 8, tokens: 4800 },
+        ],
+        agents: [
+          { name: "caveman:cavecrew-builder", detail: "plugin", tokens: 136 },
+          { name: "caveman:cavecrew-investigator", detail: "plugin", tokens: 114 },
+          { name: "caveman:cavecrew-reviewer", detail: "plugin", tokens: 124 },
+        ],
+        skills: [
+          { name: "unity-docs", detail: "userSettings", tokens: 373 },
+          { name: "dataviz", detail: "builtin", tokens: 480 },
+        ],
+      };
     }
 
     function onDecision(msg) {

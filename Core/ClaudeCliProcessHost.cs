@@ -64,31 +64,50 @@ namespace CodeAstrogator.Core
             };
 
             process.Start();
+            var pid = process.Id;
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
+            try { request.ProcessStarted?.Invoke(pid); } catch { /* listener errors are not ours */ }
 
-            // One stream-json user message, then EOF. The CLI still finishes the turn (and delivers
-            // its prompt suggestion) before exiting. stdout is already being read above, so a large
-            // message cannot deadlock against a full stdout pipe.
+            // One stream-json user message. stdout is already being read above, so a large message
+            // cannot deadlock against a full stdout pipe. stdin stays open: the session service closes
+            // it at the turn's result (the CLI then finishes the turn, delivers its prompt suggestion
+            // and exits) — or keeps it open while background tasks run, for the next prompt.
+            var input = new StdinInput(process.StandardInput);
             await process.StandardInput.WriteAsync(StreamJsonInput.BuildUserMessage(request.Prompt, request.ImagePaths)).ConfigureAwait(false);
-            process.StandardInput.Close();
+            await process.StandardInput.FlushAsync().ConfigureAwait(false);
+            if (request.InputOpened != null)
+            {
+                try { request.InputOpened(input); } catch { /* listener errors are not ours */ }
+            }
+            else
+            {
+                input.Close(); // nobody can close it later — EOF right away, as before
+            }
 
             var cancelled = false;
             using (ct.Register(() =>
             {
                 cancelled = true;
-                try
+                // Kill the whole tree, not just claude.exe: a running Bash/PowerShell command (and
+                // whatever it launched) would otherwise survive the stop as an orphan. Off the calling
+                // thread — Cancel() comes from the UI thread and taskkill takes a moment.
+                _ = Task.Run(() =>
                 {
-                    if (!process.HasExited)
-                        process.Kill();
-                }
-                catch
-                {
-                    // process already gone
-                }
+                    try
+                    {
+                        if (!process.HasExited)
+                            ProcessTree.KillTree(pid);
+                    }
+                    catch
+                    {
+                        // process already gone / disposed
+                    }
+                });
             }))
             {
                 var exitCode = await exited.Task.ConfigureAwait(false);
+                input.Close(); // the process is gone — later sends must fail, not throw
                 // Drain async output handlers.
                 try { process.WaitForExit(); } catch { }
 
@@ -174,6 +193,47 @@ namespace CodeAstrogator.Core
             sb.Append('\\', backslashes * 2);
             sb.Append('"');
             return sb.ToString();
+        }
+
+        /// <summary>The process's stdin as <see cref="IClaudeTurnInput"/>.</summary>
+        private sealed class StdinInput : IClaudeTurnInput
+        {
+            private readonly object _lock = new object();
+            private readonly System.IO.StreamWriter _stdin;
+            private bool _closed;
+
+            public StdinInput(System.IO.StreamWriter stdin) => _stdin = stdin;
+
+            public bool TrySend(string line)
+            {
+                lock (_lock)
+                {
+                    if (_closed)
+                        return false;
+                    try
+                    {
+                        _stdin.Write(line);
+                        _stdin.Flush();
+                        return true;
+                    }
+                    catch
+                    {
+                        _closed = true; // broken pipe — the process is exiting
+                        return false;
+                    }
+                }
+            }
+
+            public void Close()
+            {
+                lock (_lock)
+                {
+                    if (_closed)
+                        return;
+                    _closed = true;
+                    try { _stdin.Close(); } catch { /* already gone */ }
+                }
+            }
         }
 
         /// <summary>Keeps the last N lines of stderr for diagnostics.</summary>

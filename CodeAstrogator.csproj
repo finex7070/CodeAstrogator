@@ -29,6 +29,8 @@
     <Reference Include="System.IO.Compression.FileSystem" />
     <!-- MEF attributes ([Export]/[Import]) for the inline edit-review editor adornments -->
     <Reference Include="System.ComponentModel.Composition" />
+    <!-- ProcessTree lists the CLI's child processes (Win32_Process) for the per-command stop button. -->
+    <Reference Include="System.Management" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.14.40265" ExcludeAssets="runtime" />

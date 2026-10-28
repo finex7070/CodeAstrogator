@@ -24,9 +24,21 @@ namespace CodeAstrogator.Services
         /// <summary>True once the id is a real CLI session id (resumable).</summary>
         public bool HasCliSession { get; set; }
 
-        /// <summary>Context size after the last turn (input incl. cache + output) —
-        /// drives the "Ctx n%" statusbar meter.</summary>
+        /// <summary>Context size after the last turn (input incl. cache + output) — the "Context n%"
+        /// statusbar meter falls back to it (with <see cref="ContextWindow"/>) without a breakdown.</summary>
         public long ContextTokens { get; set; }
+
+        /// <summary>The model's context-window size as last reported by the CLI; 0 = unknown.</summary>
+        public long ContextWindow { get; set; }
+
+        /// <summary>The CLI's context breakdown after the last turn (the <c>context.usage</c> payload,
+        /// see <c>WebViewBridge.BuildContextUsage</c>); null until the first turn reported one.</summary>
+        public JObject? ContextUsage { get; set; }
+
+        /// <summary>The CLI's session cost total (<c>result.total_cost_usd</c>) after the last turn. That
+        /// value is cumulative over the whole session — even across <c>--resume</c> — so a turn's own cost
+        /// is the difference to this. Null = not known yet (record older than this field, imported).</summary>
+        public double? CostTotalUsd { get; set; }
 
         public string Preview =>
             Messages.LastOrDefault(m => m.Value<string>("text") is { Length: > 0 })
@@ -91,6 +103,9 @@ namespace CodeAstrogator.Services
                         UpdatedAtUtc = ParseTimestamp(s["updatedAt"]),
                         HasCliSession = s.Value<bool?>("hasCliSession") ?? false,
                         ContextTokens = s.Value<long?>("contextTokens") ?? 0,
+                        ContextWindow = s.Value<long?>("contextWindow") ?? 0,
+                        ContextUsage = s["contextUsage"] as JObject,
+                        CostTotalUsd = s.Value<double?>("costTotalUsd"),
                     };
                     foreach (var m in s["messages"] as JArray ?? new JArray())
                     {
@@ -128,6 +143,9 @@ namespace CodeAstrogator.Services
                         ["updatedAt"] = s.UpdatedAtUtc.ToString("o"),
                         ["hasCliSession"] = s.HasCliSession,
                         ["contextTokens"] = s.ContextTokens,
+                        ["contextWindow"] = s.ContextWindow,
+                        ["contextUsage"] = s.ContextUsage?.DeepClone(),
+                        ["costTotalUsd"] = s.CostTotalUsd,
                         ["messages"] = messages,
                     });
                     if (sessions.Count >= MaxPersistedSessions)

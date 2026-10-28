@@ -55,22 +55,27 @@
       </button>
     </div>
 
-    <!-- Tasks banner (below the header, above the transcript). Aggregates the CLI's Task* tool
-         calls (TaskCreate/TaskUpdate) into a live checklist with per-task status, so a long
-         multi-step turn can be followed at a glance instead of scrolling the tool cards. The head
-         collapses the list; X dismisses it for the session (a brand-new TaskCreate re-shows it).
-         Driven entirely by app.js (renderTasksBanner) — no host changes. -->
-    <div class="notice-banner tasks-banner" id="tasks-banner" role="status" hidden>
-      <div class="tasks-head" id="tasks-head" title="Click to collapse/expand">
-        <svg class="notice-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-        <span class="tasks-title">Tasks</span>
-        <span class="tasks-count" id="tasks-count"></span>
-        <svg class="tasks-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-        <button class="notice-close tasks-close" id="tasks-close" title="Dismiss" aria-label="Dismiss">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
+    <!-- Remote control banner (below the header, above the transcript — in the flow, so the transcript stays
+         visible and mirrors the conversation live). Head: status + actions + collapse; body: QR + link. -->
+    <div class="notice-banner remote-panel" id="remote-panel" hidden>
+      <div class="remote-head" id="remote-head" title="Click to show/hide the code">
+        <svg class="notice-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+        <span class="tasks-title">Remote Control</span>
+        <span class="remote-activity" id="remote-activity" hidden></span>
+        <span class="remote-actions">
+          <button class="remote-btn" id="btn-remote-copy" hidden>Copy link</button>
+          <button class="remote-btn" id="btn-remote-terminal" hidden title="Open the same session in a terminal (closing it leaves the session running)">Open in terminal</button>
+          <button class="remote-btn primary" id="btn-remote-end">End remote session</button>
+        </span>
+        <svg class="tasks-chevron remote-chevron" id="btn-remote-min" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
       </div>
-      <div class="tasks-list" id="tasks-list"></div>
+      <div class="remote-body">
+        <canvas class="remote-qr" id="remote-qr" width="120" height="120" title="Scan with your phone" hidden></canvas>
+        <div class="remote-info">
+          <a class="remote-link" id="remote-link" target="_blank" rel="noopener" hidden></a>
+          <div class="remote-status" id="remote-status">Starting remote control…</div>
+        </div>
+      </div>
     </div>
 
     <!-- Notification stack (below the header banners, above the transcript). Transient,
@@ -90,19 +95,29 @@
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
         Jump to bottom
       </button>
-
-      <!-- Remote control mode (covers the transcript while active) -->
-      <div class="remote-panel" id="remote-panel" hidden>
-        <div class="remote-card">
-          <div class="remote-title">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
-            Remote Control
-          </div>
-          <div class="remote-status" id="remote-status">Starting remote control…</div>
-          <button class="remote-btn primary" id="btn-remote-end">End remote session</button>
-        </div>
-      </div>
     </div>
+
+    <!-- Live lists above the composer, in this order: 1. tasks, 2. background tasks, 3. running subagents. -->
+
+    <!-- Tasks: aggregates the CLI's Task* tool calls (TaskCreate/TaskUpdate) into a live checklist with
+         per-task status, so a long multi-step turn can be followed at a glance instead of scrolling the
+         tool cards. The head collapses the list; X dismisses it for the session (a brand-new TaskCreate
+         re-shows it). Driven entirely by app.js (renderTasksBanner) — no host changes. -->
+    <div class="tasks-banner" id="tasks-banner" role="status" hidden>
+      <div class="tasks-head" id="tasks-head" title="Click to collapse/expand">
+        <svg class="notice-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span class="tasks-title">Tasks</span>
+        <span class="tasks-count" id="tasks-count"></span>
+        <svg class="tasks-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        <button class="notice-close tasks-close" id="tasks-close" title="Dismiss" aria-label="Dismiss">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="tasks-list" id="tasks-list"></div>
+    </div>
+
+    <!-- Background tasks still running after the turn (e.g. a log capture) — each with a stop button -->
+    <div class="agents-running bg-tasks" id="bg-tasks" hidden></div>
 
     <!-- Running Task subagents (live list with spinners while they run) -->
     <div class="agents-running" id="agents-running" hidden></div>
@@ -114,7 +129,11 @@
     <section class="composer-wrap" id="composer-wrap">
       <div class="composer" id="composer">
         <div class="attachments" id="attachments" hidden></div>
-        <textarea id="input" class="input" rows="1" placeholder="Chart a course for Claude…   ·   Shift+Enter for a new line" spellcheck="false"></textarea>
+        <div class="input-wrap">
+          <textarea id="input" class="input" rows="1" placeholder="Chart a course for Claude…" spellcheck="false"></textarea>
+          <!-- Prompt suggestion as ghost text over the empty input, with the Tab hint right after it -->
+          <div class="suggestion-ghost" id="suggestion-ghost" hidden aria-hidden="true"><span class="suggestion-text" id="suggestion-text"></span><span class="suggestion-hint" title="Tab puts the suggested prompt into the input — edit it or send it with Enter. Esc dismisses it."><kbd>Tab</kbd> to use</span></div>
+        </div>
         <div class="toolbar">
           <div class="toolbar-left">
             <button class="icon-btn small" id="btn-plus" title="Add" aria-label="Add" aria-haspopup="true">
@@ -130,7 +149,7 @@
             </button>
           </div>
           <div class="toolbar-right">
-            <span class="suggestion-hint" id="suggestion-hint" hidden title="Tab puts the suggested prompt into the input — edit it or send it with Enter. Esc dismisses it."><kbd>Tab</kbd> to use</span>
+            <span class="newline-hint" title="Enter sends · Shift+Enter inserts a line break"><kbd>Shift+Enter</kbd> for a new line</span>
             <button class="modelmode-btn" id="btn-modelmode" aria-haspopup="true">
               <span id="modelmode-label">Opus 4.8 · Ask</span>
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
@@ -159,6 +178,12 @@
         <span class="meter-label" id="label-weekly">Weekly 0%</span>
         <span class="meter"><span class="meter-fill" id="meter-weekly"></span></span>
       </div>
+      <div class="status-sep"></div>
+      <!-- Context window usage; click opens the breakdown by category -->
+      <button type="button" class="status-meter status-context stale" id="status-context" aria-haspopup="dialog" aria-expanded="false" title="Context usage">
+        <span class="meter-label" id="label-context">Context —</span>
+        <span class="meter"><span class="meter-fill" id="meter-context"></span></span>
+      </button>
       <div class="status-grow"></div>
       <div class="plan-badge" id="plan-badge" hidden>
         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20V10M12 20V4M19 20v-6"/></svg>

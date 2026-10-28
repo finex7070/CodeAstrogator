@@ -5,7 +5,10 @@ das die **Claude Code CLI** integriert (`claude -p --input-format stream-json --
 ein Prozess pro Turn, Prompt als eine User-Message via stdin) plus **MCP-Permission-Hook** (`--permission-prompt-tool` → in-process
 Localhost-MCP-Server für interaktive Diff-Approvals). Der frühere persistente bidirektionale Modus
 (ein langlebiger Prozess über mehrere Turns) wurde in 0.8.0 entfernt — nicht wieder einführen (s. NOTES).
-stream-json-**Input** pro Turn (seit 2026-10-08) ist davon unabhängig: eine Message, stdin zu, Prozess endet.
+stream-json-**Input** pro Turn (seit 2026-10-08) ist davon unabhängig: eine Message, stdin zu beim `result`,
+Prozess endet. **Einzige Ausnahme (2026-10-28):** laufen Background-Tasks, wird der Turn beim `result`
+freigegeben, Prozess + stdin bleiben offen, der nächste Prompt geht in denselben Prozess (s. NOTES
+„Background tasks outlive the turn") — kein Rückweg zum persistenten Modus.
 
 ## Pflichtlektüre vor Änderungen
 - `docs/claude-vs-2026-plan.md` — verbindliche Spec (Teil A Architektur, Teil B UI-Kontrakt).
@@ -115,13 +118,27 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   `%TEMP%\claude\<MungePath(cwd)>\<session>\tasks\<task_id>.output` (UTF-8, angekündigt per
   `system/task_started` mit `tool_use_id`, s. NOTES „Live console output", `TaskOutputWatcher`). Beim
   CLI-Update gegentesten; fällt sie weg, zeigt die Card einfach wieder nur das Endergebnis.
+- **Stop von Commands (2026-10-28):** Turn-Stop killt den **ganzen Prozessbaum** der CLI (`ProcessTree.KillTree`
+  = `taskkill /T /F`) — ein bloßes `Process.Kill()` ließ laufende Bash/PowerShell-Kinder verwaist weiterlaufen.
+  Der Stop-Button pro Shell-Card (`tool.stop`) findet die Shell unter den Kindern von `claude.exe` über deren
+  **undokumentierte Kommandozeile** (PowerShell: `cmd.exe … > …\tasks\<task_id>.output`, Bash: `eval '<command>'`,
+  s. NOTES „Stopping commands") — beim CLI-Update gegentesten.
+- **Remote Control (seit 1.0.0, CLI 2.1.29x+):** läuft als **CLI-Hintergrund-Session** (`claude --bg --resume <id>
+  --remote-control <name>`, `Services/BackgroundRemoteSession`) — kein Konsolenfenster; Link aus `claude logs <id>` → QR im
+  Panel; Status/Ende über `claude agents --json`; Ende = `claude stop` + `claude rm`; Transcript wird live aus der Session-
+  `.jsonl` gespiegelt; überlebt VS (Re-Adopt beim nächsten Start). Ausgabeformate undokumentiert (s. NOTES „Remote
+  Control") — beim CLI-Update gegentesten. **`claude remote-control --help` NICHT aufrufen** (ignoriert `--help`, startet
+  einen Server). Ältere CLI ohne `--bg` → alter Konsolen-Weg (`RemoteTerminalLauncher`).
 - **Prompt-Suggestions + stream-json-Input (2026-10-08, CLI 2.1.287):** Der Prompt geht als **stream-json-
-  User-Message** über stdin (`--input-format stream-json`, `Core/StreamJsonInput`, danach stdin zu — weiterhin
+  User-Message** über stdin (`--input-format stream-json`, `Core/StreamJsonInput`, stdin zu beim `result` — weiterhin
   ein Prozess pro Turn, NICHT der entfernte persistente Modus). Nur so liefert die CLI `prompt_suggestion`
   (Textmodus: erzeugt, aber nie ausgegeben). Die Suggestion kommt 4–11 s **nach** `result`; deshalb endet der
   Turn bei `result` (Session-Service gibt den Turn früh zurück, Restprozess liefert nur noch die Suggestion und
-  wird vom nächsten Turn gekillt) — außer es laufen Background-Tasks (dann Folge-Turn im selben Prozess, s.
-  NOTES „Prompt suggestions"). Beim CLI-Update gegentesten.
+  wird vom nächsten Turn gekillt) — laufen Background-Tasks, bleibt der Prozess mit offenem stdin „idle“ (nächster
+  Prompt per stdin hinein, Folge-Turn der CLI wird angezeigt; `--replay-user-messages` markiert, wann die CLI
+  einen so geschriebenen Prompt aufnimmt — ein `result` davor gehört zum Folge-Turn, s. NOTES „Background tasks
+  outlive the turn").
+  Beim CLI-Update gegentesten.
 - Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
   `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
   des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.

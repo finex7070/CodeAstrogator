@@ -19,8 +19,16 @@ namespace CodeAstrogator.Services
     /// Raises <see cref="Ended"/> exactly once (on a background thread) when the console closes or
     /// <see cref="EndAsync"/> is called.
     /// </summary>
-    internal sealed class RemoteTerminalLauncher : IDisposable
+    internal sealed class RemoteTerminalLauncher : IRemoteSession
     {
+        // The console shows link + status itself — nothing of that is readable from here.
+        public string? Url => null;
+        public string? SessionId => null;
+        public string? Activity => null;
+        public bool CanOpenTerminal => false;
+        public event Action? Changed { add { } remove { } }
+        public void OpenTerminal() { }
+
         private Process? _process;
         private volatile bool _active;
         private int _ended; // 0 → not yet; set once via Interlocked
@@ -42,7 +50,7 @@ namespace CodeAstrogator.Services
         /// current chat's CLI session id (null/empty → start a fresh remote session). Returns false if
         /// the console couldn't be started.
         /// </summary>
-        public Task<bool> StartAsync(string claudeExe, string? resumeSessionId, string? workingDirectory, CancellationToken ct)
+        public Task<bool> StartAsync(string claudeExe, string? resumeSessionId, string? workingDirectory, string? name, CancellationToken ct)
         {
             StartedUtc = DateTime.UtcNow;
             _ended = 0;

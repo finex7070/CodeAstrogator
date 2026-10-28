@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -39,23 +40,72 @@ namespace CodeAstrogator.Core
     /// Turn orchestration (Teil A §A6/§A7): starts one CLI process per turn,
     /// feeds NDJSON lines through the parser and re-raises domain events.
     /// UI-free; the bridge layer maps events onto the WebView message contract.
+    /// <para>
+    /// Process lifetime (see <see cref="CliProcess"/>): the prompt goes in as one stream-json message
+    /// and stdin is closed at the turn's <c>result</c> — the CLI then finishes up (prompt suggestion) and
+    /// exits. Exception: while <b>background tasks</b> run, the turn is handed back at its result but
+    /// process and stdin stay open, so the tasks keep running, the next prompt is written into the same
+    /// process, and the CLI's own follow-up turn (when a task finishes) is still shown.
+    /// </para>
     /// </summary>
     public sealed class ClaudeSessionService
     {
         private readonly IClaudeProcessHost _processHost;
-        private CancellationTokenSource? _turnCts;
         private int _busy; // 0 = idle, 1 = turn running
 
-        // A turn that was handed back at its `result` while its process keeps running to deliver the
-        // prompt suggestion (see RunTurnAsync). Killed when the next turn starts or the session changes.
-        private readonly object _drainLock = new object();
-        private CancellationTokenSource? _drainCts;
-        private Task? _drainDone;
+        // The CLI process of the current or last turn, while it is still alive. Guarded by _procLock.
+        private readonly object _procLock = new object();
+        private CliProcess? _proc;
 
         // The result-event error text of the current turn (e.g. "API Error: …",
         // "Credit balance is too low"). The CLI reports many failures here on stdout
         // while stderr stays empty, so we fold it into the turn's error message.
         private string? _lastResultError;
+
+        private int _contextRequestSeq;
+
+        private enum ProcState
+        {
+            /// <summary>A turn runs in it: every event is forwarded; its result may end the turn.</summary>
+            Turn,
+            /// <summary>Turn handed back, background tasks keep it alive, stdin open: events are still
+            /// forwarded (task updates, a follow-up turn), the next prompt may be written into it.</summary>
+            Idle,
+            /// <summary>Turn handed back, stdin closed: only the prompt suggestion is forwarded.</summary>
+            Draining,
+            /// <summary>Being killed (next turn / session change): nothing is forwarded any more.</summary>
+            Ending,
+        }
+
+        /// <summary>One running <c>claude -p</c> process.</summary>
+        private sealed class CliProcess
+        {
+            public readonly CancellationTokenSource Cts = new CancellationTokenSource();
+            public readonly NdjsonParser Parser = new NdjsonParser();
+            public readonly TaskCompletionSource<bool> Exited =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            public ProcState State = ProcState.Turn;
+            public IClaudeTurnInput? Input;
+            public int Pid;
+            public string LaunchKey = "";
+            public bool Suggestions;
+            public int BackgroundTasks;
+            /// <summary>False once a follow-up turn is on its way (a task finished) — a prompt must not
+            /// be queued behind it; such a process is replaced instead.</summary>
+            public bool Reusable = true;
+            /// <summary>The running turn is the CLI's own follow-up — nobody awaits it, so the process
+            /// exit has to complete it.</summary>
+            public bool FollowUp;
+            /// <summary>Launched with <c>--replay-user-messages</c>: the CLI acknowledges each stdin message
+            /// when it takes it up, so a prompt may even be written while a follow-up is on its way.</summary>
+            public bool Replay;
+            /// <summary>Prompts written into this process that the CLI has not taken up yet. A result
+            /// arriving meanwhile belongs to the follow-up turn queued before them, not to our prompt.</summary>
+            public int AwaitingReplay;
+            /// <summary>Completes when the running turn ends: null = handed back at its result
+            /// (TurnCompleted already raised), otherwise the exit of the process.</summary>
+            public TaskCompletionSource<ClaudeTurnExit?>? TurnDone;
+        }
 
         public ClaudeSessionService(IClaudeProcessHost processHost)
         {
@@ -95,6 +145,22 @@ namespace CodeAstrogator.Core
 
         public bool IsBusy => Volatile.Read(ref _busy) == 1;
 
+        /// <summary>Process id of the CLI running the current turn or keeping background tasks alive;
+        /// null otherwise (also once a handed-back process only produces its prompt suggestion).</summary>
+        public int? ActiveProcessId
+        {
+            get
+            {
+                lock (_procLock)
+                {
+                    var p = _proc;
+                    return p != null && p.Pid > 0 && (p.State == ProcState.Turn || p.State == ProcState.Idle)
+                        ? p.Pid
+                        : (int?)null;
+                }
+            }
+        }
+
         /// <summary>Raised (on a background thread) for every parsed domain event.</summary>
         public event Action<ClaudeEvent>? EventReceived;
 
@@ -111,7 +177,7 @@ namespace CodeAstrogator.Core
         /// <summary>Forgets the session id so the next turn starts a fresh conversation.</summary>
         public void ResetSession()
         {
-            CancelDrain();
+            _ = EndProcessAsync();
             SessionId = null;
             TotalTokens = 0;
         }
@@ -119,56 +185,73 @@ namespace CodeAstrogator.Core
         /// <summary>Attaches to an existing CLI session (history → --resume).</summary>
         public void AttachSession(string sessionId)
         {
-            CancelDrain();
+            _ = EndProcessAsync();
             SessionId = sessionId;
             TotalTokens = 0;
         }
 
-        /// <summary>Kills the process of an already-completed turn that is still waiting for its
-        /// prompt suggestion (nothing else of that process is forwarded any more).</summary>
-        private Task? CancelDrain()
-        {
-            CancellationTokenSource? cts;
-            Task? done;
-            lock (_drainLock)
-            {
-                cts = _drainCts;
-                done = _drainDone;
-            }
-            // outside the lock: cancelling may run the turn's continuation (and its cleanup) inline
-            try { cts?.Cancel(); }
-            catch (ObjectDisposedException) { } // the process exited on its own in the meantime
-            return done;
-        }
-
+        /// <summary>Stops the running turn (kills its process — and with it any background task).</summary>
         public void StopTurn()
         {
-            try { _turnCts?.Cancel(); }
+            CliProcess? p;
+            lock (_procLock)
+                p = _proc != null && _proc.State == ProcState.Turn ? _proc : null;
+            Cancel(p); // the exit completes the turn (WasCancelled)
+        }
+
+        /// <summary>Kills a process that only lives on for its background tasks (no turn running) —
+        /// every background task ends with it. The conversation itself is unaffected.</summary>
+        public void StopBackgroundTasks()
+        {
+            CliProcess? p;
+            lock (_procLock)
+                p = _proc != null && _proc.State == ProcState.Idle ? _proc : null;
+            Cancel(p);
+        }
+
+        /// <summary>Kills whatever process is left (tool window closing).</summary>
+        public void Shutdown() => _ = EndProcessAsync();
+
+        private static void Cancel(CliProcess? p)
+        {
+            try { p?.Cts.Cancel(); }
             catch (ObjectDisposedException) { }
+        }
+
+        /// <summary>Ends the lingering process (suggestion pending / background tasks) and waits ≤ 5 s
+        /// for it to exit, so two processes never write the same session.</summary>
+        private async Task EndProcessAsync()
+        {
+            CliProcess? p;
+            lock (_procLock)
+            {
+                p = _proc;
+                _proc = null;
+                if (p != null && p.State != ProcState.Turn)
+                    p.State = ProcState.Ending;
+            }
+            if (p == null)
+                return;
+            Cancel(p);
+            await Task.WhenAny(p.Exited.Task, Task.Delay(5000)).ConfigureAwait(false);
         }
 
         /// <summary>
         /// Runs one prompt. Throws <see cref="InvalidOperationException"/> when a turn
-        /// is already running or the executable cannot be resolved.
+        /// is already running or the executable cannot be resolved. Returns when the turn is over
+        /// (handed back at its result, or the process exited).
         /// </summary>
         public async Task RunTurnAsync(string prompt, string? executableOverride, string? workingDirectory,
-            System.Collections.Generic.IReadOnlyList<string>? imagePaths = null)
+            IReadOnlyList<string>? imagePaths = null)
         {
             if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
                 throw new InvalidOperationException("A turn is already running.");
 
-            // Set once this turn was handed back early (at its result) — from then on the busy flag and
-            // TurnCompleted belong to whoever runs next, and only the prompt suggestion is forwarded.
-            var completedEarly = false;
-            var processDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            // Set once the turn was handed back at its result — from then on the busy flag belongs to
+            // whoever runs next.
+            var handedBack = false;
             try
             {
-                // The previous turn's process may still be generating its suggestion — end it first,
-                // so two processes never write the same session.
-                var draining = CancelDrain();
-                if (draining != null)
-                    await Task.WhenAny(draining, Task.Delay(5000)).ConfigureAwait(false);
-
                 var exe = ClaudeExecutableLocator.Locate(executableOverride)
                           ?? throw new InvalidOperationException(
                               "Claude Code CLI not found. Install it (npm i -g @anthropic-ai/claude-code) " +
@@ -179,6 +262,7 @@ namespace CodeAstrogator.Core
                 var capabilities = await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false);
                 AskPermissionModeArg = capabilities.AskPermissionModeArg;
                 var suggestions = Settings.PromptSuggestions && capabilities.SupportsPromptSuggestions;
+                var replay = capabilities.SupportsReplayUserMessages;
 
                 // Pin the mode for this turn: the process below keeps it for its whole lifetime,
                 // even if the UI changes Settings.PermissionMode mid-turn (see LaunchedPermissionMode).
@@ -186,113 +270,30 @@ namespace CodeAstrogator.Core
                 EditsRouteThroughHook = Settings.ReviewEditsAtTurnEnd && Settings.PermissionMode == "acceptEdits";
                 _lastResultError = null;
 
-                ClaudeTurnExit exit;
+                ClaudeTurnExit? exit;
                 var retriedWithoutResume = false;
                 while (true)
                 {
-                    var request = new ClaudeTurnRequest
+                    var request = BuildRequest(prompt, exe, workingDirectory, imagePaths, suggestions, replay);
+                    var launchKey = BuildLaunchKey(request);
+
+                    // Background tasks keep the last process alive with its stdin open: if it was
+                    // launched with the same settings, the prompt goes into it — the tasks keep running.
+                    var turnDone = TryContinueInLiveProcess(request, launchKey);
+                    if (turnDone == null)
                     {
-                        Prompt = DecoratePrompt(prompt),
-                        ExecutablePath = exe,
-                        SessionId = SessionId,
-                        Model = Settings.Model,
-                        Effort = Settings.Effort,
-                        WorkingDirectory = workingDirectory,
-                        PermissionMode = MapPermissionMode(),
-                    };
-                    if (imagePaths != null)
-                    {
-                        foreach (var image in imagePaths)
-                            request.ImagePaths.Add(image);
+                        // Anything still lingering (suggestion pending, background tasks under other
+                        // settings) ends first, so two processes never write the same session.
+                        await EndProcessAsync().ConfigureAwait(false);
+                        turnDone = StartProcess(request, launchKey, suggestions, replay);
                     }
 
-                    // Route tool permissions through the in-process MCP bridge (Teil A §A5),
-                    // except in bypass mode (the CLI ignores the prompt tool there anyway).
-                    if (PermissionBridge?.IsAvailable == true
-                        && !string.IsNullOrEmpty(PermissionBridge.McpConfigPath)
-                        && Settings.PermissionMode != "bypass")
+                    exit = await turnDone.ConfigureAwait(false);
+                    if (exit == null)
                     {
-                        request.ExtraArgs.Add("--mcp-config");
-                        request.ExtraArgs.Add(ClaudeCliProcessHost.Quote(PermissionBridge.McpConfigPath!));
-                        request.ExtraArgs.Add("--permission-prompt-tool");
-                        request.ExtraArgs.Add(McpPermissionBridge.PermissionPromptToolRef);
-                        // The CLI's default MCP tool-call timeout is short (≈ a minute) — a permission
-                        // prompt / AskUserQuestion would "time out" long before a human answers. The
-                        // effective wait is the config's `timeout` field (set on the bridge from the
-                        // same setting; the CLI prefers it over the env var — verified 2.1.178). We
-                        // still set MCP_TOOL_TIMEOUT as a fallback in case a future CLI flips that.
-                        var timeoutMs = (Settings.McpToolTimeoutMs > 0
-                            ? Settings.McpToolTimeoutMs
-                            : McpPermissionBridge.DefaultToolTimeoutMs).ToString();
-                        request.Environment["MCP_TOOL_TIMEOUT"] = timeoutMs;
-                        request.Environment["MCP_TIMEOUT"] = timeoutMs; // server-startup grace too
-                    }
-
-                    if (suggestions)
-                    {
-                        request.ExtraArgs.Add("--prompt-suggestions");
-                        request.ExtraArgs.Add("true");
-                    }
-
-                    var parser = new NdjsonParser();
-                    var backgroundTasks = 0;
-                    var cts = new CancellationTokenSource();
-                    _turnCts = cts;
-                    try
-                    {
-                        exit = await _processHost.RunTurnAsync(request, line =>
-                        {
-                            foreach (var ev in parser.ParseLine(line))
-                            {
-                                if (completedEarly)
-                                {
-                                    if (ev is PromptSuggestionEvent)
-                                        EventReceived?.Invoke(ev);
-                                    continue;
-                                }
-
-                                Bookkeep(ev);
-                                if (ev is BackgroundTasksChangedEvent bg)
-                                    backgroundTasks = bg.Count;
-                                EventReceived?.Invoke(ev);
-
-                                // With suggestions on, the process lives on for ~4-11 s after the result
-                                // to generate one. Hand the turn back right here instead of at exit, or the
-                                // UI would sit on "working" that long. Not while background tasks run: the
-                                // CLI then answers their completion with a follow-up turn in this process
-                                // (2.1.287), which must still be shown — exit stays the turn end there.
-                                if (suggestions && ev is TurnResultEvent r && string.IsNullOrEmpty(r.ParentToolUseId)
-                                    && !r.IsError && backgroundTasks == 0)
-                                {
-                                    completedEarly = true;
-                                    lock (_drainLock)
-                                    {
-                                        _drainCts = cts;
-                                        _drainDone = processDone.Task;
-                                    }
-                                    Interlocked.CompareExchange(ref _turnCts, null, cts);
-                                    TurnCompleted?.Invoke(new ClaudeTurnExit { ExitCode = 0 }, null);
-                                    Volatile.Write(ref _busy, 0);
-                                }
-                            }
-                        }, cts.Token).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        Interlocked.CompareExchange(ref _turnCts, null, cts);
-                        lock (_drainLock)
-                        {
-                            if (_drainCts == cts)
-                            {
-                                _drainCts = null;
-                                _drainDone = null;
-                            }
-                        }
-                        cts.Dispose();
-                    }
-
-                    if (completedEarly)
+                        handedBack = true; // TurnCompleted already raised at the result
                         return;
+                    }
 
                     // Stale --resume id (e.g. CLI history pruned): drop the session
                     // and retry once as a fresh conversation instead of failing.
@@ -307,26 +308,357 @@ namespace CodeAstrogator.Core
                     break;
                 }
 
-                string? error = null;
-                if (!exit.WasCancelled && exit.ExitCode != 0)
-                {
-                    // Prefer the CLI's own error text (result event / stderr) over the bare exit code.
-                    var detail = !string.IsNullOrWhiteSpace(_lastResultError)
-                        ? _lastResultError!.Trim()
-                        : exit.StdErrTail?.Trim();
-                    error = string.IsNullOrWhiteSpace(detail)
-                        ? $"claude exited with code {exit.ExitCode} (no error output)"
-                        : $"claude exited with code {exit.ExitCode}:\n{detail}";
-                }
-
-                TurnCompleted?.Invoke(exit, error);
+                TurnCompleted?.Invoke(exit!, ComposeError(exit!));
             }
             finally
             {
-                if (!completedEarly)
+                if (!handedBack)
                     Volatile.Write(ref _busy, 0);
-                processDone.TrySetResult(true);
             }
+        }
+
+        private ClaudeTurnRequest BuildRequest(string prompt, string exe, string? workingDirectory,
+            IReadOnlyList<string>? imagePaths, bool suggestions, bool replay)
+        {
+            var request = new ClaudeTurnRequest
+            {
+                Prompt = DecoratePrompt(prompt),
+                ExecutablePath = exe,
+                SessionId = SessionId,
+                Model = Settings.Model,
+                Effort = Settings.Effort,
+                WorkingDirectory = workingDirectory,
+                PermissionMode = MapPermissionMode(),
+            };
+            if (imagePaths != null)
+            {
+                foreach (var image in imagePaths)
+                    request.ImagePaths.Add(image);
+            }
+
+            // Route tool permissions through the in-process MCP bridge (Teil A §A5),
+            // except in bypass mode (the CLI ignores the prompt tool there anyway).
+            if (PermissionBridge?.IsAvailable == true
+                && !string.IsNullOrEmpty(PermissionBridge.McpConfigPath)
+                && Settings.PermissionMode != "bypass")
+            {
+                request.ExtraArgs.Add("--mcp-config");
+                request.ExtraArgs.Add(ClaudeCliProcessHost.Quote(PermissionBridge.McpConfigPath!));
+                request.ExtraArgs.Add("--permission-prompt-tool");
+                request.ExtraArgs.Add(McpPermissionBridge.PermissionPromptToolRef);
+                // The CLI's default MCP tool-call timeout is short (≈ a minute) — a permission
+                // prompt / AskUserQuestion would "time out" long before a human answers. The
+                // effective wait is the config's `timeout` field (set on the bridge from the
+                // same setting; the CLI prefers it over the env var — verified 2.1.178). We
+                // still set MCP_TOOL_TIMEOUT as a fallback in case a future CLI flips that.
+                var timeoutMs = (Settings.McpToolTimeoutMs > 0
+                    ? Settings.McpToolTimeoutMs
+                    : McpPermissionBridge.DefaultToolTimeoutMs).ToString();
+                request.Environment["MCP_TOOL_TIMEOUT"] = timeoutMs;
+                request.Environment["MCP_TIMEOUT"] = timeoutMs; // server-startup grace too
+            }
+
+            if (suggestions)
+            {
+                request.ExtraArgs.Add("--prompt-suggestions");
+                request.ExtraArgs.Add("true");
+            }
+            if (replay)
+                request.ExtraArgs.Add("--replay-user-messages");
+            return request;
+        }
+
+        /// <summary>What a process was launched with (executable, folder, flags) — a prompt only goes
+        /// into a live process when this still matches; the session id is left out, the live process
+        /// already carries it.</summary>
+        internal static string BuildLaunchKey(ClaudeTurnRequest request)
+        {
+            var sessionId = request.SessionId;
+            request.SessionId = null;
+            try
+            {
+                return request.ExecutablePath + "\n" + (request.WorkingDirectory ?? "") + "\n"
+                    + ClaudeCliProcessHost.BuildArguments(request);
+            }
+            finally
+            {
+                request.SessionId = sessionId;
+            }
+        }
+
+        /// <summary>Writes the prompt into the live process when it is idle (kept alive by background
+        /// tasks), reusable and launched with the same settings. Returns the turn's completion, or null
+        /// when a new process is needed.</summary>
+        private Task<ClaudeTurnExit?>? TryContinueInLiveProcess(ClaudeTurnRequest request, string launchKey)
+        {
+            CliProcess? p;
+            TaskCompletionSource<ClaudeTurnExit?> done;
+            lock (_procLock)
+            {
+                p = _proc;
+                // A follow-up turn on its way (a task just finished) makes the process non-reusable —
+                // unless the CLI acknowledges our messages: it then queues the prompt behind the follow-up
+                // and the replay marks where our turn starts, so nothing is lost.
+                if (p == null || p.State != ProcState.Idle || (!p.Reusable && !p.Replay) || p.Input == null
+                    || p.LaunchKey != launchKey)
+                    return null;
+                p.State = ProcState.Turn;
+                p.FollowUp = false;
+                if (p.Replay)
+                    p.AwaitingReplay++;
+                done = new TaskCompletionSource<ClaudeTurnExit?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                p.TurnDone = done;
+            }
+            // Captured before the write: the turn may be over before TrySend even returns.
+            if (p.Input!.TrySend(StreamJsonInput.BuildUserMessage(request.Prompt, request.ImagePaths)))
+                return done.Task;
+
+            // The pipe broke — the process is on its way out; the caller replaces it.
+            lock (_procLock)
+            {
+                if (p.State == ProcState.Turn)
+                    p.State = ProcState.Idle;
+                p.TurnDone = null;
+                p.Reusable = false;
+                p.Replay = false; // never write into it again
+                if (p.AwaitingReplay > 0)
+                    p.AwaitingReplay--;
+            }
+            return null;
+        }
+
+        /// <summary>Starts a new CLI process for the turn; returns the turn's completion.</summary>
+        private Task<ClaudeTurnExit?> StartProcess(ClaudeTurnRequest request, string launchKey, bool suggestions, bool replay)
+        {
+            var done = new TaskCompletionSource<ClaudeTurnExit?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var proc = new CliProcess
+            {
+                LaunchKey = launchKey,
+                Suggestions = suggestions,
+                Replay = replay,
+                TurnDone = done,
+            };
+            request.ProcessStarted = pid =>
+            {
+                lock (_procLock)
+                    proc.Pid = pid;
+            };
+            request.InputOpened = input =>
+            {
+                bool close;
+                lock (_procLock)
+                {
+                    proc.Input = input;
+                    // the turn may already be past its result (or the process being killed)
+                    close = proc.State == ProcState.Draining || proc.State == ProcState.Ending;
+                }
+                if (close)
+                    input.Close();
+            };
+
+            lock (_procLock)
+                _proc = proc;
+            _ = RunProcessAsync(proc, request);
+            return done.Task;
+        }
+
+        private async Task RunProcessAsync(CliProcess proc, ClaudeTurnRequest request)
+        {
+            ClaudeTurnExit exit;
+            try
+            {
+                exit = await _processHost.RunTurnAsync(request, line =>
+                {
+                    foreach (var ev in proc.Parser.ParseLine(line))
+                        OnEvent(proc, ev);
+                }, proc.Cts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                OnExit(proc, null, ex);
+                return;
+            }
+            OnExit(proc, exit, null);
+        }
+
+        private void OnEvent(CliProcess proc, ClaudeEvent ev)
+        {
+            bool forward;
+            var followUpStarted = false;
+            lock (_procLock)
+            {
+                if (ev is UserMessageReplayedEvent)
+                {
+                    // the CLI took up one of our stdin messages — internal marker, not forwarded
+                    if (proc.AwaitingReplay > 0)
+                        proc.AwaitingReplay--;
+                    return;
+                }
+                switch (proc.State)
+                {
+                    case ProcState.Ending:
+                        forward = false;
+                        break;
+                    case ProcState.Draining:
+                        forward = ev is PromptSuggestionEvent || ev is ContextUsageEvent;
+                        break;
+                    case ProcState.Idle:
+                        forward = true;
+                        if (ev is TaskNotificationEvent)
+                        {
+                            proc.Reusable = false; // the CLI answers it with a follow-up turn
+                        }
+                        else if (ev is SessionInitEvent)
+                        {
+                            // A task finished and the CLI starts a follow-up turn on its own. Take the
+                            // busy flag for it — unless a prompt of ours just got it (that turn then
+                            // replaces this process: not reusable any more).
+                            proc.Reusable = false;
+                            if (Interlocked.CompareExchange(ref _busy, 1, 0) == 0)
+                            {
+                                proc.State = ProcState.Turn;
+                                proc.FollowUp = true;
+                                proc.TurnDone = new TaskCompletionSource<ClaudeTurnExit?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                                _lastResultError = null;
+                                followUpStarted = true;
+                            }
+                        }
+                        break;
+                    default:
+                        forward = true;
+                        break;
+                }
+                if (forward && ev is BackgroundTasksChangedEvent bg)
+                    proc.BackgroundTasks = bg.Count;
+            }
+
+            if (followUpStarted)
+                EventReceived?.Invoke(new FollowUpTurnStartedEvent());
+            if (!forward)
+                return;
+
+            Bookkeep(ev);
+            EventReceived?.Invoke(ev);
+
+            if (ev is TurnResultEvent r && string.IsNullOrEmpty(r.ParentToolUseId))
+                OnTurnResult(proc, r);
+        }
+
+        /// <summary>The turn's (top-level) result: decide how the turn and its process end.</summary>
+        private void OnTurnResult(CliProcess proc, TurnResultEvent result)
+        {
+            var handBack = false;
+            lock (_procLock)
+            {
+                if (proc.State != ProcState.Turn)
+                    return;
+                // Our prompt is still queued behind the CLI's follow-up turn: this result is the
+                // follow-up's — shown as part of our turn, which goes on (stdin stays open).
+                if (proc.AwaitingReplay > 0)
+                    return;
+                // Ask for the context breakdown while stdin is still open; the CLI answers it locally
+                // (no model call) even when stdin is closed right after — see ContextUsageEvent.
+                proc.Input?.TrySend(StreamJsonInput.BuildContextUsageRequest(
+                    StreamJsonInput.ContextUsageRequestPrefix + Interlocked.Increment(ref _contextRequestSeq)));
+                if (proc.BackgroundTasks > 0)
+                {
+                    // Background tasks keep the process alive anyway. Hand the turn back right here (the
+                    // UI is free again) and keep stdin open: the next prompt goes into this process and
+                    // the CLI's follow-up turn — when a task finishes — is still shown. Without a stdin
+                    // handle (test hosts) there is nothing to write into: wait for the follow-up instead.
+                    if (proc.Input != null)
+                    {
+                        proc.State = ProcState.Idle;
+                        proc.Reusable = true;
+                        handBack = true;
+                    }
+                }
+                else
+                {
+                    // EOF: the CLI finishes up (prompt suggestion) and exits.
+                    proc.Input?.Close();
+                    // With suggestions the process lives on for ~4-11 s to generate one. Hand the turn
+                    // back now instead of at exit, or the UI would sit on "working" that long.
+                    if (proc.Suggestions && !result.IsError)
+                    {
+                        proc.State = ProcState.Draining;
+                        handBack = true;
+                    }
+                }
+            }
+
+            if (handBack)
+                HandBack(proc, result.IsError ? (_lastResultError ?? "The turn ended with an error.") : null);
+        }
+
+        private void HandBack(CliProcess proc, string? error)
+        {
+            TaskCompletionSource<ClaudeTurnExit?>? done;
+            lock (_procLock)
+            {
+                done = proc.TurnDone;
+                proc.TurnDone = null;
+                proc.FollowUp = false;
+            }
+            TurnCompleted?.Invoke(new ClaudeTurnExit { ExitCode = 0 }, error);
+            Volatile.Write(ref _busy, 0);
+            done?.TrySetResult(null);
+        }
+
+        private void OnExit(CliProcess proc, ClaudeTurnExit? exit, Exception? failure)
+        {
+            ProcState state;
+            bool followUp, hadTasks;
+            TaskCompletionSource<ClaudeTurnExit?>? done;
+            lock (_procLock)
+            {
+                state = proc.State;
+                followUp = proc.FollowUp;
+                hadTasks = proc.BackgroundTasks > 0;
+                done = proc.TurnDone;
+                proc.TurnDone = null;
+                proc.State = ProcState.Ending;
+                proc.Input = null;
+                if (_proc == proc)
+                    _proc = null;
+            }
+            proc.Exited.TrySetResult(true);
+
+            // The background tasks died with the process — clear them in the UI.
+            if (hadTasks)
+                EventReceived?.Invoke(new BackgroundTasksChangedEvent { Count = 0, ProcessEnded = true });
+
+            if (state != ProcState.Turn)
+                return;
+            exit ??= new ClaudeTurnExit { ExitCode = -1, StdErrTail = failure?.Message ?? "" };
+            if (followUp)
+            {
+                // nobody awaits the CLI's own follow-up turn — end it here
+                TurnCompleted?.Invoke(exit, failure != null ? failure.Message : ComposeError(exit));
+                Volatile.Write(ref _busy, 0);
+            }
+            else if (failure != null)
+            {
+                done?.TrySetException(failure);
+            }
+            else
+            {
+                done?.TrySetResult(exit);
+            }
+        }
+
+        /// <summary>The turn's error text for a process exit, or null when it went fine / was stopped.</summary>
+        private string? ComposeError(ClaudeTurnExit exit)
+        {
+            if (exit.WasCancelled || exit.ExitCode == 0)
+                return null;
+            // Prefer the CLI's own error text (result event / stderr) over the bare exit code.
+            var detail = !string.IsNullOrWhiteSpace(_lastResultError)
+                ? _lastResultError!.Trim()
+                : exit.StdErrTail?.Trim();
+            return string.IsNullOrWhiteSpace(detail)
+                ? $"claude exited with code {exit.ExitCode} (no error output)"
+                : $"claude exited with code {exit.ExitCode}:\n{detail}";
         }
 
         private void Bookkeep(ClaudeEvent ev)
