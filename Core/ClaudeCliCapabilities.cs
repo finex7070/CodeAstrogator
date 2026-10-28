@@ -64,6 +64,12 @@ namespace CodeAstrogator.Core
             // --prompt-suggestions (2.1.28x): an unknown flag would fail the whole turn, so only pass
             // it when this binary lists it.
             var promptSuggestions = help.IndexOf("--prompt-suggestions", StringComparison.Ordinal) >= 0;
+            // --replay-user-messages: acknowledges each stdin message when the CLI takes it up — marks
+            // where a prompt written into a live process really starts (see ClaudeSessionService).
+            var replayUserMessages = help.IndexOf("--replay-user-messages", StringComparison.Ordinal) >= 0;
+            // --bg (2.1.29x): background sessions hosted by the CLI's daemon — Remote Control without a
+            // console window (see ClaudeBackgroundSessions).
+            var backgroundSessions = Regex.IsMatch(help, @"--bg\b");
 
             var start = help.IndexOf("--permission-mode", StringComparison.Ordinal);
             if (start < 0)
@@ -88,6 +94,8 @@ namespace CodeAstrogator.Core
                 SupportsManualPermissionMode = modes.Contains("manual"),
                 SupportsDefaultPermissionMode = modes.Contains("default"),
                 SupportsPromptSuggestions = promptSuggestions,
+                SupportsReplayUserMessages = replayUserMessages,
+                SupportsBackgroundSessions = backgroundSessions,
             };
         }
 
@@ -172,6 +180,14 @@ namespace CodeAstrogator.Core
         /// <summary>CLI accepts <c>--prompt-suggestions</c> (emits <c>prompt_suggestion</c> after each
         /// turn in stream-json mode).</summary>
         public bool SupportsPromptSuggestions { get; set; }
+
+        /// <summary>CLI accepts <c>--replay-user-messages</c> (re-emits each stdin user message as a
+        /// <c>user</c> event with <c>isReplay: true</c> when it takes it up).</summary>
+        public bool SupportsReplayUserMessages { get; set; }
+
+        /// <summary>CLI accepts <c>--bg</c> (background sessions: <c>agents --json</c>, <c>logs</c>,
+        /// <c>stop</c>, <c>rm</c>, <c>attach</c>).</summary>
+        public bool SupportsBackgroundSessions { get; set; }
 
         /// <summary>The value to pass for "ask the user about everything", or null to omit the flag
         /// (legacy CLIs, where omission still means exactly that).</summary>

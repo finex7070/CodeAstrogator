@@ -35,6 +35,15 @@
   --msg-assistant-bg:     rgba(141,95,199,0.14);
   --msg-assistant-border: rgba(141,95,199,0.46);
   --msg-assistant-fg:     #8d5fc7;   /* Claude = brand purple */
+  /* context breakdown swatches (statusbar → Context popover) */
+  --ctx-messages:      #4f8ff0;
+  --ctx-system-tools:  #e8743b;
+  --ctx-mcp-tools:     #2bb3a0;
+  --ctx-system-prompt: #d9a23f;
+  --ctx-other:         #8a8a8f;
+  --ctx-buffer:        #4a4a50;
+  --ctx-deferred:      #3a3a3f;
+  --ctx-free:          #2a2a2d;
   --shadow:        0 8px 28px rgba(0,0,0,0.45), 0 2px 6px rgba(0,0,0,0.4);
 }
 
@@ -69,6 +78,14 @@
   --msg-assistant-bg:     rgba(106,63,160,0.11);
   --msg-assistant-border: rgba(106,63,160,0.40);
   --msg-assistant-fg:     #6a3fa0;   /* Claude = brand purple (light) */
+  --ctx-messages:      #2f6fd0;
+  --ctx-system-tools:  #d0602a;
+  --ctx-mcp-tools:     #1e9a88;
+  --ctx-system-prompt: #b8860b;
+  --ctx-other:         #9a9aa0;
+  --ctx-buffer:        #c4c4c8;
+  --ctx-deferred:      #d6d6da;
+  --ctx-free:          #e1e1e3;
   --shadow:        0 8px 28px rgba(0,0,0,0.14), 0 2px 6px rgba(0,0,0,0.10);
 }
 
@@ -218,13 +235,20 @@ button { font-family: inherit; }
 
 /* Tasks banner — a collapsible checklist of the CLI's Task* calls. Stacks a clickable head row
    over the task list (overrides the notice-banner's horizontal flex). */
+/* Tasks list — above the composer (first of tasks / background tasks / subagents), same card look */
 .tasks-banner {
+  flex: 0 0 auto;
+  display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0;
-  padding: 0;
-  border-top: 1px solid var(--border);
+  margin: 0 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  overflow: hidden;
 }
+.tasks-banner .tasks-head { padding: 6px 10px; }
 .tasks-head {
   display: flex;
   align-items: center;
@@ -816,6 +840,25 @@ button:focus { outline: none; }
 }
 .open-file-btn:hover { color: var(--accent); background: var(--bg-elevated); opacity: 1; }
 .open-file-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* Stop button of a running Bash/PowerShell command (kills just that command; the turn goes on).
+   Same footprint as .open-file-btn, turns red on hover. */
+.tool-stop-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  margin: -2px 4px -2px 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.8;
+}
+.tool-stop-btn:hover:not(:disabled) { color: var(--error); background: var(--bg-elevated); opacity: 1; }
+.tool-stop-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.tool-stop-btn:disabled { cursor: default; opacity: 0.35; }
 .tool-body {
   border-top: 1px solid var(--border);
   padding: 8px;
@@ -868,6 +911,9 @@ button:focus { outline: none; }
    weaker than permission/write cards, which use the full accent border + tinted header */
 .tool-card.tool-ok  { border-color: var(--tool-ok-border);  background: var(--tool-ok-bg); }
 .tool-card.tool-err { border-color: var(--tool-err-border); background: var(--tool-err-bg); }
+/* stopped (turn Stop / the card's own stop button) — neutral, neither success nor failure */
+.status-stopped { color: var(--text-dim); }
+.tool-card.tool-stopped { border-style: dashed; }
 
 /* ---- Permission / diff card ------------------------------------------- */
 .perm-card { border-color: var(--accent); }
@@ -1074,6 +1120,8 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   border-radius: 8px;
   background: var(--accent-faint);
 }
+/* a turn is running (and may be editing these files) — the list stays visible, its actions wait */
+.turn-review.locked button { pointer-events: none; opacity: 0.45; }
 .turn-review-head {
   display: flex;
   align-items: center;
@@ -1374,15 +1422,52 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .toolbar-right { display: flex; gap: 6px; align-items: center; margin-left: auto; }
 
-/* Prompt suggestion: the ghost text itself is the textarea placeholder; this is the Tab hint. */
+/* Prompt suggestion: ghost text laid over the empty textarea (same font/padding, so it sits where
+   the typed text would), with the Tab hint inline right after it. The real placeholder is blanked
+   while it shows; clicks go through to the textarea. */
+.input-wrap { position: relative; }
+.suggestion-ghost {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 4px 4px 6px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.suggestion-ghost[hidden] { display: none; }
+/* set apart from the ghost text: a gap plus a small chip in the UI font, so it can't be read as
+   part of the suggested prompt */
 .suggestion-hint {
+  display: inline-block;
+  margin-left: 14px;
+  padding: 0 7px 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--text-faint); /* same tone as the ghost text and the Tab key */
+  white-space: nowrap;
+  user-select: none;
+  vertical-align: 1px;
+}
+/* "Shift+Enter for a new line" — left of the model button (used to be part of the placeholder).
+   Dropped when the panel gets narrow, so it never squeezes the file chip / model button. */
+.newline-hint {
   font-size: 11px;
   color: var(--text-faint);
   white-space: nowrap;
   user-select: none;
 }
-.suggestion-hint[hidden] { display: none; }
-.suggestion-hint kbd {
+@media (max-width: 560px) { .newline-hint { display: none; } }
+.suggestion-hint kbd,
+.newline-hint kbd {
   font-family: var(--font-mono);
   font-size: 10px;
   padding: 0 4px;
@@ -1488,6 +1573,96 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .status-meter.crit .meter-label { color: var(--error); }
 /* stale: /usage kept omitting this window; last-known value shown dimmed (tooltip explains) */
 .status-meter.stale { opacity: 0.5; }
+
+/* Context meter: a button (opens the breakdown) dressed like the other meters */
+.status-context {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  margin: 0 -4px;
+  border-radius: 4px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.status-context:hover,
+.status-context[aria-expanded="true"] { background: var(--bg-elevated); }
+.status-context:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+/* Context breakdown popover (like the Claude app's "Context" panel) */
+.popover.ctx-pop {
+  width: 300px;
+  max-width: calc(100vw - 12px);
+  padding: 10px 12px;
+  overflow-y: auto;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text);
+}
+.ctx-title { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.ctx-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ctx-used { font-weight: 600; font-size: 13px; }
+.ctx-total { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ctx-bar {
+  display: flex;
+  height: 6px;
+  margin: 6px 0 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--ctx-free);
+}
+.ctx-seg { display: block; height: 100%; flex: 0 0 auto; }
+.ctx-rows { display: flex; flex-direction: column; gap: 3px; }
+.ctx-row,
+.ctx-details > summary,
+.ctx-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto 46px;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-row.deferred { color: var(--text-dim); }
+.ctx-sep { height: 1px; background: var(--border); margin: 4px 0; }
+.ctx-swatch { width: 10px; height: 10px; border-radius: 2px; }
+.ctx-name,
+.ctx-item-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctx-tok,
+.ctx-pct,
+.ctx-count { text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ctx-details { margin-top: 6px; }
+.ctx-details:first-of-type { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.ctx-details > summary {
+  grid-template-columns: minmax(0, 1fr) auto;
+  cursor: pointer;
+  list-style: none;
+  padding: 2px 0;
+}
+.ctx-details > summary::-webkit-details-marker { display: none; }
+.ctx-details > summary .ctx-name::before { content: "›"; display: inline-block; width: 12px; color: var(--text-dim); transition: transform 0.12s; }
+.ctx-details[open] > summary .ctx-name::before { transform: rotate(90deg); }
+.ctx-item {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 1px 0 1px 12px;
+  color: var(--text-dim);
+}
+.ctx-note { margin-top: 10px; font-size: 11px; color: var(--text-faint); }
+.ctx-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+.ctx-foot .ctx-note { flex: 1 1 auto; min-width: 0; }
+.ctx-compact {
+  flex: 0 0 auto;
+  margin-top: 10px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-chrome);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ctx-compact:hover:not(:disabled) { border-color: var(--accent); }
+.ctx-compact.hot { border-color: var(--warn); color: var(--warn); }
+.ctx-compact:disabled { opacity: 0.5; cursor: default; }
 
 .plan-badge {
   display: inline-flex;
@@ -1905,6 +2080,32 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .q-card.answered.expanded .q-body { display: block; padding-top: 8px; }
 .q-block { margin-bottom: 12px; }
 .q-block:last-of-type { margin-bottom: 0; }
+/* Several questions: one page at a time — tab strip (header per question, ✓ once answered) + ‹ n/m ›. */
+.q-pager {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.q-tabs { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.q-tab {
+  font-family: var(--font-ui); font-size: 11px;
+  padding: 2px 9px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-elevated); color: var(--text-dim);
+  cursor: pointer; white-space: nowrap;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+}
+.q-tab:hover { border-color: var(--accent); color: var(--text); }
+.q-tab.active { border-color: var(--accent); background: var(--accent-faint); color: var(--text); font-weight: 600; }
+.q-tab.done::before { content: "✓ "; color: var(--accent); }
+.q-nav { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.q-nav-btn {
+  border: none; background: transparent; color: var(--text-dim);
+  font-size: 15px; line-height: 1; padding: 1px 6px; border-radius: 4px; cursor: pointer;
+}
+.q-nav-btn:hover:not(:disabled) { color: var(--accent); background: var(--bg-elevated); }
+.q-nav-btn:disabled { opacity: 0.3; cursor: default; }
+.q-counter { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; }
 .q-header {
   display: inline-block;
   font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em;
@@ -2168,48 +2369,41 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 
 /* low height — handled via .h-short class from JS for robot */
 
-/* Remote control mode (claude remote-control server) */
-.remote-panel {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
+/* Remote control banner (below the header, in the flow — the transcript below stays visible and mirrors the
+   conversation live). Head: title · activity · actions · chevron; body (collapsible): QR + link + status. */
+.remote-panel { flex-direction: column; align-items: stretch; gap: 0; padding: 0; border-top: 1px solid var(--border); }
+.remote-head {
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: var(--bg);
-  overflow: auto;
-  padding: 16px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 6px 10px 6px 12px;
+  cursor: pointer;
+  user-select: none;
 }
-.remote-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  max-width: 320px;
-  width: 100%;
-  text-align: center;
-}
-.remote-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-ui);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-}
-.remote-title svg { color: var(--accent); }
-.remote-status { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; word-break: break-word; }
+.remote-head .notice-icon { margin-top: 0; }
+.remote-activity { font-size: 11px; color: var(--text-dim); }
+.remote-activity.busy { color: var(--accent); }
+.remote-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.remote-chevron { cursor: pointer; }
+.remote-panel.min .remote-chevron { transform: rotate(-90deg); }
+.remote-body { display: flex; align-items: center; gap: 12px; padding: 2px 12px 10px; }
+.remote-panel.min .remote-body { display: none; }
+.remote-info { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.remote-qr { flex: 0 0 auto; width: 120px; height: 120px; background: #fff; border-radius: 6px; padding: 5px; box-sizing: content-box; image-rendering: pixelated; }
+.remote-link { font-size: 11.5px; color: var(--accent); word-break: break-all; text-decoration: none; }
+.remote-link:hover { text-decoration: underline; }
+.remote-status { font-size: 12px; color: var(--text-dim); line-height: 1.45; word-break: break-word; }
 .remote-status.error { color: var(--error); }
 .remote-btn {
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text);
   border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 12.5px;
+  padding: 3px 10px;
+  font-size: 11.5px;
   cursor: pointer;
-  min-height: 28px;
+  min-height: 24px;
 }
 .remote-btn:hover { background: var(--accent-faint); }
 .remote-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

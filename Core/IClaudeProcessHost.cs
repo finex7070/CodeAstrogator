@@ -37,6 +37,29 @@ namespace CodeAstrogator.Core
 
         /// <summary>Environment overrides for the child process (e.g. ANTHROPIC_API_KEY).</summary>
         public IDictionary<string, string> Environment { get; } = new Dictionary<string, string>();
+
+        /// <summary>Called with the CLI's process id right after it started (the per-command stop
+        /// button looks for the command's shell among this process's children).</summary>
+        public System.Action<int>? ProcessStarted { get; set; }
+
+        /// <summary>Called once the first user message is written, with the still-open stdin. The
+        /// session service closes it at the turn's result — or keeps it open while background tasks
+        /// run, so the next prompt can go into the same process (see <see cref="IClaudeTurnInput"/>).</summary>
+        public System.Action<IClaudeTurnInput>? InputOpened { get; set; }
+    }
+
+    /// <summary>
+    /// The stdin of a running CLI process (stream-json input). Normally closed at the turn's
+    /// <c>result</c> (the CLI then finishes up and exits); kept open only while background tasks
+    /// run, so a further user message can be written into the same process. Thread-safe.
+    /// </summary>
+    public interface IClaudeTurnInput
+    {
+        /// <summary>Writes one NDJSON line. False when stdin is closed or the process is gone.</summary>
+        bool TrySend(string line);
+
+        /// <summary>Closes stdin (EOF). Idempotent.</summary>
+        void Close();
     }
 
     public sealed class ClaudeTurnExit
