@@ -44,7 +44,10 @@ namespace CodeAstrogator.Bridge
         private int _usageRefreshInFlight;    // 0/1 reentrancy guard: never run two /usage fetches at once
         private const int UsageRefreshIntervalMs = 60 * 1000; // every minute (also while a turn runs)
         private JArray? _slashCommands;       // CLI-reported slash commands (system/init)
-        private RemoteTerminalLauncher? _remoteTerminal; // interactive `claude --remote-control` session (VS terminal)
+        private IRemoteSession? _remoteTerminal; // Remote Control: CLI background session (or the console fallback)
+        private DateTime _remoteMirrorStamp;     // last-seen write time of the remote session's transcript
+        private bool _remoteAdoptChecked;        // looked for a still-running background session once
+        private string? _remoteProjectDir;       // ~\.claude\projects\<munged cwd> (guarded by _history)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
@@ -60,7 +63,15 @@ namespace CodeAstrogator.Bridge
         private readonly TaskOutputWatcher _taskOutput;
         private string? _turnSessionId;
         private string? _turnCwd;
-        private JObject? _checkpointTurnMessage;      // user message of the turn about to start (UI thread)
+        // Running foreground shell commands by tool_use_id, for the card's stop button (tool.stop):
+        // tool name + command from tool_use, task id from system/task_started. Per turn.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ShellCall> _shellCalls =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, ShellCall>(StringComparer.Ordinal);
+        // Running background shells by task id (outlive their turn — see ClaudeSessionService), for the
+        // stop buttons of the background-task bar (background.stop).
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ShellCall> _backgroundShells =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, ShellCall>(StringComparer.Ordinal);
+        private JObject? _checkpointTurnMessage;    // user message of the turn about to start (UI thread)
         private CheckpointTurnState? _checkpointTurn; // in-flight turn: where to put the "after" snapshot
         private string? _pendingRestoreNote;          // prepended to the next prompt after a rewind
 
@@ -81,7 +92,9 @@ namespace CodeAstrogator.Bridge
         // ── "Review edits at end of turn" (opt-in, acceptEdits) ──────────────────
         // All three are guarded by _turnReviewLock (written from the MCP/stream background threads,
         // read/mutated on the UI thread). Baselines accumulate during a turn; the reviews are built at
-        // turn end and persist (gating the next prompt) until every file is decided or "Keep all".
+        // turn end and persist until every file is decided or "Keep all"/"Discard all". Further prompts
+        // are allowed meanwhile: the baselines of still-pending files are kept, so the next turn's edits
+        // join the same list, each file still compared against its content before Claude first touched it.
         private readonly object _turnReviewLock = new object();
         // path → pre-turn file content ("" = a file created this turn). First-touch capture only.
         private readonly System.Collections.Generic.Dictionary<string, string> _turnEditBaselines
@@ -97,8 +110,9 @@ namespace CodeAstrogator.Bridge
         private sealed class TurnReview
         {
             public EditReviewSession Session = null!;
-            public string Baseline = "";  // pre-turn content (revert target)
-            public bool IsNew;            // baseline was empty → file created this turn
+            public string Baseline = "";  // content before Claude first touched it (revert target)
+            public bool IsNew;            // baseline was empty → file created by Claude
+            public string Current = "";   // disk content the review was built from — unchanged ⇒ reuse it
         }
 
         private bool _disposed;
@@ -192,11 +206,12 @@ namespace CodeAstrogator.Bridge
             _session.TurnCompleted -= OnTurnCompleted;
             _webView.WebMessageReceived -= OnWebMessageReceived;
             _session.StopTurn();
+            _session.Shutdown(); // a process kept alive for background tasks goes too
             DenyAllPendingPermissions("Tool window closed");
             _editReview.Dispose(); // remove any open edit-review adornments
             _permission.Dispose(); // stops the MCP listener + deletes the config file
             _taskOutput.Dispose(); // stop tailing any still-running command output
-            _remoteTerminal?.Dispose(); // releases the integrated-terminal proxy (the terminal closes with VS)
+            _remoteTerminal?.Dispose(); // stops polling; the session itself keeps running (re-adopted next start)
             lock (_history)
                 _history.Save(); // synchronous — tool window / VS is closing
         }
@@ -245,12 +260,16 @@ namespace CodeAstrogator.Bridge
                     SendSlashCommands(); // re-send the CLI-reported list after a WebView reload
                     SendModelCatalog();  // which models the installed CLI accepts (async probe)
                     SendUpdateState();   // staged update → banner; just-applied update → note
+                    if (_backgroundTaskList.Count > 0) // WebView reloaded while background tasks run
+                        Post(new JObject { ["type"] = "background.tasks", ["tasks"] = _backgroundTaskList.DeepClone() });
                     RunAutoUpdateCheck(force: false);
                     SendActiveFile();
                     if (_package.SettingsLoadError != null)
                         PostSystemNote("⚠ Settings could not be read — using defaults. " + _package.SettingsLoadError);
                     if (RemoteSessionActive) // WebView reloaded while a remote session runs
-                        PostRemoteTerminalState("ready", RemoteRunningMessage());
+                        PostRemoteSessionState();
+                    else
+                        TryAdoptRemoteSession(); // one still running from before a VS restart?
                     RefreshUsage();
                     FlushQueuedUiMessages(); // deliver actions queued before the UI was ready
                     break;
@@ -264,6 +283,12 @@ namespace CodeAstrogator.Bridge
                     // A cancelled turn emits no TurnResultEvent, so build the changed-files review list
                     // here from whatever baselines were captured before the stop (edits already applied).
                     BuildAndPostTurnReviewList();
+                    break;
+                case "tool.stop":
+                    HandleToolStop(msg.Value<string>("id"));
+                    break;
+                case "background.stop":
+                    HandleBackgroundStop(msg.Value<string>("id"));
                     break;
                 case "session.new":
                     HandleSessionNew();
@@ -424,6 +449,9 @@ namespace CodeAstrogator.Bridge
                 case "remote.start":
                     HandleRemoteStart();
                     break;
+                case "remote.openTerminal":
+                    _remoteTerminal?.OpenTerminal();
+                    break;
                 case "remote.stop":
                     HandleRemoteStop();
                     break;
@@ -451,18 +479,14 @@ namespace CodeAstrogator.Bridge
             ThreadHelper.ThrowIfNotOnUIThread();
 
             var text = msg.Value<string>("text") ?? "";
-            if (string.IsNullOrWhiteSpace(text) || _session.IsBusy)
+            // text OR at least one explicit attachment — a screenshot alone is a valid prompt
+            var hasAttachments = msg["attachments"] is JArray { Count: > 0 };
+            if ((string.IsNullOrWhiteSpace(text) && !hasAttachments) || _session.IsBusy)
                 return;
             if (RemoteSessionActive)
                 return; // remote control owns the session in the terminal — the UI locks the composer too
-            // Authoritative half of the post-turn edit-review gate (the WebUI also disables send): a new
-            // prompt can't start while changed files from the last turn are still awaiting review. Guards
-            // against a reload, queued sends, or an Enter-race that the client-only check would miss.
-            if (HasPendingTurnReview())
-            {
-                PostSystemNote("Review the changed files above before sending the next prompt.");
-                return;
-            }
+            // A pending post-turn edit review no longer gates the next prompt: its changes keep being
+            // collected (see CarryTurnReviewIntoNextTurn).
 
             var typedText = text; // what the user actually typed — shown in the bubble + title
 
@@ -516,8 +540,8 @@ namespace CodeAstrogator.Bridge
                 references.Where(r => string.IsNullOrEmpty(r.suffix)).Select(r => r.path));
             if (references.Count > 0)
             {
-                var sb = new System.Text.StringBuilder(text);
-                sb.Append("\n\nAttached files:");
+                var sb = new System.Text.StringBuilder(text.Trim().Length > 0 ? text + "\n\n" : "");
+                sb.Append("Attached files:");
                 foreach (var r in references)
                 {
                     sb.Append('\n');
@@ -549,7 +573,13 @@ namespace CodeAstrogator.Bridge
                 userMsg["attachments"] = display;
             RecordMessage(userMsg);
             if (_history.Current.Title == "Untitled")
-                _history.Current.Title = typedText.Length > 48 ? typedText.Substring(0, 48) + "…" : typedText;
+            {
+                // an attachment-only prompt titles the session after its first file
+                var titleText = string.IsNullOrWhiteSpace(typedText)
+                    ? display.FirstOrDefault()?.Value<string>("name") ?? "Untitled"
+                    : typedText;
+                _history.Current.Title = titleText.Length > 48 ? titleText.Substring(0, 48) + "…" : titleText;
+            }
             // This message owns the turn's checkpoints (RunPrompt takes the "before" snapshot and
             // stores its sha here; OnTurnCompleted adds the "after" one).
             _checkpointTurnMessage = userMsg;
@@ -570,7 +600,7 @@ namespace CodeAstrogator.Bridge
             SyncSessionSettingsFromOptions();
 
             _turnHadAssistantOutput = false;
-            ResetTurnReviewState(); // fresh turn → drop the previous turn's captured baselines/reviews
+            CarryTurnReviewIntoNextTurn(); // a pending review keeps collecting this turn's changes
 
             // Checkpoint bookkeeping for this turn (UI-thread reads; the snapshot itself runs below,
             // off-thread, before the CLI starts). A slash-command turn has no user message, so it
@@ -1112,6 +1142,9 @@ namespace CodeAstrogator.Bridge
 
             var files = new JArray();
             var built = new System.Collections.Generic.Dictionary<string, TurnReview>(StringComparer.OrdinalIgnoreCase);
+            System.Collections.Generic.Dictionary<string, TurnReview> previous;
+            lock (_turnReviewLock)
+                previous = new System.Collections.Generic.Dictionary<string, TurnReview>(_turnReviews, StringComparer.OrdinalIgnoreCase);
             foreach (var kv in baselines)
             {
                 var path = kv.Key;
@@ -1126,6 +1159,15 @@ namespace CodeAstrogator.Bridge
                 catch { continue; } // unreadable now → skip
                 if (!exists) continue; // edited then deleted this turn → nothing to review on disk
 
+                // Still pending from an earlier turn and untouched since: keep that review as it is (with
+                // the decisions already made in the editor).
+                if (previous.TryGetValue(path, out var earlier) && earlier.Current == current)
+                {
+                    built[path] = earlier;
+                    files.Add(TurnReviewFileEntry(path, earlier.Session));
+                    continue;
+                }
+
                 // Model the whole-file change as a Write: old = baseline, new = current disk content.
                 var input = new JObject { ["file_path"] = path, ["content"] = current };
                 EditReviewSession session;
@@ -1133,7 +1175,7 @@ namespace CodeAstrogator.Bridge
                 catch { continue; }
                 if (!session.HasHunks) continue; // edited then reverted to identical → drop
 
-                built[path] = new TurnReview { Session = session, Baseline = baseline, IsNew = baseline.Length == 0 };
+                built[path] = new TurnReview { Session = session, Baseline = baseline, IsNew = baseline.Length == 0, Current = current };
                 files.Add(TurnReviewFileEntry(path, session));
             }
 
@@ -1144,7 +1186,12 @@ namespace CodeAstrogator.Bridge
                     _turnReviews[kv.Key] = kv.Value;
             }
             if (files.Count == 0)
+            {
+                // a carried-over list whose files all ended up unchanged (edited back) → empty it
+                if (previous.Count > 0)
+                    Post(new JObject { ["type"] = "editReview.turnListClear" });
                 return;
+            }
             Post(new JObject { ["type"] = "editReview.turnList", ["files"] = files });
 
             // Any changed file that's ALREADY open gets its inline review attached immediately, so the
@@ -1210,7 +1257,46 @@ namespace CodeAstrogator.Bridge
                 ? "1 changed file could not be reviewed: its pre-edit baseline was not readable."
                 : skipped + " changed files could not be reviewed: their pre-edit baselines were not readable.");
 
-        /// <summary>Clears all captured baselines and pending reviews (new turn / session change).</summary>
+        /// <summary>A new prompt starts. Without a pending review everything starts fresh (as before). With one,
+        /// the pending files keep their baselines — this turn's edits are captured first-touch for the other
+        /// files and the list is rebuilt cumulatively at turn end. Open in-editor reviews are closed first:
+        /// they lock the buffer read-only, and Claude may edit those very files now (the reviews themselves
+        /// stay, with their decisions, and are re-attached at turn end). UI thread.</summary>
+        private void CarryTurnReviewIntoNextTurn()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            bool pending;
+            lock (_turnReviewLock)
+            {
+                pending = _turnReviews.Count > 0;
+                _turnBaselineSkip.Clear();
+                if (!pending)
+                {
+                    _turnEditBaselines.Clear();
+                }
+                else
+                {
+                    // only the still-pending files carry their baseline over; anything else (decided,
+                    // edited back to identical) gets a fresh first-touch baseline if Claude edits it again
+                    foreach (var path in _turnEditBaselines.Keys.Where(p => !_turnReviews.ContainsKey(p)).ToList())
+                        _turnEditBaselines.Remove(path);
+                }
+            }
+            if (pending)
+                _editReview.CloseAllTurnReviews();
+        }
+
+        /// <summary>The review actions (open/finish/keep/discard) rewrite files — not while a turn may be
+        /// editing them. The WebUI greys them out meanwhile; this is the authoritative half.</summary>
+        private bool TurnReviewActionBlocked()
+        {
+            if (!_session.IsBusy)
+                return false;
+            PostSystemNote("Wait until the turn has finished before reviewing the changed files.");
+            return true;
+        }
+
+        /// <summary>Clears all captured baselines and pending reviews (session change, Keep/Discard all).</summary>
         private void ResetTurnReviewState()
         {
             lock (_turnReviewLock)
@@ -1226,6 +1312,8 @@ namespace CodeAstrogator.Bridge
         private void HandleOpenTurnFile(string path)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (TurnReviewActionBlocked())
+                return;
             TurnReview? review;
             lock (_turnReviewLock)
                 _turnReviews.TryGetValue(path ?? "", out review);
@@ -1241,6 +1329,8 @@ namespace CodeAstrogator.Bridge
         private void HandleFinishTurnFile(string path)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (TurnReviewActionBlocked())
+                return;
             TurnReview? review;
             lock (_turnReviewLock)
                 _turnReviews.TryGetValue(path ?? "", out review);
@@ -1286,7 +1376,11 @@ namespace CodeAstrogator.Bridge
                 RevertOnDisk(path!, finalContent, deleteFile);
 
             lock (_turnReviewLock)
+            {
                 _turnReviews.Remove(path!);
+                // decided — a later edit (e.g. a follow-up turn) needs a fresh first-touch baseline
+                _turnEditBaselines.Remove(path!);
+            }
             Post(new JObject { ["type"] = "editReview.turnFileDone", ["path"] = path });
         }
 
@@ -1295,6 +1389,8 @@ namespace CodeAstrogator.Bridge
         private void HandleKeepAllTurnReviews()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (TurnReviewActionBlocked())
+                return;
             _editReview.CloseAllTurnReviews(); // restore any open review buffers to the applied content
             ResetTurnReviewState();
             Post(new JObject { ["type"] = "editReview.turnListClear" });
@@ -1306,6 +1402,8 @@ namespace CodeAstrogator.Bridge
         private void HandleDiscardAllTurnReviews()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (TurnReviewActionBlocked())
+                return;
             System.Collections.Generic.List<(string path, string baseline, bool isNew)> items;
             lock (_turnReviewLock)
                 items = _turnReviews.Select(kv => (kv.Key, kv.Value.Baseline, kv.Value.IsNew)).ToList();
@@ -1776,7 +1874,7 @@ namespace CodeAstrogator.Bridge
             if (RemoteSessionActive)
             {
                 // already running (e.g. UI reloaded) — re-announce the current state
-                PostRemoteTerminalState("ready", RemoteRunningMessage());
+                PostRemoteSessionState();
                 return;
             }
 
@@ -1789,41 +1887,332 @@ namespace CodeAstrogator.Bridge
 
             // Resume the current chat's CLI session if it has one (≥1 turn); otherwise start fresh.
             string? resumeId;
+            string title;
             lock (_history)
+            {
                 resumeId = _history.Current.HasCliSession ? _history.Current.Id : null;
+                title = _history.Current.Title;
+            }
 
             var cwd = _package.GetSolutionDirectory();
             // remote control refuses an untrusted workspace — pre-accept it (best-effort).
             ClaudeWorkspaceTrust.EnsureTrusted(cwd);
 
-            if (_remoteTerminal == null)
-            {
-                _remoteTerminal = new RemoteTerminalLauncher();
-                _remoteTerminal.Ended += OnRemoteTerminalEnded;
-            }
-
             PostRemoteTerminalState("starting");
 
-            var launcher = _remoteTerminal;
             _package.JoinableTaskFactory.RunAsync(async () =>
             {
+                // CLI 2.1.29x+: a background session (no window; link/QR in the panel). Older: the console.
+                var caps = await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false);
+                IRemoteSession session = caps.SupportsBackgroundSessions
+                    ? new BackgroundRemoteSession()
+                    : new RemoteTerminalLauncher();
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                AttachRemoteSession(session);
+
+                // The name the session gets in the Claude app's list
+                var name = string.IsNullOrWhiteSpace(title) || title == "Untitled" ? "Code Astrogator" : title;
                 bool ok;
-                try { ok = await launcher.StartAsync(exe, resumeId, cwd, _package.DisposalToken); }
+                try { ok = await session.StartAsync(exe, resumeId, cwd, name, _package.DisposalToken); }
                 catch { ok = false; }
 
                 await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
                 if (ok)
-                    PostRemoteTerminalState("ready", RemoteRunningMessage(resumeId != null));
+                    PostRemoteSessionState(resumeId != null);
                 else
                     PostRemoteTerminalState("error",
-                        "Couldn't start remote control" + (launcher.LastError != null ? ": " + launcher.LastError : "."));
+                        "Couldn't start remote control" + (session.LastError != null ? ": " + session.LastError : "."));
             }).Task.Forget();
+        }
+
+        /// <summary>Makes <paramref name="session"/> the current remote session and wires its events.</summary>
+        private void AttachRemoteSession(IRemoteSession session)
+        {
+            if (_remoteTerminal != null)
+            {
+                _remoteTerminal.Ended -= OnRemoteTerminalEnded;
+                _remoteTerminal.Changed -= OnRemoteSessionChanged;
+                _remoteTerminal.Dispose();
+            }
+            _remoteTerminal = session;
+            _remoteMirrorStamp = DateTime.MinValue;
+            // the CLI's transcript folder for this workspace (GetSolutionDirectory is UI-thread-only)
+            var projectDir = CliSessionReader.GetProjectDirectory(_package.GetSolutionDirectory() ?? "");
+            lock (_history)
+                _remoteProjectDir = projectDir;
+            session.Ended += OnRemoteTerminalEnded;
+            session.Changed += OnRemoteSessionChanged;
+        }
+
+        /// <summary>A background remote session from before a VS restart (or a reload of the tool window) is
+        /// still running on this chat: lock the panel again instead of letting a prompt race it. Once per
+        /// bridge; only for the currently loaded chat.</summary>
+        private void TryAdoptRemoteSession()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_remoteAdoptChecked || RemoteSessionActive)
+                return;
+            _remoteAdoptChecked = true;
+            var exe = ClaudeExecutableLocator.Locate(_package.GetOptions().ClaudeExecutablePath);
+            if (exe == null)
+                return;
+            string? currentId;
+            lock (_history)
+                currentId = _history.Current.HasCliSession ? _history.Current.Id : null;
+            if (currentId == null)
+                return;
+            var cwd = _package.GetSolutionDirectory();
+
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    var caps = await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false);
+                    if (!caps.SupportsBackgroundSessions)
+                        return;
+                    var run = await ClaudeBackgroundSessions.RunAsync(exe, "agents --json", cwd, 30000, _package.DisposalToken)
+                        .ConfigureAwait(false);
+                    var running = ClaudeBackgroundSessions.ParseAgents(run.Output).FirstOrDefault(s =>
+                        s.Kind == "background" && !string.IsNullOrEmpty(s.Id)
+                        && string.Equals(s.SessionId, currentId, StringComparison.OrdinalIgnoreCase)
+                        && !ClaudeBackgroundSessions.HasEnded(s));
+                    if (running == null)
+                        return;
+
+                    await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    if (RemoteSessionActive || _session.IsBusy)
+                        return;
+                    var session = new BackgroundRemoteSession();
+                    AttachRemoteSession(session);
+                    session.Adopt(exe, cwd, running);
+                    PostRemoteSessionState();
+                    PostSystemNote("Remote control is still running for this chat");
+                }
+                catch
+                {
+                    // best-effort — nothing adopted
+                }
+            }).Task.Forget();
+        }
+
+        /// <summary>Background thread: the remote session polled. Updates the panel (link/QR once known,
+        /// busy/idle) and mirrors the conversation into the transcript when its file changed — so what is done
+        /// from the phone shows up here live.</summary>
+        private void OnRemoteSessionChanged()
+        {
+            var session = _remoteTerminal;
+            if (session == null || !session.IsActive)
+                return;
+            PostRemoteSessionState();
+            MirrorRemoteTranscript(session);
+        }
+
+        private void MirrorRemoteTranscript(IRemoteSession session)
+        {
+            var sessionId = session.SessionId;
+            if (string.IsNullOrEmpty(sessionId))
+                return;
+            try
+            {
+                string? projectDir;
+                lock (_history)
+                    projectDir = _remoteProjectDir;
+                if (projectDir == null)
+                    return;
+                var file = System.IO.Path.Combine(projectDir, sessionId + ".jsonl");
+                if (!System.IO.File.Exists(file))
+                    return;
+                var stamp = System.IO.File.GetLastWriteTimeUtc(file);
+                if (stamp <= _remoteMirrorStamp)
+                    return;
+                var first = _remoteMirrorStamp == DateTime.MinValue;
+                _remoteMirrorStamp = stamp;
+                if (first)
+                    return; // the panel already shows this state — only mirror what changes from now on
+                var imported = CliSessionReader.ImportTranscript(file);
+                if (imported == null)
+                    return;
+                Post(new JObject
+                {
+                    ["type"] = "transcript.load",
+                    ["sessionId"] = imported.SessionId,
+                    ["title"] = imported.Title,
+                    ["messages"] = new JArray(imported.Messages.Select(m => (JToken)m.DeepClone())),
+                });
+            }
+            catch
+            {
+                // the mirror is best-effort; the full import still happens when the session ends
+            }
         }
 
         /// <summary>
         /// Ends the interactive remote session (closes the terminal). The launcher's Ended event
         /// then imports the now-advanced conversation and reloads it (see <see cref="OnRemoteTerminalEnded"/>).
         /// </summary>
+        /// <summary>A running Bash/PowerShell command, tracked for the card's stop button.</summary>
+        private sealed class ShellCall
+        {
+            public ShellCall(string toolName, string? command)
+            {
+                ToolName = toolName;
+                Command = command;
+            }
+
+            public string ToolName { get; }
+            public string? Command { get; }
+            public string? TaskId { get; set; } // set by system/task_started
+        }
+
+        /// <summary>web→host <c>tool.stop</c>: kills just this command's shell (process tree) — the CLI
+        /// reports it as failed (exit code 1) and the turn goes on. On failure the card's button is
+        /// re-enabled via <c>tool.stopFailed</c> plus a note.</summary>
+        private void HandleToolStop(string? toolUseId)
+        {
+            if (string.IsNullOrEmpty(toolUseId))
+                return;
+            var pid = _session.ActiveProcessId;
+            if (pid == null || !_shellCalls.TryGetValue(toolUseId!, out var call))
+            {
+                PostToolStopFailed(toolUseId!, "The command is no longer running.");
+                return;
+            }
+
+            // WMI + taskkill take a moment — keep them off the UI thread.
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    var target = ShellTaskProcess.Find(ProcessTree.GetChildren(pid.Value), call.TaskId, call.ToolName, call.Command);
+                    if (target == null)
+                    {
+                        PostToolStopFailed(toolUseId!, "Could not find the process of this command — use the turn's Stop button instead.");
+                        return;
+                    }
+                    ProcessTree.KillTree(target.Value);
+                }
+                catch (Exception ex)
+                {
+                    PostToolStopFailed(toolUseId!, "Stopping the command failed: " + ex.Message);
+                }
+            });
+        }
+
+        // Last list sent as background.tasks — re-sent after a WebView reload.
+        private JArray _backgroundTaskList = new JArray();
+
+        /// <summary>The <c>usage</c> object of host→web <c>context.usage</c> (also kept on the session record
+        /// and replayed in <c>session.init</c>): totals, the categories in the CLI's order and the detail
+        /// lists (memory files, MCP servers, agents, skills).</summary>
+        internal static JObject BuildContextUsage(ContextUsageEvent usage)
+        {
+            JArray Items(IEnumerable<ContextItem> items)
+            {
+                var list = new JArray();
+                foreach (var i in items)
+                {
+                    var o = new JObject { ["name"] = i.Name, ["tokens"] = i.Tokens };
+                    if (!string.IsNullOrEmpty(i.Detail))
+                        o["detail"] = i.Detail;
+                    if (i.Count > 0)
+                        o["count"] = i.Count;
+                    list.Add(o);
+                }
+                return list;
+            }
+
+            var categories = new JArray();
+            foreach (var c in usage.Categories)
+                categories.Add(new JObject { ["name"] = c.Name, ["tokens"] = c.Tokens, ["kind"] = c.Kind });
+            return new JObject
+            {
+                ["totalTokens"] = usage.TotalTokens,
+                ["maxTokens"] = usage.MaxTokens,
+                ["percentage"] = usage.Percentage,
+                ["autoCompactThreshold"] = usage.AutoCompactThreshold,
+                ["autoCompactEnabled"] = usage.AutoCompactEnabled,
+                ["model"] = usage.Model,
+                ["categories"] = categories,
+                ["memoryFiles"] = Items(usage.MemoryFiles),
+                ["mcpServers"] = Items(usage.McpServers),
+                ["agents"] = Items(usage.Agents),
+                ["skills"] = Items(usage.Skills),
+                ["at"] = DateTime.UtcNow.ToString("o"),
+            };
+        }
+
+        /// <summary>host→web <c>background.tasks</c>: the background tasks still running (the bar above the
+        /// composer). They outlive their turn — the CLI process stays alive for them.</summary>
+        private void PostBackgroundTasks(BackgroundTasksChangedEvent bg)
+        {
+            var list = new JArray();
+            foreach (var t in bg.Tasks)
+            {
+                list.Add(new JObject
+                {
+                    ["id"] = t.TaskId,
+                    ["description"] = string.IsNullOrWhiteSpace(t.Description) ? "Background task" : t.Description,
+                });
+            }
+            // forget shells whose task is gone
+            foreach (var id in _backgroundShells.Keys)
+            {
+                if (!bg.Tasks.Any(t => t.TaskId == id))
+                    _backgroundShells.TryRemove(id, out _);
+            }
+            var hadTasks = _backgroundTaskList.Count > 0;
+            _backgroundTaskList = list;
+            Post(new JObject { ["type"] = "background.tasks", ["tasks"] = list.DeepClone() });
+            // The process that kept them alive is gone (Stop, a new chat, changed model/mode, the bar's
+            // stop button) — say so; the model learns it from the CLI's "stopped" notification next turn.
+            if (bg.ProcessEnded && hadTasks)
+                PostSystemNote("Background tasks stopped");
+        }
+
+        /// <summary>web→host <c>background.stop { id }</c>: stops one background task — kills just its
+        /// shell when it can be identified (the CLI then reports it and answers with a follow-up turn),
+        /// otherwise ends the process that keeps the tasks alive (all of them stop; the conversation is
+        /// unaffected). While a turn runs, only the single-shell kill is attempted.</summary>
+        private void HandleBackgroundStop(string? taskId)
+        {
+            var pid = _session.ActiveProcessId;
+            ShellCall? call = null;
+            if (!string.IsNullOrEmpty(taskId))
+                _backgroundShells.TryGetValue(taskId!, out call);
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    if (pid != null && call != null)
+                    {
+                        var target = ShellTaskProcess.Find(ProcessTree.GetChildren(pid.Value), call.TaskId, call.ToolName, call.Command);
+                        if (target != null)
+                        {
+                            ProcessTree.KillTree(target.Value);
+                            return;
+                        }
+                    }
+                    if (_session.IsBusy)
+                    {
+                        PostSystemNote("⚠ Could not find the process of this background task — stop the turn to end it.");
+                        return;
+                    }
+                    _session.StopBackgroundTasks(); // the exit clears the bar and posts the note
+                }
+                catch (Exception ex)
+                {
+                    PostSystemNote("⚠ Stopping the background task failed: " + ex.Message);
+                }
+            });
+        }
+
+        private void PostToolStopFailed(string toolUseId, string reason)
+        {
+            Post(new JObject { ["type"] = "tool.stopFailed", ["id"] = toolUseId });
+            PostSystemNote("⚠ " + reason);
+        }
+
         private void HandleRemoteStop()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -1925,21 +2314,47 @@ namespace CodeAstrogator.Bridge
         /// <summary>User-facing status line shown in the (locked) remote panel while a session runs.</summary>
         private string RemoteRunningMessage(bool resumed = true)
         {
+            if (_remoteTerminal is BackgroundRemoteSession bg)
+            {
+                if (bg.Url == null)
+                    return "Connecting to Remote Control…";
+                return (resumed ? "This chat is live for Remote Control. " : "A new remote session is live. ")
+                    + "Scan the code or open the link in the Claude app / claude.ai/code — what happens there shows "
+                    + "up below. \"End remote session\" returns the chat to this window.";
+            }
             return (resumed ? "This chat is now live in the terminal. " : "A new remote session is live in the terminal. ")
                 + "Open the link shown there from the Claude app or claude.ai/code. "
                 + "When you're done, close the terminal or click \"End remote session\" to return here.";
         }
 
-        private void PostRemoteTerminalState(string state, string? message = null)
+        /// <summary>Posts the running session's state: <c>ready</c> + message, and for a background session
+        /// the link (→ QR), busy/idle and whether it can be opened in a terminal. Any thread.</summary>
+        private void PostRemoteSessionState(bool resumed = true)
+        {
+            var session = _remoteTerminal;
+            if (session == null || !session.IsActive)
+                return;
+            PostRemoteTerminalState("ready", RemoteRunningMessage(resumed), session);
+        }
+
+        private void PostRemoteTerminalState(string state, string? message = null, IRemoteSession? session = null)
         {
             var msg = new JObject
             {
                 ["type"] = "remote.state",
                 ["state"] = state,
-                ["inTerminal"] = true,
+                ["inTerminal"] = session == null || session is RemoteTerminalLauncher,
             };
             if (message != null)
                 msg["message"] = message;
+            if (session != null)
+            {
+                if (session.Url != null)
+                    msg["url"] = session.Url;
+                if (session.Activity != null)
+                    msg["activity"] = session.Activity;
+                msg["canOpenTerminal"] = session.CanOpenTerminal;
+            }
             Post(msg);
         }
 
@@ -2402,6 +2817,21 @@ namespace CodeAstrogator.Bridge
         {
             switch (ev)
             {
+                case FollowUpTurnStartedEvent:
+                    // A background task finished and the CLI answers it with a turn of its own (the process
+                    // was kept alive for its tasks) — show it like any turn.
+                    _turnHadAssistantOutput = false;
+                    PostStatus("working");
+                    // it may edit files under review — free their read-only buffers (marshals itself)
+#pragma warning disable VSTHRD010
+                    _editReview.CloseAllTurnReviews();
+#pragma warning restore VSTHRD010
+                    break;
+
+                case BackgroundTasksChangedEvent bg:
+                    PostBackgroundTasks(bg);
+                    break;
+
                 case SessionInitEvent init when !string.IsNullOrEmpty(init.SessionId):
                     // the live-output watcher needs both to locate the CLI's task files
                     _turnSessionId = init.SessionId;
@@ -2507,7 +2937,9 @@ namespace CodeAstrogator.Bridge
                         ["input"] = tool.Input.DeepClone(),
                         ["status"] = "running",
                     });
-                    // decision #19 — edits the CLI approves without asking (acceptEdits/bypass) get
+                    if (tool.Name is "Bash" or "PowerShell" && !string.IsNullOrEmpty(tool.ToolUseId))
+                        _shellCalls[tool.ToolUseId] = new ShellCall(tool.Name, tool.Input.Value<string>("command"));
+                    // decision #19— edits the CLI approves without asking (acceptEdits/bypass) get
                     // the SAME green permission card as the manual flow (pre-decided "approved"),
                     // not a plain tool card + "Auto-approved" note. tool.result upgrades it to
                     // Applied/Failed via UpgradePermissionResult, exactly like an approved edit.
@@ -2545,8 +2977,16 @@ namespace CodeAstrogator.Bridge
                     // A foreground shell command started: stream its output into the card while it
                     // runs. Background tasks answer their tool_use immediately ("running in the
                     // background") and are killed with the per-turn process anyway — not tailed.
+                    // A background shell: remember its command for the stop button of the background bar.
+                    if (task.IsBackgrounded && !string.IsNullOrEmpty(task.TaskId) && !string.IsNullOrEmpty(task.ToolUseId)
+                        && _shellCalls.TryGetValue(task.ToolUseId, out var bgCall))
+                    {
+                        _backgroundShells[task.TaskId] = new ShellCall(bgCall.ToolName, bgCall.Command) { TaskId = task.TaskId };
+                    }
                     if (task.TaskType == "local_bash" && !task.IsBackgrounded)
                     {
+                        if (!string.IsNullOrEmpty(task.ToolUseId) && _shellCalls.TryGetValue(task.ToolUseId, out var call))
+                            call.TaskId = task.TaskId;
                         _taskOutput.Start(task.TaskId, task.ToolUseId,
                             string.IsNullOrEmpty(task.SessionId) ? _turnSessionId : task.SessionId,
                             _turnCwd);
@@ -2563,6 +3003,8 @@ namespace CodeAstrogator.Bridge
 
                 case ToolResultEvent result:
                     _taskOutput.StopByToolUse(result.ToolUseId); // flush any live output before the result
+                    if (!string.IsNullOrEmpty(result.ToolUseId))
+                        _shellCalls.TryRemove(result.ToolUseId, out _);
                     // A result for a tool whose permission/question prompt is STILL open means the
                     // CLI abandoned the prompt itself (e.g. the AskUserQuestion/permission tool timed
                     // out and the turn moved on). Settle it, close the orphaned card, and restore the
@@ -2591,6 +3033,21 @@ namespace CodeAstrogator.Bridge
                         ["summary"] = result.Summary,
                     });
                     UpgradePermissionResult(result.ToolUseId, result.IsError); // approved card → applied/failed
+                    // A subagent finished (CLI 2.1.287 sends no result event of its own for it any more):
+                    // its footer comes from the hand-back's stats — time, tool uses, tokens; no cost.
+                    if (result.Agent is { } agent && (agent.DurationMs > 0 || agent.TotalTokens > 0))
+                    {
+                        Post(new JObject
+                        {
+                            ["type"] = "agent.result",
+                            ["parentToolUseId"] = result.ToolUseId,
+                            ["durationMs"] = agent.DurationMs,
+                            ["totalTokens"] = agent.TotalTokens,
+                            ["toolUses"] = agent.ToolUses,
+                            ["model"] = agent.Model,
+                            ["isError"] = result.IsError || agent.Status is "failed" or "error",
+                        });
+                    }
                     break;
 
                 case TurnResultEvent turn when !string.IsNullOrEmpty(turn.ParentToolUseId):
@@ -2610,7 +3067,15 @@ namespace CodeAstrogator.Bridge
                     });
                     break;
 
+                case NotificationTurnResultEvent notification:
+                    // opens a resumed run: its total is the session total before the prompt — a baseline
+                    // for the turn cost when the record has none yet
+                    if (_history.Current.CostTotalUsd == null && notification.CostUsd > 0)
+                        _history.Current.CostTotalUsd = notification.CostUsd;
+                    break;
+
                 case TurnResultEvent turn:
+                    var turnCost = TurnCostUsd(turn); // before HasCliSession flips below
                     _history.Current.UpdatedAtUtc = DateTime.UtcNow;
                     if (turn.NumTurns > 0 && !string.IsNullOrEmpty(turn.SessionId))
                     {
@@ -2624,6 +3089,8 @@ namespace CodeAstrogator.Bridge
                     long contextTokens = turn.ContextInputTokens + turn.ContextOutputTokens;
                     if (contextTokens > 0)
                         _history.Current.ContextTokens = contextTokens;
+                    if (turn.ContextWindow > 0)
+                        _history.Current.ContextWindow = turn.ContextWindow;
                     // result-only turns (e.g. /help) carry no assistant-message usage — fall back
                     // to the aggregate (a single round-trip, so it equals the real size there)
                     long footerInput = contextTokens > 0 ? turn.ContextInputTokens : turn.InputTokens;
@@ -2640,7 +3107,10 @@ namespace CodeAstrogator.Bridge
                     {
                         ["type"] = "turn.result",
                         ["sessionId"] = turn.SessionId,
-                        ["costUsd"] = turn.CostUsd,
+                        // this turn's cost (session total minus the total after the previous turn) —
+                        // null when no baseline is known; the session total goes along for the tooltip
+                        ["costUsd"] = turnCost,
+                        ["sessionCostUsd"] = turn.CostUsd,
                         // footer mirrors the real context size (not the aggregated round-trip
                         // total) so the chat footer and the Ctx meter agree
                         ["tokens"] = new JObject
@@ -2655,6 +3125,7 @@ namespace CodeAstrogator.Bridge
                         // tokens above (last message), which feed the Ctx meter.
                         ["turnOutputTokens"] = turn.OutputTokens,
                         ["contextTokens"] = _history.Current.ContextTokens,
+                        ["contextWindow"] = _history.Current.ContextWindow,
                         // last known utilization; RefreshUsage() right after turn end updates it
                         ["limits"] = BuildLimits(),
                     });
@@ -2665,6 +3136,20 @@ namespace CodeAstrogator.Bridge
 #pragma warning disable VSTHRD010
                     BuildAndPostTurnReviewList();
 #pragma warning restore VSTHRD010
+                    break;
+
+                case ContextUsageEvent usage:
+                    // The CLI's answer to the context request sent at the turn's result (see
+                    // ClaudeSessionService.OnTurnResult) — arrives right after the turn was handed back.
+                    var contextUsage = BuildContextUsage(usage);
+                    _history.Current.ContextUsage = contextUsage;
+                    if (usage.MaxTokens > 0)
+                        _history.Current.ContextWindow = usage.MaxTokens;
+                    Post(new JObject
+                    {
+                        ["type"] = "context.usage",
+                        ["usage"] = contextUsage.DeepClone(),
+                    });
                     break;
 
                 case PromptSuggestionEvent suggestion:
@@ -2703,6 +3188,7 @@ namespace CodeAstrogator.Bridge
             DenyAllPendingPermissions("Turn ended");
 #pragma warning restore VSTHRD010
             _taskOutput.StopAll(); // the process is gone — nothing more will be written
+            _shellCalls.Clear();
             lock (_history) _recordedPermissions.Clear(); // tool.result correlation is per-turn
             if (error != null)
             {
@@ -2716,6 +3202,32 @@ namespace CodeAstrogator.Bridge
             RefreshUsage(); // the turn just consumed quota — update the meters
             TakePostTurnCheckpoint(); // "after" snapshot → this turn's diff is pre..post
             SaveHistory();
+        }
+
+        /// <summary>
+        /// This turn's cost. The CLI's <c>total_cost_usd</c> is the running total of the whole session —
+        /// across turns in one process and across <c>--resume</c> (measured 2.1.287) — so the footer used to
+        /// show e.g. "$141.06" for a 1½-minute turn of a long session. The turn's share is the difference
+        /// to the total after the previous turn (kept on the session record, persisted). A brand-new
+        /// conversation starts at 0; a resumed one without a known baseline (older record, imported
+        /// session) yields null — the footer then leaves the cost out once. Updates the baseline.
+        /// </summary>
+        private double? TurnCostUsd(TurnResultEvent turn)
+        {
+            var record = _history.Current;
+            var cost = TurnCost(record.CostTotalUsd, record.HasCliSession, turn.CostUsd);
+            if (turn.NumTurns > 0 || turn.CostUsd > 0)
+                record.CostTotalUsd = turn.CostUsd;
+            return cost;
+        }
+
+        internal static double? TurnCost(double? previousTotal, bool resumedSession, double total)
+        {
+            var baseline = previousTotal ?? (resumedSession ? (double?)null : 0);
+            if (baseline == null)
+                return null;
+            // a smaller total = the CLI started a fresh conversation (stale --resume retried without it)
+            return total >= baseline.Value ? total - baseline.Value : total;
         }
 
         /// <summary>When an approved edit's tool.result arrives, upgrade the persisted card +
@@ -2793,14 +3305,18 @@ namespace CodeAstrogator.Bridge
             // Merge per-window into the last-known-good so a partial/empty report never zeroes a meter.
             _lastUsage = ClaudeUsageClient.Merge(_lastUsage, fresh, DateTimeOffset.Now);
 
-            long contextTokens;
+            long contextTokens, contextWindow;
             lock (_history)
+            {
                 contextTokens = _history.Current.ContextTokens;
+                contextWindow = _history.Current.ContextWindow;
+            }
             var msg = new JObject
             {
                 ["type"] = "usage.update",
                 ["tokens"] = _session.TotalTokens,
                 ["contextTokens"] = contextTokens,
+                ["contextWindow"] = contextWindow,
                 ["sessionPct"] = _lastUsage?.SessionPct ?? 0,
                 ["weeklyPct"] = _lastUsage?.WeeklyPct ?? 0,
                 ["sessionResetsAt"] = _lastUsage?.SessionResetsAt?.ToString("o"),
@@ -3432,6 +3948,8 @@ namespace CodeAstrogator.Bridge
                 ["cwd"] = _package.GetSolutionDirectory() ?? "",
                 ["tokens"] = _session.TotalTokens,
                 ["contextTokens"] = _history.Current.ContextTokens,
+                ["contextWindow"] = _history.Current.ContextWindow,
+                ["contextUsage"] = _history.Current.ContextUsage?.DeepClone(),
                 ["limits"] = BuildLimits(),
                 ["plan"] = _planLabel ?? "",
                 ["verbosity"] = options.VerbosityString,

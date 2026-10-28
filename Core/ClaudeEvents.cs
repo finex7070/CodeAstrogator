@@ -123,6 +123,27 @@ namespace CodeAstrogator.Core
         public string ToolUseId { get; set; } = "";
         public bool IsError { get; set; }
         public string Summary { get; set; } = "";
+
+        /// <summary>Set when this is a subagent's (Agent/Task tool) hand-back — read from the message's
+        /// structured <c>tool_use_result</c>; <see cref="Summary"/> is then the subagent's clean report.</summary>
+        public SubagentStats? Agent { get; set; }
+    }
+
+    /// <summary>
+    /// What a finished subagent reports (CLI 2.1.287, <c>tool_use_result</c> of the Agent tool): it no
+    /// longer emits a <c>result</c> event of its own (so there is no <c>parent_tool_use_id</c> result and no
+    /// cost for it). The tool_result TEXT wraps the report in a harness frame ("[Subagent hand-back] The text
+    /// below is the final report …", indented report, <c>agentId: …</c>, <c>&lt;usage&gt;…&lt;/usage&gt;</c>),
+    /// which is meant for the model, not for display.
+    /// </summary>
+    public sealed class SubagentStats
+    {
+        public string? Status { get; set; }
+        public long DurationMs { get; set; }
+        /// <summary><c>totalTokens</c> — everything the subagent processed, its context included.</summary>
+        public long TotalTokens { get; set; }
+        public int ToolUses { get; set; }
+        public string? Model { get; set; }
     }
 
     /// <summary>result — end of turn with cost/usage (maps to turn.result).</summary>
@@ -135,6 +156,10 @@ namespace CodeAstrogator.Core
         public int NumTurns { get; set; }
 
         public bool IsError { get; set; }
+
+        /// <summary><c>total_cost_usd</c> — NOT this turn's cost: the CLI keeps it cumulative for the
+        /// whole session, across turns in one process and across <c>--resume</c> (measured 2.1.287).
+        /// API list-price basis (<c>modelUsage.*.costBasis: "list"</c>).</summary>
         public double CostUsd { get; set; }
         public long DurationMs { get; set; }
         public long InputTokens { get; set; }
@@ -146,6 +171,11 @@ namespace CodeAstrogator.Core
         /// turn (each re-reads the cached context, so the aggregate vastly over-counts context).</summary>
         public long ContextInputTokens { get; set; }
         public long ContextOutputTokens { get; set; }
+
+        /// <summary>Size of the main model's context window (<c>modelUsage.*.contextWindow</c>, e.g.
+        /// 1000000 for <c>claude-opus-5-5[1m]</c>); 0 when the result carries none (local turns). With
+        /// several models in the turn (subagents) the one that read the most input is the main loop.</summary>
+        public long ContextWindow { get; set; }
         public string? ResultText { get; set; }
 
         /// <summary>Set when this result belongs to a subagent (Task tool) rather than the main
@@ -171,6 +201,10 @@ namespace CodeAstrogator.Core
     {
         public string SessionId { get; set; } = "";
         public long DurationMs { get; set; }
+
+        /// <summary>The session's cost total before the user's prompt runs (unchanged by this zero-turn
+        /// result) — a baseline for the turn cost (see <see cref="TurnResultEvent.CostUsd"/>).</summary>
+        public double CostUsd { get; set; }
     }
 
     /// <summary>
@@ -186,6 +220,54 @@ namespace CodeAstrogator.Core
     }
 
     /// <summary>
+    /// The CLI's context breakdown — its <c>control_response</c> to our <c>get_context_usage</c> request
+    /// (see <see cref="StreamJsonInput.BuildContextUsageRequest"/>), sent after each turn's result.
+    /// Undocumented; measured against CLI 2.1.294.
+    /// </summary>
+    public sealed class ContextUsageEvent : ClaudeEvent
+    {
+        /// <summary>Tokens the CLI counts as occupied (everything except free space and deferred tools).</summary>
+        public long TotalTokens { get; set; }
+        public long MaxTokens { get; set; }
+        public int Percentage { get; set; }
+        public long AutoCompactThreshold { get; set; }
+        public bool AutoCompactEnabled { get; set; }
+        public string? Model { get; set; }
+
+        /// <summary>In the CLI's order: System prompt, System tools, MCP tools, …, Free space.</summary>
+        public List<ContextCategory> Categories { get; } = new List<ContextCategory>();
+
+        public List<ContextItem> MemoryFiles { get; } = new List<ContextItem>();
+
+        /// <summary>One entry per MCP server: <see cref="ContextItem.Count"/> = its tools,
+        /// <see cref="ContextItem.Tokens"/> = what its loaded (non-deferred) tools take up.</summary>
+        public List<ContextItem> McpServers { get; } = new List<ContextItem>();
+
+        public List<ContextItem> Agents { get; } = new List<ContextItem>();
+        public List<ContextItem> Skills { get; } = new List<ContextItem>();
+    }
+
+    public sealed class ContextCategory
+    {
+        public string Name { get; set; } = "";
+        public long Tokens { get; set; }
+
+        /// <summary><c>used</c> | <c>deferred</c> (tool definitions not loaded into the context) |
+        /// <c>buffer</c> (autocompact reserve) | <c>free</c>.</summary>
+        public string Kind { get; set; } = "used";
+    }
+
+    public sealed class ContextItem
+    {
+        public string Name { get; set; } = "";
+
+        /// <summary>Secondary text: memory-file type + path, agent/skill source.</summary>
+        public string? Detail { get; set; }
+        public long Tokens { get; set; }
+        public int Count { get; set; }
+    }
+
+    /// <summary>
     /// <c>system/background_tasks_changed</c> — the set of running background tasks changed. While any
     /// is running, the CLI keeps the process alive past the turn's <c>result</c> and answers the task's
     /// completion with a follow-up turn of its own (CLI 2.1.287).
@@ -193,6 +275,41 @@ namespace CodeAstrogator.Core
     public sealed class BackgroundTasksChangedEvent : ClaudeEvent
     {
         public int Count { get; set; }
+
+        /// <summary>The running tasks (<c>tasks[]</c>: <c>task_id</c>, <c>description</c>).</summary>
+        public System.Collections.Generic.IReadOnlyList<BackgroundTaskInfo> Tasks { get; set; } =
+            System.Array.Empty<BackgroundTaskInfo>();
+
+        /// <summary>Not from the CLI: raised by the session service when the process that kept the
+        /// tasks alive is gone (stopped, replaced, session changed) — the tasks ended with it.</summary>
+        public bool ProcessEnded { get; set; }
+    }
+
+    public sealed class BackgroundTaskInfo
+    {
+        public string TaskId { get; set; } = "";
+        public string? TaskType { get; set; }
+        public string? Description { get; set; }
+    }
+
+    /// <summary>
+    /// Not from the CLI: the session service raises it when a process that was kept alive for its
+    /// background tasks starts a turn on its own — the CLI answering a finished task with a follow-up
+    /// turn while no prompt of ours was pending. The UI goes back to "working" for it.
+    /// </summary>
+    public sealed class FollowUpTurnStartedEvent : ClaudeEvent
+    {
+    }
+
+    /// <summary>
+    /// A <c>user</c> event with <c>isReplay: true</c> (<c>--replay-user-messages</c>): the CLI has taken up
+    /// one of the messages we wrote to stdin. Measured 2.1.287: a message written while a background
+    /// task's follow-up turn is about to start is queued behind it (follow-up <c>init</c> → <c>result</c>,
+    /// then <c>init</c> → this replay → answer → <c>result</c>) — so a result before the replay is not
+    /// the end of our prompt's turn. Session-service internal; not forwarded.
+    /// </summary>
+    public sealed class UserMessageReplayedEvent : ClaudeEvent
+    {
     }
 
     /// <summary>The CLI is retrying an API call (informational).</summary>

@@ -276,6 +276,10 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
   layout of the window itself was only built, not looked at.
 
 ## Tasks banner (2026-06-24)
+- **Moved above the composer (2026-10-28, user request):** the live lists now sit together above the input in a
+  fixed order — `#tasks-banner` (a card like the others, no longer a `notice-banner`), `#bg-tasks` (background
+  tasks), `#agents-running` (subagents), then the edit review and the composer. The top slot below the header is
+  now the Remote Control banner.
 - **What:** A third banner below the header (`#tasks-banner`, class `notice-banner tasks-banner`)
   that aggregates the CLI's **`Task*` tool calls** into a live, collapsible checklist (☐ pending /
   ◐ in_progress / ☑ completed + a done/total count) so a long multi-step turn can be followed at a
@@ -320,8 +324,8 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 3. `updatedInput` (edit the diff before approve) — **redeemed with #1 (extended mode)**.
    Remaining open: multi-tab, context injection of the active editor.
 4. Remote Control expansion (optional): worktree spawn mode (`--spawn worktree`),
-   show remote sessions in the history already **during** the run,
-   `CONTEXT_MAX_TOKENS` model-dependent instead of fixed 200k.
+   show remote sessions in the history already **during** the run.
+   (Context window model-dependent instead of fixed 200k: done 2026-10-28, see `context.usage`.)
 
 Done (2026-06-03): `session.rename` + limits `resets_at` tooltips; theme fix
 (inline vars), copy context menu, Ctrl+V file/image paste, dynamic slash menu +
@@ -330,9 +334,36 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **`context.usage` (host → web, 2026-10-28)** — `{ usage }`: the CLI's context breakdown after a turn
+  (see "Context breakdown" under CLI integration). `usage` = `{ totalTokens, maxTokens, percentage,
+  autoCompactThreshold, autoCompactEnabled, model, categories: [{ name, tokens, kind }], memoryFiles,
+  mcpServers, agents, skills: [{ name, tokens, detail?, count? }], at }` (built by
+  `WebViewBridge.BuildContextUsage`, also stored on the session record and replayed as
+  `session.init.contextUsage`). `contextWindow` (the model's window size, 0 = unknown) now rides along with
+  `contextTokens` in `session.init` / `turn.result` / `usage.update`. **This brings the context meter back**
+  (removed in 0.2.1 because the window was a fixed 200k guess): statusbar "Context n%" after the Weekly
+  meter — the CLI's `percentage` when a breakdown exists, else `contextTokens / contextWindow`; dimmed "—"
+  before the first turn; same ≥75 % warn / ≥90 % crit colours as the usage meters. It is a `<button>`:
+  click opens the breakdown popover (`.ctx-pop`, above the statusbar, right-aligned) — headline
+  "n% used · used / max", a stacked bar, one row per category (used largest first, then autocompact buffer,
+  free space, and the deferred tool definitions with "—" since they are not in the context), collapsed
+  `<details>` lists for MCP servers / memory files / custom agents / skills, footer "model · autocompact at
+  … · as of the last turn" with a **"Compact" button** (`ctxFooter`): `runSlash("/compact")` = `slash.run`,
+  the same path as the slash menu — deliberately not `prompt.send`, which would append the active-file
+  `@`-reference and turn it into compact instructions. Warn-coloured from 75 %, disabled while a turn runs /
+  remote control is active; the compact turn's result brings a fresh breakdown. Swatch colours: `--ctx-*` vars per theme (Messages / System tools / MCP tools /
+  System prompt coloured like the Claude app, the rest grey). No session check in the UI: a process the
+  host is ending (session switch) forwards nothing.
 - **`prompt.suggestion` (host → web, 2026-10-08)** — `{ text, sessionId? }`: the CLI's predicted next prompt,
-  sent a few seconds after `turn.result`/`status: ready`. The WebUI shows it as the composer placeholder
-  (ghost text) while the input is empty, with a "Tab to use" hint; **Tab** copies it into the input (then edit
+  sent a few seconds after `turn.result`/`status: ready`. The WebUI shows it as ghost text while the input is
+  empty — an overlay (`.suggestion-ghost`) laid over the textarea with the same font/padding, the real
+  placeholder blanked meanwhile — with the "Tab to use" hint **inline right after the text** (2026-10-28; it
+  used to sit far right in the toolbar, next to the model button, and the textarea placeholder was the ghost
+  text). The hint is a small chip (UI font, border, elevated background, 14 px gap) so it can't be read as
+  part of the suggestion. `autoGrow` makes room when a long suggestion wraps. **Deviation from §B
+  composer spec (2026-10-28):** the placeholder is now just `Chart a course for Claude…`; "Shift+Enter for a
+  new line" moved into the toolbar, left of the model button (`.newline-hint`, hidden below 560 px panel
+  width so it never squeezes the file chip / model button). **Tab** copies it into the input (then edit
   or Enter), **Esc** drops it. Never sent on its own. Ignored while a turn runs / remote control is active;
   cleared by `prompt.send`, `status: working`, `session.init`, `transcript.load`. `text: ""` clears it (sent
   when the option is switched off). See "CLI integration → Prompt suggestions".
@@ -348,6 +379,34 @@ compact_boundary evaluation) — details in the respective sections below.
   the running Bash/PowerShell command whose card has tool_use id `id`. Appended, never replaces; ignored
   once the card has its `tool.result`. `start: true` (empty `text`) is sent at `task_started` and only opens
   the empty console. See "CLI integration → Live console output".
+- **`prompt.send` with attachments only (2026-10-28, user request).** A prompt no longer needs text: a
+  screenshot (or any explicit attachment) alone is sendable. WebUI `canSend()` = text **or**
+  `state.attachments.length > 0` (`renderAttachments` re-evaluates the send button); host `HandlePromptSend`
+  accepts an empty `text` when `attachments` is non-empty (the auto-attached active editor file alone does
+  not count). The CLI prompt then starts directly with "Attached files:" (no leading blank lines), images
+  still go as base64 blocks; an attachment-only first prompt titles the session after its first file.
+- **`turn.result.costUsd` = the turn's own cost, `sessionCostUsd` = the session total (2026-10-28).** User
+  report: footers like "1m 31s · 7,782 tok · $141.06" next to "18m 18s · 71,247 tok · $10.19" looked
+  arbitrary. Measured against 2.1.287: `result.total_cost_usd` (and `modelUsage.*`) is the **running total of
+  the whole session** — cumulative over the turns of one process and **across `--resume`** (run 1: $0.00289,
+  resumed run 2: $0.00562) — while `usage.*` and `duration_ms` are per turn. The footer showed that total.
+  Now the bridge sends the difference to the total after the previous turn (`SessionRecord.CostTotalUsd`,
+  persisted as `costTotalUsd`; a brand-new conversation starts at 0; the zero-turn result of a queued
+  task notification also seeds it). Without a baseline (record from before this change, imported session)
+  `costUsd` is null and the footer leaves the cost out once. A smaller total than the baseline = the CLI
+  started over (stale `--resume` retry) → the total itself. The footer tooltip shows the session total and
+  that the figure is at **API list prices** (`costBasis: "list"`) — not billed on a subscription.
+  Subagents: CLI 2.1.287 reports no cost for them at all (see "Subagent (Task tool) results"); their cost is
+  inside the turn's. Tests: `TurnCostTests`.
+- **`background.tasks` (host → web) / `background.stop` (web → host), 2026-10-28** —
+  `background.tasks { tasks: [{ id, description }] }` replaces the list of background tasks still running
+  (bar above the composer; empty list hides it; re-sent on `ready`). `background.stop { id }` stops one (see
+  "Background tasks outlive the turn").
+- **`tool.stop` (web → host) / `tool.stopFailed` (host → web), 2026-10-28** — `tool.stop { id }`: the
+  stop button of a running Bash/PowerShell card; the host kills just that command's process tree (the turn
+  goes on, the CLI answers with a failed `tool.result`, which the card shows as "stopped"). When the
+  process cannot be identified or is already gone, the host answers `tool.stopFailed { id }` (re-arms the
+  button) plus a system note. See "CLI integration → Stopping commands".
 - **`models.list` (host → web, 2026-09-23)** — `{ models: [{ id, label, family, primary }] }`, the list
   the Model·Mode picker renders. `primary: true` = top-level row (newest model of its family the CLI
   accepts), `false` = "More models" submenu. Sent on `ready`, again after an options change, and once
@@ -480,7 +539,7 @@ compact_boundary evaluation) — details in the respective sections below.
 - **Further additions from 2026-06-03** (details in dedicated sections below):
   `slash.commands` (host→web), `clipboard.paste` (web→host),
   `remote.start`/`remote.stop` (web→host) + `remote.state` (host→web),
-  `contextTokens` in `session.init`/`turn.result`/`usage.update`.
+  `contextTokens` in `session.init`/`turn.result`/`usage.update` (+ `contextWindow` since 2026-10-28).
 - **Turn footer (2026-06-30):** the divider line below each turn now renders
   **`durationMs · turnOutputTokens tok · costUsd`** (was time-only). `turnOutputTokens`
   = `TurnResultEvent.OutputTokens` = `result.usage.output_tokens`, the **aggregate output
@@ -503,6 +562,22 @@ compact_boundary evaluation) — details in the respective sections below.
   instead of a second `turn-footer`. The main result still renders the real turn footer, whose
   totals already include the subagent. **Protocol-dependent — re-verify `parent_tool_use_id` on
   subagent `result` events when the CLI updates.**
+  - **CLI 2.1.287 (measured 2026-10-28, Haiku, two `Agent` runs in one session): a subagent emits NO
+    `result` event any more** — no `parent_tool_use_id` anywhere, so the footer above never appeared. What
+    arrives: `system/task_started` (`task_type: "local_agent"`, `subagent_type`, `prompt`), `task_updated`,
+    `task_notification` (`summary` = the report, `usage: {total_tokens, tool_uses, duration_ms}`), then the
+    Agent tool's `tool_result`. Its **text** is a model-facing frame — "[Subagent hand-back] The text below is
+    the final report of a subagent … The report follows:", the report **indented**, `agentId: … (use
+    SendMessage …)`, `<usage>subagent_tokens … tool_uses … duration_ms</usage>` — and that whole frame is
+    what the agent card showed. The message's structured **`tool_use_result`** has the clean parts:
+    `status`, `content[]` (the report), `resolvedModel`, `totalDurationMs`, `totalTokens`,
+    `totalToolUseCount`, `usage`, **no cost**. Now `NdjsonParser` recognises it (`agentId`), puts the clean
+    report into the `ToolResultEvent.Summary` (a backgrounded agent's empty launch ack keeps the CLI text)
+    and attaches `SubagentStats`; the bridge posts `agent.result { parentToolUseId, durationMs, totalTokens,
+    toolUses, model, isError }` → footer "Agent finished · 0.7s · 0 tool uses · 24,043 tok" (tooltip: tokens
+    include the subagent's own context; its cost is part of the turn's — verified: the turn's
+    `modelUsage.outputTokens` 229 = main 225 + subagent 4). The old `parent_tool_use_id` path stays for older
+    CLIs. Tests: `NdjsonParserTests.SubagentHandBack_…` (real line as fixture `subagent-handback.ndjson`).
   - **Safety net (0.6.0):** because that tagging is protocol-dependent (untagged subagent results
     would otherwise each render their own turn footer → several footers at turn end), `app.js`
     `turnResult` now keeps only ONE turn footer per turn: each `turn.result` removes the previous
@@ -762,8 +837,9 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   multiline prompts and the npm `claude.cmd` shim. **Since 2026-10-08 as one stream-json user message**
   (`--input-format stream-json`, `Core/StreamJsonInput`): `{"type":"user","message":{"role":"user",
   "content":[{"type":"text","text":…}]}}` + `\n`, non-ASCII escaped as `\uXXXX` (stdin encoding under
-  net472 is not UTF-8), then stdin is closed — **still one process per turn**, not the removed persistent
-  mode. Verified against CLI 2.1.287: `@path` expansion ("Attached files:"), custom and built-in slash
+  net472 is not UTF-8). stdin is closed at the turn's `result` (since 2026-10-28; before that right after
+  the message — same effect, the CLI finishes the turn either way) — **still one process per turn**, not
+  the removed persistent mode. Only exception: background tasks (see "Background tasks outlive the turn"). Verified against CLI 2.1.287: `@path` expansion ("Attached files:"), custom and built-in slash
   commands (`/context`, `/compact` incl. `compact_boundary`), `--resume` all behave as with plain text.
   Reason: only this input mode surfaces `prompt_suggestion` (plain text: the suggestion is generated but
   never printed).
@@ -781,13 +857,32 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     deliver the suggestion: from then on **only `PromptSuggestionEvent`s are forwarded**, everything else of
     that process is dropped. The next `RunTurnAsync` (and `ResetSession`/`AttachSession`) kills it first
     and waits ≤ 5 s for it to exit, so two processes never write the same session.
-  - **Not while background tasks run** (`system/background_tasks_changed`, tracked as a count): CLI 2.1.287
-    keeps the process alive until a `run_in_background` task finishes and then answers its
-    `task_notification` with a **follow-up turn in the same process** (`init` → answer → second `result`) —
-    in plain-text mode too, so this is not caused by stream-json. That follow-up must still be shown, so the
-    turn end stays at the next result with no task running (or at exit). Note: a never-ending background
-    task (dev server) therefore keeps the turn "working" — pre-existing, separate issue.
+  - **While background tasks run** (`system/background_tasks_changed`): CLI 2.1.287 keeps the process alive
+    until a `run_in_background` task finishes and then answers its `task_notification` with a **follow-up
+    turn in the same process** (`init` → answer → second `result`) — in plain-text mode too. Until
+    2026-10-28 the turn therefore stayed "working" until then (a log capture blocked the chat — user report);
+    now the turn is handed back at the result and the process stays — see "Background tasks outlive the
+    turn" below.
   - Off (option or old CLI): no flag, no early hand-back — behaviour as before.
+- **Context breakdown (2026-10-28, CLI 2.1.294, undocumented — retest on CLI updates).** Two sources:
+  1. `result.modelUsage["<model>"].contextWindow` (e.g. `1000000` for `claude-opus-5-5[1m]`) →
+     `TurnResultEvent.ContextWindow`; with several models in one turn (subagents) the entry with the most
+     input (incl. cache) is the main loop (`NdjsonParser.MainContextWindow`).
+  2. The stream-json **control request** `{"type":"control_request","request_id":"astrogator-context-<n>",
+     "request":{"subtype":"get_context_usage"}}` (`StreamJsonInput.BuildContextUsageRequest`) — the same data
+     as `/context` (which via `-p` only returns a markdown table), answered **locally (no model call, $0)** as
+     `{"type":"control_response","response":{"subtype":"success","request_id":…,"response":{ categories:
+     [{name,tokens,color,kind: used|deferred|buffer|free}], totalTokens, maxTokens, rawMaxTokens, percentage,
+     model, autoCompactThreshold, isAutoCompactEnabled, memoryFiles: [{path,type,tokens}], mcpTools:
+     [{name,serverName,tokens,isLoaded}] (one per tool — 300+ possible, grouped per server by the parser),
+     agents: [{agentType,source,tokens}], skills: {skillFrontmatter: [{name,source,pluginName?,tokens}]},
+     slashCommands, messageBreakdown, gridRows, apiUsage }}}`. `ClaudeSessionService.OnTurnResult` writes it
+     at every top-level result **before** closing stdin (or into the kept-open stdin while background tasks
+     run); **the CLI still answers after EOF** (measured: ~0.5 s after the result, then exits 0). The answer
+     → `ContextUsageEvent` → `context.usage`; it is also forwarded in the `Draining` state (next to the prompt
+     suggestion). An unknown subtype (older CLI) gets `{"subtype":"error","error":"Unsupported control
+     request subtype: …"}` with exit 0 — dropped by the parser, the meter falls back to source 1. Only
+     responses whose `request_id` carries our prefix are parsed.
 - **Queued background-task notification = its own zero-turn `result` (CLI 2.1.280, 2026-09-23).**
   When a `run_in_background` task from an earlier turn has reported back, the next `-p` run opens with
   `system/task_notification` → `system/init` → **`result`** (`num_turns: 0`, `result: ""`,
@@ -843,11 +938,79 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **Tests:** `TaskOutputWatcherTests` (layout, incremental reads, split UTF-8, delete ⇒ end, flush on stop,
     fallback search), `NdjsonParserTests.ForegroundCommand_…`; mock turn has a PowerShell deploy with a `\r`
     progress bar and an ANSI colour code.
-- **Background tasks do not survive the turn.** The notification above reads `"status": "stopped"`,
-  `"summary": "Background shell command didn't finish before the previous session ended"`: every turn is
-  its own `claude -p` process, and a `run_in_background` shell still running when that process exits is
-  stopped with it. So "the deploy keeps running in the background, I'll report back" cannot work in this
-  extension — the model does not know that. Open point, not addressed yet.
+- **Stopping commands (2026-10-28, `Core/ProcessTree`, `Core/ShellTaskProcess`).** User report: after
+  **Stop**, a long Bash command (`timeout 540 ./logcapture.exe …`) kept running and its card kept spinning on
+  "waiting for output…" forever. Two causes: (1) `Process.Kill()` on `claude.exe` (net472 has no
+  `entireProcessTree`) orphaned the CLI's shell children and everything they launched; (2) a killed CLI sends
+  no `tool_result`, so nothing ever finished the card.
+  - **Turn Stop** now kills the whole tree (`ProcessTree.KillTree` = `taskkill /PID … /T /F`, run off the UI
+    thread). This also takes down the CLI's stdio MCP servers — they die with the CLI anyway.
+  - **WebUI:** when the status goes `ready`/`error`, every tool card still showing its spinner is marked
+    **stopped** (`finalizeRunningToolCards`: neutral square glyph, dashed border, console no longer live).
+  - **Per-command stop button** (square, in the card head next to the status) appears with the live console
+    (i.e. only for foreground `local_bash` tasks). `tool.stop` → the bridge looks the command up
+    (`_shellCalls`: tool name + command from `tool_use`, task id from `task_started`), lists the direct
+    children of the turn's CLI process (`ClaudeSessionService.ActiveProcessId`, WMI `Win32_Process`) and picks
+    the command's shell (`ShellTaskProcess.Find`), then kills its tree. The CLI reports the command as failed
+    (`exit code 1`) and the model continues — it is **not** told that the user stopped it (no channel for
+    that in a one-shot `-p` process); the partial output plus the exit code are what it sees.
+  - **How the CLI launches commands** (measured against 2.1.287, 2026-10-28 — undocumented, re-verify on a
+    CLI update): **PowerShell tool** = `cmd.exe /d /s /c ""chcp.com" 65001 >nul & "pwsh.exe" … -Command
+    "…CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT…" > "…\tasks\<task_id>.output" 2>&1"` → matched exactly by the task
+    file name. **Bash tool** = `bash.exe -c "source …shell-snapshots… && eval '<command>' < /dev/null && pwd -P
+    >| …"` (no task id) → matched by `eval '<command>'` (bash single-quoting `'` → `'"'"'`, then Windows
+    command-line escaping `"` → `\"`). If the command does not match (CLI rewrote it), the only running bash
+    child is taken; with several candidates nothing is guessed (`tool.stopFailed` + note "use the turn's Stop
+    button"). Other children (stdio MCP servers via `cmd.exe /c npx …`, `unity.exe mcp`, conhost) never match.
+    Verified by hand: `taskkill /T /F` on the bash child ends `bash → bash → sleep`, and the CLI reports
+    "failed with exit code 1".
+  - **Tests:** `ShellTaskProcessTests` (real command lines: PowerShell wrapper, quoted bash command incl.
+    single quotes, fallback, ambiguity, MCP children ignored).
+- **Background tasks outlive the turn (2026-10-28, `ClaudeSessionService`).** User report: Claude started a
+  staging log capture with `run_in_background` ("tell me when you're done testing") — the chat stayed on
+  "Working…" and the only way to answer was Stop, which killed the capture ("Background shell command didn't
+  finish before the previous session ended", `status: stopped`).
+  - **Measured against CLI 2.1.287** (probe: `claude -p --input-format stream-json`, stdin kept open, Haiku,
+    `sleep 35` in the background): a **second user message written to stdin while the task runs is
+    answered right away** (`init` → answer → `result`, task untouched); when the task ends the CLI reports it
+    (`task_updated`, `task_notification completed`, `background_tasks_changed []`) and runs its own follow-up
+    turn; closing stdin afterwards → clean exit 0. `background_tasks_changed.tasks[]` carries `task_id`,
+    `task_type`, `description`.
+  - **Process states** (`CliProcess.State`): `Turn` (everything forwarded) → at the top-level `result`:
+    tasks running → **`Idle`**: turn handed back (`TurnCompleted`, busy cleared), **stdin stays open**,
+    events still forwarded; no tasks → stdin closed, then `Draining` (suggestion only) or wait for the exit
+    as before. A prompt sent while `Idle` is **written into that process** (`TryContinueInLiveProcess`) when
+    its launch key (exe, cwd, all flags but `--resume`) still matches; otherwise (model/mode/effort changed,
+    a follow-up already on its way, broken pipe) the process is ended first — its tasks stop with it — and
+    a new one starts with `--resume` as usual. In `Idle`, a `system/init` = the CLI's own **follow-up
+    turn**: the service takes the busy flag, raises `FollowUpTurnStartedEvent` (bridge → `status: working`)
+    and ends it at its result / the exit (`FollowUp`: nobody awaits it).
+  - This is deliberately **not** the removed persistent mode: one process per turn stays the rule; stdin
+    only stays open while background tasks keep the process alive anyway.
+  - **UI:** host→web `background.tasks` → a bar above the composer (same look as "Agent running") with a
+    spinner, the task's description and a stop button per task → web→host `background.stop { id }`: the
+    bridge kills just that task's shell when it can identify it (`ShellTaskProcess`, command remembered from
+    the `tool_use` at `task_started` with `is_backgrounded`) — the CLI reports it as failed and answers with a
+    follow-up turn — otherwise it ends the idle process (`StopBackgroundTasks`: all tasks stop, the
+    conversation is unaffected). When the process ends with tasks still listed, the session raises
+    `BackgroundTasksChangedEvent { ProcessEnded }` → the bar clears + note "Background tasks stopped".
+  - **Ends the idle process:** turn Stop (while a turn runs in it), a new chat / loading a session, a prompt
+    with changed settings, closing the tool window (`Shutdown`).
+  - **Race: prompt between a task's end and the follow-up's start (fixed 2026-10-28).** Measured against
+    2.1.287 (probe writes a message right after `task_notification`, before the follow-up's `init`): the CLI
+    **queues** it — follow-up `init` → answer → `result`, then `init` → our message → answer → `result`;
+    nothing is lost. With **`--replay-user-messages`** (passed when `--help` lists it,
+    `CliCapabilities.SupportsReplayUserMessages`) the CLI echoes each stdin message as a `user` event with
+    `isReplay: true` when it takes it up (`UserMessageReplayedEvent`, internal, not forwarded). So such a
+    prompt is now written into the process too (`TryContinueInLiveProcess` accepts a non-reusable idle process
+    when `Replay` is on), `AwaitingReplay` counts the unacknowledged messages, and a `result` while it is > 0
+    is the follow-up's — shown inside our turn, which only ends at the first result after the replay. The
+    first message of every process is replayed as well (ignored: nothing awaited). Without the flag (older
+    CLI) the old fallback stays: the process is replaced and the follow-up lost. Test:
+    `PromptInTheRaceWindow_IsQueuedBehindTheFollowUp_NothingLost`.
+  - **Tests:** `SessionServiceTests` (`LiveProcessHost` with a scripted stdin): prompt goes into the same
+    process, follow-up turn shown then exit, changed settings → new process + `ProcessEnded`,
+    `StopBackgroundTasks`. Mock: the demo turn leaves a "Capture staging log" task in the bar.
 - **Effort:** 5 levels instead of the 3 from §5.4 — the CLI (checked against 2.1.161) knows
   `--effort low|medium|high|xhigh|max`; passed through per turn
   (default **high**, configurable in Tools → Options).
@@ -1209,7 +1372,47 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   to the CLI still goes the text **with** the `@<path>` block. `SessionHistoryStore`
   serializes the whole message → `attachments` survives reload. The mock history shows two chips.
 
-## Remote Control (2026-06-03; reworked 2026-06-21 → interactive, resumes the current chat)
+## Remote Control (2026-06-03; reworked 2026-06-21 → interactive, resumes the current chat; 2026-10-28 → CLI background session)
+- **Current shape (1.0.0, CLI 2.1.29x+): a CLI background session** — `Services/BackgroundRemoteSession`, chosen when
+  `--help` lists `--bg` (`CliCapabilities.SupportsBackgroundSessions`); the console variant below
+  (`RemoteTerminalLauncher`) stays as the fallback for older CLIs. Both implement `Services/IRemoteSession`.
+  - **CLI facts (measured 2.1.294, 2026-10-28):** `claude --bg [--resume <id>] --remote-control [name]` returns after
+    ~2 s printing "backgrounded · `<short id>`" (+ hints `claude attach|logs|stop <id>`); the CLI's **daemon**
+    (`claude daemon run --origin transient`) hosts the interactive session in a pseudo terminal (`--bg-pty-host`) —
+    no window, independent of the starting process, so it **outlives VS**; the transient daemon exits by itself once
+    no session is left. `claude logs <id>` = the session's terminal (ANSI): "/rc connecting…" then after ~8 s
+    "/remote-control is active · Continue here, on your phone, or at **https://claude.ai/code/session_…**" — the
+    same conversation got the **same** link on a second start. `claude agents --json [--all]` (no TTY) lists every
+    active session — interactive ones (our `-p` turns too) and background ones (`id`, `sessionId`, `kind:
+    "background"`, `status: busy|idle`, `state: "blocked"` = waiting for input / `"stopped"`, `pid`, `startedAt`).
+    `claude stop <id>` → `state: "stopped"` (conversation kept); `claude rm <id>` drops the registry entry — the
+    transcript `.jsonl` stays (verified). The old `claude remote-control` **subcommand** is no longer listed and
+    ignores `--help` (it starts a server — don't probe it with `--help`).
+  - **Flow:** `HandleRemoteStart` → `ClaudeWorkspaceTrust.EnsureTrusted` → `StartAsync` (`--bg [--resume] --remote-control
+    "<chat title>"`, short id parsed via `ClaudeBackgroundSessions.ParseStartedId`). A monitor polls `logs` every 2 s until
+    `ExtractRemoteUrl` finds the link, then every 3 s `agents --json --all` (busy/idle, the session id of a fresh
+    session; **two** consecutive "gone/stopped" observations end it → `Ended` → the unchanged import + reload). Every
+    poll raises `Changed`: the bridge posts `remote.state ready { url, activity, canOpenTerminal, inTerminal: false }`
+    and **mirrors the transcript live** — when `~\.claude\projects\<munged cwd>\<sessionId>.jsonl` changed (write time),
+    it is re-imported (`CliSessionReader.ImportTranscript`) and posted as `transcript.load` (the first sighting only
+    records the stamp). "End remote session" = `stop` + `rm`. `remote.openTerminal` → a PowerShell console with
+    `claude attach <id>` (closing it leaves the session running). `Dispose` (window/VS closing) only stops the polling;
+    on the next `ready` the bridge **re-adopts** a still-running background session of the current chat
+    (`TryAdoptRemoteSession`: `agents --json`, `kind background` + `sessionId` = current record) and locks the panel
+    again ("Remote control is still running for this chat").
+  - `ClaudeBackgroundSessions.RunAsync` waits for the **process**, not for EOF on its pipes (the spawned daemon could
+    inherit them) — verified: the `--bg` call returns in ~2 s.
+  - **WebUI:** `#remote-panel` is a **banner in the flow below the header** (`notice-banner remote-panel`, like the
+    old tasks banner) — not an overlay, so the transcript below stays visible with the live mirror (user feedback:
+    a card over the transcript hid the chat). Head: icon, "Remote Control", "· working…/· waiting", "Copy link",
+    "Open in terminal", "End remote session", chevron; a click on the head folds the body (`.min`, kept across
+    status polls; the buttons don't fold). Body: QR (`qr.js`, `drawQr` on a 120 px canvas), link (opens in the
+    browser), status text. Statusbar "Remote: Claude is working…" while busy. The console fallback uses the same
+    banner (no QR/link — the console shows them). Composer stays locked as before (two processes on one
+    conversation would race).
+  - **Tests:** `BackgroundSessionsTests` (start output, logs → link, agents running/stopped, garbage). E2E by hand
+    against 2.1.294 with the built DLL: start 1.9 s, link after 8 s, `idle`, end clean, daemon gone, registry empty.
+- **The console variant (fallback, unchanged since 2026-06-21):**
 - **What it does (v0.5.1):** opens the **current chat** in an **interactive** Claude Code session with
   Remote Control enabled — `claude --resume <id> --remote-control` (a top-level flag) — in a standalone
   **PowerShell** console. So you continue *this* conversation from the Claude app / claude.ai/code.
@@ -1257,8 +1460,8 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   attachment chips via `.remote-locked`) and Rename/History/New chat (`setRemoteLocked`); only the gear stays
   usable. Statusbar state `remote` (accent pulse). Host re-announces `remote.state ready` on WebView reload
   while active. (`WebUI/qr.js` is now unused by this flow but left in place.)
-- **Limitation (deliberate):** no live mirror in the tool window — you work in the terminal; the chat reloads
-  the advanced conversation when the session ends.
+- **Limitation (deliberate, console variant only):** no live mirror in the tool window — you work in the terminal;
+  the chat reloads the advanced conversation when the session ends. (The background variant mirrors live.)
 - **Workspace trust (v0.4.3, CLI 2.1.178):** Unlike headless `claude -p` (which bypasses the
   workspace-trust check entirely), `claude --remote-control` **refuses to start in an untrusted
   directory** (`"Error: Workspace not trusted. Please run `claude` … first"`). Opening a project
@@ -1695,8 +1898,8 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   `""` (a file created this turn, `isNew`). `NotebookEdit` isn't modelled by `EditReviewSession` → applied but
   not reviewed.
 - **State (all under `_turnReviewLock`):** `_turnEditBaselines` (path→pristine), `_turnBaselineSkip`,
-  `_turnReviews` (path→`{Session,Baseline,IsNew}`, present ⇒ next prompt gated). Reset at **next-turn start**
-  (`RunPrompt`) + `session.new`/`load` — **NOT** `OnTurnCompleted` (it runs *after* `TurnResultEvent` in the same
+  `_turnReviews` (path→`{Session,Baseline,IsNew,Current}`). Carried over at **next-turn start** (`RunPrompt`,
+  see "No longer a gate" below), reset at `session.new`/`load` + Keep/Discard all — **NOT** `OnTurnCompleted` (it runs *after* `TurnResultEvent` in the same
   turn and would wipe the just-built list).
 - **The options are the single source of truth for the popover state (fix 2026-09-10).** The WebUI renders
   mode + sub-toggles from `AstrogatorOptions`, while the turn is driven by `ClaudeSessionService.Settings`.
@@ -1737,10 +1940,23 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   is much simpler and safer than a baseline buffer-swap (no divergence between buffer and disk). **⚠ Needs
   manual VS verification** (green/red-ghost geometry, read-only region, save path) — not unit-tested; the
   new-coordinate anchoring **is** unit-tested. Save may renormalize EOLs on files with unusual line endings.
-- **Gate is host-authoritative:** `HandlePromptSend` bails (with a note) while `_turnReviews` is non-empty
-  (defends against reload / queued sends / Enter-races); the WebUI `canSend()` mirrors it. On WebView reload
-  the list + gate are re-posted from `SendInitialSession` (`RepostTurnReviewList`). `turn.stop` also builds the
-  list (a cancelled turn emits no `TurnResultEvent`).
+- **No longer a gate — the review keeps collecting (2026-10-28, user request).** Until then
+  `HandlePromptSend` refused a prompt while `_turnReviews` was non-empty ("Review N changed files before
+  continuing"). Now the next prompt runs and `CarryTurnReviewIntoNextTurn` (instead of
+  `ResetTurnReviewState`) keeps the **baselines of the still-pending files** — so a file edited again is still
+  compared against its content before Claude **first** touched it — drops the other baselines (decided, or
+  edited back to identical; they get a fresh first-touch baseline), clears `_turnBaselineSkip`, and closes open
+  in-editor reviews (they make the buffer read-only and Claude may edit those files now). At turn end
+  `BuildAndPostTurnReviewList` rebuilds the cumulative list; a pending file whose disk content is unchanged
+  since its last build (`TurnReview.Current`) **keeps its review object**, decisions included; a carried list
+  that ends up empty is cleared (`editReview.turnListClear`). `FinalizeTurnFileReview` drops the file's
+  baseline too (a later edit — e.g. a background task's follow-up turn — starts fresh). A follow-up turn
+  also closes open in-editor reviews. **While a turn runs** the review actions (open/finish/keep/discard)
+  are refused host-side (`TurnReviewActionBlocked`, note) and greyed out in the WebUI (`.turn-review.locked`).
+  Still blocked by a pending review: new chat / session switch / remote control (they would drop it). UI
+  title now "N changed files to review" (tooltip explains the accumulation). On WebView reload the list is
+  re-posted from `SendInitialSession` (`RepostTurnReviewList`). `turn.stop` also builds the list (a cancelled
+  turn emits no `TurnResultEvent`).
 - **Contract:** web→host `reviewEditsAtTurnEnd.set {enabled}`, `editReview.openTurnFile {path}`,
   `editReview.finishTurnFile {path}`, `editReview.keepAll`, `editReview.discardAll`; host→web
   `editReview.turnList {files:[{path,name,added,removed,allDecided}]}`, `editReview.turnFileState {path,allDecided}`,
@@ -1923,6 +2139,16 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   off, several picks in the summary) can be exercised in `index.html` without VS. Verified there via
   DevTools: pick → repick → click-again-clears for single-select, add/remove for multiSelect, blank submit
   refused, free-text-only answer submits and summarizes ("Framework: own answer only · Suites: —").
+- **Paged questions (2026-10-28, user request):** a card with **more than one** question no longer stacks
+  them (3-4 questions took over the whole chat) but shows one at a time: a `.q-pager` above the blocks with a
+  **tab per question** (`.q-tab`, its `header` or "Question n"; `✓` once it has a pick or text; click jumps
+  there) and **‹ n / m ›** (`.q-nav-btn`, `.q-counter`). The action button reads **"Next"** until the last
+  page, then **"Submit"**; Enter in a page's "Other…" field moves to the next question (and focuses its
+  field), only on the last one it submits — the hint under the field says which. Selecting an option never
+  auto-advances (same reasoning as "no auto-submit": the free-text field must stay reachable). A blank
+  submit jumps back to page 1 with the warning. Answered/history cards keep the pager when expanded (tabs
+  stay clickable; the head click only toggles collapse). Single-question cards are unchanged. Verified in
+  `index.html` via DevTools (tabs, counter, Next→Submit, ✓ marking, expanded history card paging).
 - **Modes:** works in **"Ask", "Auto-accept" AND "Plan"** — the hook is wired for all modes except
   `bypass` (`ClaudeSessionService`, `PermissionMode != "bypass"`); AskUserQuestion is
   not an edit, so it prompts even with acceptEdits, and in Plan empirically confirmed (CLI 2.1.165: the hook

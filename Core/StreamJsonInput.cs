@@ -76,5 +76,25 @@ namespace CodeAstrogator.Core
                 Formatting = Formatting.None,
             }) + "\n";
         }
+
+        /// <summary>Prefix of the <c>request_id</c> of our context-usage requests; the parser only turns a
+        /// <c>control_response</c> carrying it into a <see cref="ContextUsageEvent"/>.</summary>
+        public const string ContextUsageRequestPrefix = "astrogator-context-";
+
+        /// <summary>
+        /// The undocumented stream-json control request behind the "Context" breakdown
+        /// (<c>{"subtype":"get_context_usage"}</c>, CLI 2.1.294). The CLI answers it locally — no model
+        /// call, no cost — with a <c>control_response</c> listing the context by category (system prompt,
+        /// tools, memory files, skills, messages, free space …). Written right after the turn's
+        /// <c>result</c>, before stdin closes; the CLI still answers it then. A CLI that does not know the
+        /// subtype answers with an error response, which is ignored.
+        /// </summary>
+        public static string BuildContextUsageRequest(string requestId) =>
+            new JObject
+            {
+                ["type"] = "control_request",
+                ["request_id"] = requestId,
+                ["request"] = new JObject { ["subtype"] = "get_context_usage" },
+            }.ToString(Formatting.None) + "\n";
     }
 }

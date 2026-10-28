@@ -19,6 +19,34 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void SubagentHandBack_ShowsTheCleanReport_AndCarriesItsStats()
+        {
+            // Real line, CLI 2.1.287: the tool_result text is a model-facing frame ("[Subagent hand-back] The
+            // text below is the final report …", indented report, agentId, <usage>), tool_use_result holds
+            // the clean report + stats. No result event exists for the subagent any more.
+            var result = ParseFixture("subagent-handback.ndjson").OfType<ToolResultEvent>().Single();
+
+            Assert.Equal("pong", result.Summary);
+            Assert.NotNull(result.Agent);
+            Assert.Equal("completed", result.Agent!.Status);
+            Assert.Equal(704, result.Agent.DurationMs);
+            Assert.Equal(24043, result.Agent.TotalTokens);
+            Assert.Equal(0, result.Agent.ToolUses);
+            Assert.Equal("claude-haiku-5-5", result.Agent.Model);
+        }
+
+        [Fact]
+        public void OrdinaryToolResult_HasNoAgentStats()
+        {
+            var parser = new NdjsonParser();
+            var result = parser.ParseLine("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]},\"tool_use_result\":{\"stdout\":\"ok\"}}")
+                .OfType<ToolResultEvent>().Single();
+
+            Assert.Equal("ok", result.Summary);
+            Assert.Null(result.Agent);
+        }
+
+        [Fact]
         public void FullTurn_ProducesExpectedEventSequence()
         {
             var events = ParseFixture("turn-success.ndjson");
@@ -131,6 +159,81 @@ namespace CodeAstrogator.Tests
         {
             var events = new NdjsonParser().ParseLine("{\"type\":\"prompt_suggestion\",\"suggestion\":\"  \",\"session_id\":\"s\"}");
             Assert.Empty(events);
+        }
+
+        // Shape measured against CLI 2.1.294 (control_request {"subtype":"get_context_usage"}), trimmed.
+        private const string ContextUsageResponse =
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"astrogator-context-1\",\"response\":{"
+            + "\"categories\":["
+            + "{\"name\":\"System prompt\",\"tokens\":2173,\"color\":\"promptBorder\",\"kind\":\"used\"},"
+            + "{\"name\":\"MCP tools (deferred)\",\"tokens\":1429,\"color\":\"inactive\",\"kind\":\"deferred\"},"
+            + "{\"name\":\"Messages\",\"tokens\":1361,\"color\":\"purple_FOR_SUBAGENTS_ONLY\",\"kind\":\"used\"},"
+            + "{\"name\":\"Autocompact buffer\",\"tokens\":33000,\"color\":\"inactive\",\"kind\":\"buffer\"},"
+            + "{\"name\":\"Free space\",\"tokens\":939714,\"color\":\"promptBorder\",\"kind\":\"free\"}],"
+            + "\"totalTokens\":27286,\"maxTokens\":1000000,\"rawMaxTokens\":1000000,\"percentage\":3,\"gridRows\":[],"
+            + "\"model\":\"claude-opus-5-5[1m]\","
+            + "\"memoryFiles\":[{\"path\":\"C:\\\\Users\\\\Jan\\\\CodeAstrogator\\\\CLAUDE.md\",\"type\":\"Project\",\"tokens\":5717}],"
+            + "\"mcpTools\":["
+            + "{\"name\":\"mcp__docs__batch\",\"serverName\":\"docs\",\"tokens\":165,\"isLoaded\":true},"
+            + "{\"name\":\"mcp__docs__create\",\"serverName\":\"docs\",\"tokens\":256,\"isLoaded\":false},"
+            + "{\"name\":\"mcp__unity__grep\",\"serverName\":\"unity\",\"tokens\":300,\"isLoaded\":true}],"
+            + "\"agents\":[{\"agentType\":\"caveman:cavecrew-builder\",\"source\":\"plugin\",\"tokens\":136}],"
+            + "\"skills\":{\"totalSkills\":2,\"includedSkills\":2,\"tokens\":309,\"skillFrontmatter\":["
+            + "{\"name\":\"unity-docs\",\"source\":\"userSettings\",\"tokens\":289},"
+            + "{\"name\":\"caveman:caveman\",\"source\":\"plugin\",\"pluginName\":\"caveman\",\"tokens\":20}]},"
+            + "\"autoCompactThreshold\":967000,\"isAutoCompactEnabled\":true,\"apiUsage\":null}}}";
+
+        [Fact]
+        public void ContextUsageResponse_YieldsTheBreakdown()
+        {
+            var usage = Assert.IsType<ContextUsageEvent>(new NdjsonParser().ParseLine(ContextUsageResponse).Single());
+
+            Assert.Equal(27286, usage.TotalTokens);
+            Assert.Equal(1000000, usage.MaxTokens);
+            Assert.Equal(3, usage.Percentage);
+            Assert.Equal(967000, usage.AutoCompactThreshold);
+            Assert.True(usage.AutoCompactEnabled);
+            Assert.Equal("claude-opus-5-5[1m]", usage.Model);
+            Assert.Equal(new[] { "used", "deferred", "used", "buffer", "free" }, usage.Categories.Select(c => c.Kind));
+            Assert.Equal(1361, usage.Categories.Single(c => c.Name == "Messages").Tokens);
+
+            var memory = usage.MemoryFiles.Single();
+            Assert.Equal("CLAUDE.md", memory.Name);
+            Assert.Equal(@"Project · C:\Users\Jan\CodeAstrogator\CLAUDE.md", memory.Detail);
+
+            // one line per server: all tools counted, only the loaded ones' tokens
+            var docs = usage.McpServers.Single(s => s.Name == "docs");
+            Assert.Equal(2, docs.Count);
+            Assert.Equal(165, docs.Tokens);
+            Assert.Equal(300, usage.McpServers.Single(s => s.Name == "unity").Tokens);
+
+            Assert.Equal("plugin", usage.Agents.Single().Detail);
+            Assert.Equal(new[] { "userSettings", "caveman" }, usage.Skills.Select(s => s.Detail));
+        }
+
+        [Theory]
+        // an older CLI without the subtype
+        [InlineData("{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"astrogator-context-1\",\"error\":\"Unsupported control request subtype: get_context_usage\"}}")]
+        // somebody else's request
+        [InlineData("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"other-1\",\"response\":{\"totalTokens\":1}}}")]
+        public void OtherControlResponses_AreDropped(string line)
+        {
+            Assert.Empty(new NdjsonParser().ParseLine(line));
+        }
+
+        [Fact]
+        public void Result_CarriesTheMainModelsContextWindow()
+        {
+            // the subagent's Haiku read less than the main loop's Opus — Opus's window counts
+            var result = (TurnResultEvent)new NdjsonParser().ParseLine(
+                "{\"type\":\"result\",\"num_turns\":2,\"session_id\":\"s\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"modelUsage\":{"
+                + "\"claude-haiku-5-5\":{\"inputTokens\":900,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"contextWindow\":200000},"
+                + "\"claude-opus-5-5[1m]\":{\"inputTokens\":2,\"cacheReadInputTokens\":16003,\"cacheCreationInputTokens\":22480,\"contextWindow\":1000000}}}").Single();
+            Assert.Equal(1000000, result.ContextWindow);
+
+            var local = (TurnResultEvent)new NdjsonParser().ParseLine(
+                "{\"type\":\"result\",\"num_turns\":0,\"session_id\":\"s\",\"modelUsage\":{}}").Single();
+            Assert.Equal(0, local.ContextWindow);
         }
 
         [Fact]

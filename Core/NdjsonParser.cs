@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 
 namespace CodeAstrogator.Core
@@ -81,6 +82,9 @@ namespace CodeAstrogator.Core
                     }
                     break;
                 }
+                case "control_response":
+                    ParseControlResponse(obj, events);
+                    break;
                 case "error":
                     events.Add(new StreamErrorEvent
                     {
@@ -151,7 +155,20 @@ namespace CodeAstrogator.Core
             }
             else if (subtype == "background_tasks_changed")
             {
-                events.Add(new BackgroundTasksChangedEvent { Count = (obj["tasks"] as JArray)?.Count ?? 0 });
+                var tasks = new List<BackgroundTaskInfo>();
+                if (obj["tasks"] is JArray arr)
+                {
+                    foreach (var t in arr.OfType<JObject>())
+                    {
+                        tasks.Add(new BackgroundTaskInfo
+                        {
+                            TaskId = t.Value<string>("task_id") ?? "",
+                            TaskType = t.Value<string>("task_type"),
+                            Description = t.Value<string>("description"),
+                        });
+                    }
+                }
+                events.Add(new BackgroundTasksChangedEvent { Count = (obj["tasks"] as JArray)?.Count ?? 0, Tasks = tasks });
             }
             else if (subtype == "task_notification")
             {
@@ -284,21 +301,51 @@ namespace CodeAstrogator.Core
 
         private void ParseUserMessage(JObject obj, List<ClaudeEvent> events)
         {
+            // --replay-user-messages: one of our stdin messages, echoed when the CLI takes it up
+            if (obj.Value<bool?>("isReplay") == true)
+            {
+                events.Add(new UserMessageReplayedEvent());
+                return;
+            }
             if (obj["message"]?["content"] is not JArray content)
                 return;
 
-            foreach (var block in content)
+            var results = content.OfType<JObject>().Where(b => b.Value<string>("type") == "tool_result").ToList();
+            // A subagent's hand-back carries a structured tool_use_result next to the framed text (one
+            // tool_result per message) — show its clean report and stats instead of the model-facing frame.
+            var agent = results.Count == 1 ? ParseSubagent(obj["tool_use_result"] as JObject) : null;
+            foreach (var b in results)
             {
-                if (block is JObject b && b.Value<string>("type") == "tool_result")
+                // (a backgrounded agent's launch ack has no report yet → keep the CLI's text)
+                var summary = agent is { report.Length: > 0 } a ? a.report : ExtractToolResultText(b["content"]);
+                events.Add(new ToolResultEvent
                 {
-                    events.Add(new ToolResultEvent
-                    {
-                        ToolUseId = b.Value<string>("tool_use_id") ?? "",
-                        IsError = b.Value<bool?>("is_error") ?? false,
-                        Summary = Truncate(ExtractToolResultText(b["content"])),
-                    });
-                }
+                    ToolUseId = b.Value<string>("tool_use_id") ?? "",
+                    IsError = b.Value<bool?>("is_error") ?? false,
+                    Summary = Truncate(summary),
+                    Agent = agent?.stats,
+                });
             }
+        }
+
+        /// <summary>Reads an Agent tool's <c>tool_use_result</c> (recognised by its <c>agentId</c>): the
+        /// report text plus duration/tokens/tool uses. Null for every other tool.</summary>
+        private static (string report, SubagentStats stats)? ParseSubagent(JObject? r)
+        {
+            if (r == null || string.IsNullOrEmpty(r.Value<string>("agentId")))
+                return null;
+            var report = string.Join("\n", (r["content"] as JArray ?? new JArray())
+                .OfType<JObject>()
+                .Where(c => c.Value<string>("type") == "text")
+                .Select(c => c.Value<string>("text") ?? ""));
+            return (report, new SubagentStats
+            {
+                Status = r.Value<string>("status"),
+                DurationMs = r.Value<long?>("totalDurationMs") ?? 0,
+                TotalTokens = r.Value<long?>("totalTokens") ?? 0,
+                ToolUses = r.Value<int?>("totalToolUseCount") ?? 0,
+                Model = r.Value<string>("resolvedModel"),
+            });
         }
 
         private void ParseResult(JObject obj, List<ClaudeEvent> events)
@@ -316,6 +363,7 @@ namespace CodeAstrogator.Core
                 {
                     SessionId = obj.Value<string>("session_id") ?? "",
                     DurationMs = obj.Value<long?>("duration_ms") ?? 0,
+                    CostUsd = obj.Value<double?>("total_cost_usd") ?? 0,
                 });
                 return;
             }
@@ -337,9 +385,105 @@ namespace CodeAstrogator.Core
                 OutputTokens = usage?.Value<long?>("output_tokens") ?? 0,
                 ContextInputTokens = _lastContextInput,
                 ContextOutputTokens = _lastContextOutput,
+                ContextWindow = MainContextWindow(obj["modelUsage"] as JObject),
                 ResultText = obj.Value<string>("result"),
                 ParentToolUseId = obj.Value<string>("parent_tool_use_id"),
             });
+        }
+
+        /// <summary><c>modelUsage</c> has one entry per model used in the turn (subagents and the
+        /// suggestion model may add more); the main loop is the one that read the most input.</summary>
+        private static long MainContextWindow(JObject? modelUsage)
+        {
+            long window = 0, mostInput = -1;
+            foreach (var p in modelUsage?.Properties() ?? Enumerable.Empty<JProperty>())
+            {
+                if (!(p.Value is JObject m))
+                    continue;
+                var size = m.Value<long?>("contextWindow") ?? 0;
+                if (size <= 0)
+                    continue;
+                var input = (m.Value<long?>("inputTokens") ?? 0)
+                            + (m.Value<long?>("cacheReadInputTokens") ?? 0)
+                            + (m.Value<long?>("cacheCreationInputTokens") ?? 0);
+                if (input > mostInput)
+                {
+                    mostInput = input;
+                    window = size;
+                }
+            }
+            return window;
+        }
+
+        /// <summary>Answer to one of our <c>get_context_usage</c> requests (other control responses and
+        /// error answers — an older CLI without the subtype — are dropped).</summary>
+        private static void ParseControlResponse(JObject obj, List<ClaudeEvent> events)
+        {
+            var response = obj["response"] as JObject;
+            var requestId = response?.Value<string>("request_id") ?? "";
+            if (response?.Value<string>("subtype") != "success"
+                || !requestId.StartsWith(StreamJsonInput.ContextUsageRequestPrefix, StringComparison.Ordinal)
+                || !(response["response"] is JObject r))
+                return;
+
+            var ev = new ContextUsageEvent
+            {
+                TotalTokens = r.Value<long?>("totalTokens") ?? 0,
+                MaxTokens = r.Value<long?>("maxTokens") ?? 0,
+                Percentage = r.Value<int?>("percentage") ?? 0,
+                AutoCompactThreshold = r.Value<long?>("autoCompactThreshold") ?? 0,
+                AutoCompactEnabled = r.Value<bool?>("isAutoCompactEnabled") ?? false,
+                Model = r.Value<string>("model"),
+            };
+            foreach (var c in (r["categories"] as JArray)?.OfType<JObject>() ?? Enumerable.Empty<JObject>())
+            {
+                ev.Categories.Add(new ContextCategory
+                {
+                    Name = c.Value<string>("name") ?? "",
+                    Tokens = c.Value<long?>("tokens") ?? 0,
+                    Kind = c.Value<string>("kind") ?? "used",
+                });
+            }
+            foreach (var f in (r["memoryFiles"] as JArray)?.OfType<JObject>() ?? Enumerable.Empty<JObject>())
+            {
+                var path = f.Value<string>("path") ?? "";
+                ev.MemoryFiles.Add(new ContextItem
+                {
+                    Name = System.IO.Path.GetFileName(path),
+                    Detail = (f.Value<string>("type") is string type && type.Length > 0 ? type + " · " : "") + path,
+                    Tokens = f.Value<long?>("tokens") ?? 0,
+                });
+            }
+            // per tool there can be hundreds of entries — the panel shows one line per server
+            foreach (var server in ((r["mcpTools"] as JArray)?.OfType<JObject>() ?? Enumerable.Empty<JObject>())
+                         .GroupBy(t => t.Value<string>("serverName") ?? ""))
+            {
+                ev.McpServers.Add(new ContextItem
+                {
+                    Name = server.Key,
+                    Count = server.Count(),
+                    Tokens = server.Where(t => t.Value<bool?>("isLoaded") ?? true).Sum(t => t.Value<long?>("tokens") ?? 0),
+                });
+            }
+            foreach (var a in (r["agents"] as JArray)?.OfType<JObject>() ?? Enumerable.Empty<JObject>())
+            {
+                ev.Agents.Add(new ContextItem
+                {
+                    Name = a.Value<string>("agentType") ?? "",
+                    Detail = a.Value<string>("source"),
+                    Tokens = a.Value<long?>("tokens") ?? 0,
+                });
+            }
+            foreach (var s in (r["skills"]?["skillFrontmatter"] as JArray)?.OfType<JObject>() ?? Enumerable.Empty<JObject>())
+            {
+                ev.Skills.Add(new ContextItem
+                {
+                    Name = s.Value<string>("name") ?? "",
+                    Detail = s.Value<string>("pluginName") ?? s.Value<string>("source"),
+                    Tokens = s.Value<long?>("tokens") ?? 0,
+                });
+            }
+            events.Add(ev);
         }
 
         /// <summary>tool_result content can be a plain string or an array of content blocks.</summary>
