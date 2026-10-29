@@ -12,6 +12,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Rewind no longer touches files a checkpoint didn't cover.** If the extension list or size limit changed after a checkpoint was taken, a rewind could write back files that are now excluded, or delete files that had only been left out of the checkpoint. Both are now left alone, as the settings promise.
 
 ### Changed
+- **New store name and description.** The extension is now listed as **"Code Astrogator - Claude Code for Visual Studio"**, with a description and README that lead with what sets it apart: a real chat UI instead of a terminal, reviewing Claude's edits inline in the editor, checkpoints and Remote Control. Visual Studio 2022 (17.14 or later) is now named as supported next to 2026. Inside Visual Studio it is still plain "Code Astrogator".
 - **Images, audio, video, 3D models, fonts and native libraries are left out of checkpoints by default** (`.png`, `.tga`, `.psd`, `.exr`, `.hdr`, `.wav`, `.mp3`, `.mp4`, `.fbx`, `.blend`, `.ttf`, `.a`, …). A rewind is meant for code and text — in game projects these assets were almost all of the checkpoint size. If you never edited the extension list, it is extended automatically; an edited list stays as it is.
 
 ## [1.0.1] – 2026-10-29
