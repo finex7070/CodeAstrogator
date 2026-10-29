@@ -118,6 +118,12 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   `%TEMP%\claude\<MungePath(cwd)>\<session>\tasks\<task_id>.output` (UTF-8, angekündigt per
   `system/task_started` mit `tool_use_id`, s. NOTES „Live console output", `TaskOutputWatcher`). Beim
   CLI-Update gegentesten; fällt sie weg, zeigt die Card einfach wieder nur das Endergebnis.
+- **Checkpoints + Git LFS (2026-10-29):** Die `.gitattributes` des Projekts gelten auch im Shadow-Repo, der
+  LFS-Clean-Filter kommt aus der System-gitconfig → ohne Gegenmaßnahme landen LFS-Dateien unkomprimiert in
+  `.git/lfs` (von `gc` nie aufgeräumt) und das Größenlimit sieht nur den Pointer (15 GB bei Jan). Deshalb läuft
+  **jeder** Git-Aufruf mit `NoLfsClean` (`-c filter.lfs.clean= …`, in `RunAsync` — auch `write-tree` hashte „racily
+  clean" Einträge durch den Filter); nur `checkout` behält die Filter (alte Pointer-Snapshots). Nicht
+  „alle LFS-Dateien überspringen" — Unity hält auch Prefabs/Szenen in LFS (s. NOTES „Git LFS bypassed everything").
 - **Stop von Commands (2026-10-28):** Turn-Stop killt den **ganzen Prozessbaum** der CLI (`ProcessTree.KillTree`
   = `taskkill /T /F`) — ein bloßes `Process.Kill()` ließ laufende Bash/PowerShell-Kinder verwaist weiterlaufen.
   Der Stop-Button pro Shell-Card (`tool.stop`) findet die Shell unter den Kindern von `claude.exe` über deren
@@ -126,8 +132,9 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
 - **Remote Control (seit 1.0.0, CLI 2.1.29x+):** läuft als **CLI-Hintergrund-Session** (`claude --bg --resume <id>
   --remote-control <name>`, `Services/BackgroundRemoteSession`) — kein Konsolenfenster; Link aus `claude logs <id>` → QR im
   Panel; Status/Ende über `claude agents --json`; Ende = `claude stop` + `claude rm`; Transcript wird live aus der Session-
-  `.jsonl` gespiegelt; überlebt VS (Re-Adopt beim nächsten Start). Ausgabeformate undokumentiert (s. NOTES „Remote
-  Control") — beim CLI-Update gegentesten. **`claude remote-control --help` NICHT aufrufen** (ignoriert `--help`, startet
+  `.jsonl` gespiegelt; überlebt VS (Re-Adopt beim nächsten Start). Endet sie, während VS zu ist (z. B. PC-Shutdown →
+  Registry-Eintrag `"state": "done"`), importiert der nächste Start den Verlauf aus der `.jsonl` und `rm`t den Eintrag.
+  Ausgabeformate undokumentiert (s. NOTES „Remote Control") — beim CLI-Update gegentesten. **`claude remote-control --help` NICHT aufrufen** (ignoriert `--help`, startet
   einen Server). Ältere CLI ohne `--bg` → alter Konsolen-Weg (`RemoteTerminalLauncher`).
 - **Prompt-Suggestions + stream-json-Input (2026-10-08, CLI 2.1.287):** Der Prompt geht als **stream-json-
   User-Message** über stdin (`--input-format stream-json`, `Core/StreamJsonInput`, stdin zu beim `result` — weiterhin

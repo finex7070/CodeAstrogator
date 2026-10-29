@@ -4,6 +4,26 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.0.2] – 2026-10-29
+
+### Fixed
+- **Checkpoints take a fraction of the disk space in projects that use Git LFS.** Snapshots ran the project's Git LFS filter, so every LFS-tracked file — textures, audio, models, in Unity projects also scenes and prefabs — was stored as an uncompressed full copy that was never cleaned up, and the "Skip files larger than" limit never applied to them because it only saw the tiny LFS pointer. One Unity workspace had over 12 GB of checkpoint data this way. Snapshots now store such files like any other file (compressed, size limit applies), leftover LFS copies of deleted checkpoints are removed on the next Visual Studio start, and the rest disappears as older checkpoints expire (or right away with "Delete all checkpoints now"). Rewinding to an older checkpoint keeps working.
+- **The first checkpoint of a large project no longer fails.** In a big workspace (tens of thousands of files) the very first snapshot — or the first one after "Delete all checkpoints now" — could run into a time limit, so that turn got no rewind point and the next one had to start over. It now gets the time it needs; hovering "Creating checkpoint…" in the status bar explains that it's a one-time step. Every later checkpoint is quick, and the check for newly excluded files no longer runs on every snapshot.
+- **Rewind no longer touches files a checkpoint didn't cover.** If the extension list or size limit changed after a checkpoint was taken, a rewind could write back files that are now excluded, or delete files that had only been left out of the checkpoint. Both are now left alone, as the settings promise.
+
+### Changed
+- **New store name and description.** The extension is now listed as **"Code Astrogator - Claude Code for Visual Studio"**, with a description and README that lead with what sets it apart: a real chat UI instead of a terminal, reviewing Claude's edits inline in the editor, checkpoints and Remote Control. Visual Studio 2022 (17.14 or later) is now named as supported next to 2026. Inside Visual Studio it is still plain "Code Astrogator".
+- **Images, audio, video, 3D models, fonts and native libraries are left out of checkpoints by default** (`.png`, `.tga`, `.psd`, `.exr`, `.hdr`, `.wav`, `.mp3`, `.mp4`, `.fbx`, `.blend`, `.ttf`, `.a`, …). A rewind is meant for code and text — in game projects these assets were almost all of the checkpoint size. If you never edited the extension list, it is extended automatically; an edited list stays as it is.
+
+## [1.0.1] – 2026-10-29
+
+### Changed
+- **Attachments sit side by side.** The files attached to a message are no longer listed one below the other: they line up next to each other wherever they fit, so a few phone screenshots appear as one row of previews. When there are so many that they would need more than two rows, they start collapsed — click any of them to open its preview.
+
+### Fixed
+- **Remote Control: nothing gets lost when the session ends while Visual Studio is closed.** If a remote session ended without Visual Studio watching — for example because the PC was shut down from the phone — the chat only showed the state from before Remote Control was started; everything done on the phone was missing (Claude itself still knew it). On the next start the extension now picks up such a session, loads its whole conversation into the chat ("Remote session imported — it ended while Visual Studio was closed") and cleans up the leftover entry. A remote session that is still running after a restart now also shows what happened on the phone in the meantime right away, and a renamed chat keeps its name when the remote conversation is imported.
+- **No more pile of session files from the usage meters.** Checking the usage limits (once a minute) and the available models ran small Claude Code sessions, and each one left a file in `%USERPROFILE%\.claude\projects` — tens of thousands over time, and they cluttered Claude Code's own session list. These checks no longer save anything, and the files already left behind are removed when Visual Studio starts (only files that are nothing but such a check; your conversations are never touched).
+
 ## [1.0.0] – 2026-10-28
 
 ### Added

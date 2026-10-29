@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
     <Metadata>
-        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="1.0.0" Language="en-US" Publisher="Code Astrogator" />
+        <Identity Id="CodeAstrogator.9049dcc4-f4c0-4748-b8cd-57e9a981c404" Version="1.0.2" Language="en-US" Publisher="Code Astrogator" />
         <!-- Marketplace / Extension-Manager name. Deliberately carries the search terms: the
              in-product strings (View → Other Windows, tool-window caption, context menu) come from
              CodeAstrogatorPackage.vsct and stay plain "Code Astrogator". -->
-        <DisplayName>Code Astrogator — Claude Code Chat</DisplayName>
-        <Description xml:space="preserve">Claude Code chat tool window for Visual Studio. Integrates the Claude Code CLI (OAuth or API key) with streaming chat, tool activity and inline diff approvals.</Description>
+        <DisplayName>Code Astrogator - Claude Code for Visual Studio</DisplayName>
+        <Description xml:space="preserve">Claude Code in a real chat UI, not a terminal. Review Claude's edits inline in the editor and accept or reject each hunk, approve commands with a click, rewind any prompt with checkpoints, and continue from your phone. Subscription or API key.</Description>
         <Icon>Resources\icon-90.png</Icon>
         <PreviewImage>Resources\preview-200.png</PreviewImage>
-        <Tags>claude, claude code, anthropic, ai, chat, assistant, agent, llm, copilot alternative, cli, code assistant, pair programming</Tags>
+        <Tags>claude, claude code, anthropic, ai, agent, chat, code review, inline diff, checkpoints, rewind, remote control, code assistant, copilot alternative, visual studio 2026</Tags>
     </Metadata>
     <Installation>
         <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.14, )">

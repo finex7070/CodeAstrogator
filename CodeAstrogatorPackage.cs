@@ -104,6 +104,8 @@ namespace CodeAstrogator
             }
 
             RunRetentionCleanup(); // prune old history / pasted files per the retention settings
+            // session files our /usage and /model probes left in ~\.claude\projects (before --no-session-persistence)
+            _ = Task.Run(() => Core.ProbeSessionCleaner.Clean(ct: DisposalToken));
 
             // Auto-update: a downloaded, verified update is installed when Visual Studio closes
             // (a loaded extension cannot be replaced while VS runs). Keep the events object alive —

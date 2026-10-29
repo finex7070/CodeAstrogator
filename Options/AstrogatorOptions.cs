@@ -163,12 +163,42 @@ namespace CodeAstrogator.Options
         public List<string> CheckpointExtensions { get; set; } = new List<string>(DefaultCheckpointExtensions);
 
         /// <summary>Default blacklist: build output, binaries, archives, media, captures and databases —
-        /// the things that blow up a snapshot without ever being worth rewinding.</summary>
+        /// the things that blow up a snapshot without ever being worth rewinding. Media and 3D assets were
+        /// added in 1.0.1: in a Unity workspace textures (.tga/.hdr/.png/.exr), audio and .fbx were ~95 % of
+        /// 9 GB of checkpoint data, while the scenes/prefabs Claude actually edits are text.</summary>
         public static readonly string[] DefaultCheckpointExtensions =
+        {
+            ".exe", ".dll", ".lib", ".so", ".bin", ".dat", ".zip", ".7z", ".rar", ".gz", ".tar", ".iso", ".msi",
+            ".cache", ".apk", ".aab", ".pak", ".pdb", ".dmp", ".log", ".trace",
+            // native libraries / packages
+            ".a", ".dylib", ".aar", ".jar", ".nupkg", ".unitypackage",
+            // images
+            ".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".psd", ".psb", ".exr", ".hdr", ".bmp", ".gif",
+            ".dds", ".ktx", ".ktx2", ".webp", ".ico", ".cubemap",
+            // audio / video
+            ".wav", ".mp3", ".ogg", ".flac", ".aif", ".aiff", ".m4a", ".mp4", ".mov", ".avi", ".webm", ".mkv",
+            // 3D / DCC
+            ".fbx", ".obj", ".blend", ".max", ".ma", ".mb", ".3ds", ".dae", ".glb", ".gltf", ".usdz", ".abc",
+            // fonts
+            ".ttf", ".otf",
+        };
+
+        /// <summary>The default blacklist up to 1.0.0. A stored list that still equals it (the user never
+        /// edited it) is lifted to <see cref="DefaultCheckpointExtensions"/> on load.</summary>
+        public static readonly string[] LegacyDefaultCheckpointExtensions =
         {
             ".exe", ".dll", ".lib", ".so", ".bin", ".dat", ".zip", ".7z", ".rar", ".gz", ".tar", ".iso", ".msi",
             ".cache", ".apk", ".aab", ".pak", ".pdb", ".dmp", ".log", ".trace"
         };
+
+        /// <summary>Lifts an untouched pre-1.0.1 default list to the current default; anything else unchanged.</summary>
+        public static List<string> UpgradeDefaultExtensions(List<string> stored, bool whitelist)
+        {
+            if (whitelist || stored == null)
+                return stored ?? new List<string>(DefaultCheckpointExtensions);
+            var legacy = new HashSet<string>(LegacyDefaultCheckpointExtensions, System.StringComparer.OrdinalIgnoreCase);
+            return legacy.SetEquals(stored) ? new List<string>(DefaultCheckpointExtensions) : stored;
+        }
 
         /// <summary>Clamps the file-size limit to a sane range (negative → 0 = no limit).</summary>
         public static int ClampCheckpointMaxFileMb(int mb) =>

@@ -47,6 +47,7 @@ namespace CodeAstrogator.Bridge
         private IRemoteSession? _remoteTerminal; // Remote Control: CLI background session (or the console fallback)
         private DateTime _remoteMirrorStamp;     // last-seen write time of the remote session's transcript
         private bool _remoteAdoptChecked;        // looked for a still-running background session once
+        private bool _remoteMirrorFromStart;     // adopted session: the shown chat may be stale → mirror the first look too
         private string? _remoteProjectDir;       // ~\.claude\projects\<munged cwd> (guarded by _history)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
@@ -1936,6 +1937,7 @@ namespace CodeAstrogator.Bridge
             }
             _remoteTerminal = session;
             _remoteMirrorStamp = DateTime.MinValue;
+            _remoteMirrorFromStart = false;
             // the CLI's transcript folder for this workspace (GetSolutionDirectory is UI-thread-only)
             var projectDir = CliSessionReader.GetProjectDirectory(_package.GetSolutionDirectory() ?? "");
             lock (_history)
@@ -1944,9 +1946,14 @@ namespace CodeAstrogator.Bridge
             session.Changed += OnRemoteSessionChanged;
         }
 
-        /// <summary>A background remote session from before a VS restart (or a reload of the tool window) is
-        /// still running on this chat: lock the panel again instead of letting a prompt race it. Once per
-        /// bridge; only for the currently loaded chat.</summary>
+        /// <summary>Remote sessions from before a VS restart (or a reload of the tool window), once per bridge:
+        /// <list type="bullet">
+        /// <item>one that <b>ended while VS was closed</b> (PC shut down, ended from the phone, …) never got its
+        /// end-of-session import — its conversation is imported into the chat's history now and the leftover
+        /// registry entry removed (<c>claude rm</c>), so this happens once;</item>
+        /// <item>one <b>still running</b> on the current chat is adopted: the panel locks again instead of
+        /// letting a prompt race it.</item>
+        /// </list></summary>
         private void TryAdoptRemoteSession()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -1959,9 +1966,8 @@ namespace CodeAstrogator.Bridge
             string? currentId;
             lock (_history)
                 currentId = _history.Current.HasCliSession ? _history.Current.Id : null;
-            if (currentId == null)
-                return;
             var cwd = _package.GetSolutionDirectory();
+            var projectDir = CliSessionReader.GetProjectDirectory(cwd ?? "");
 
             _package.JoinableTaskFactory.RunAsync(async () =>
             {
@@ -1970,20 +1976,56 @@ namespace CodeAstrogator.Bridge
                     var caps = await ClaudeCliCapabilities.GetAsync(exe).ConfigureAwait(false);
                     if (!caps.SupportsBackgroundSessions)
                         return;
-                    var run = await ClaudeBackgroundSessions.RunAsync(exe, "agents --json", cwd, 30000, _package.DisposalToken)
+                    var run = await ClaudeBackgroundSessions.RunAsync(exe, "agents --json --all", cwd, 30000, _package.DisposalToken)
                         .ConfigureAwait(false);
-                    var running = ClaudeBackgroundSessions.ParseAgents(run.Output).FirstOrDefault(s =>
-                        s.Kind == "background" && !string.IsNullOrEmpty(s.Id)
-                        && string.Equals(s.SessionId, currentId, StringComparison.OrdinalIgnoreCase)
-                        && !ClaudeBackgroundSessions.HasEnded(s));
-                    if (running == null)
-                        return;
+                    var background = ClaudeBackgroundSessions.ParseAgents(run.Output)
+                        .Where(s => s.Kind == "background" && !string.IsNullOrEmpty(s.Id) && !string.IsNullOrEmpty(s.SessionId))
+                        .ToList();
+
+                    // ended while VS was closed → read the transcripts of this workspace's chats (off the UI thread)
+                    var ended = new List<(BackgroundSessionInfo Info, ImportedCliSession Transcript)>();
+                    if (projectDir != null)
+                    {
+                        foreach (var s in background.Where(ClaudeBackgroundSessions.HasEnded))
+                        {
+                            bool known;
+                            lock (_history)
+                                known = _history.Contains(s.SessionId!);
+                            if (!known)
+                                continue;
+                            var transcript = CliSessionReader.ImportTranscript(
+                                System.IO.Path.Combine(projectDir, s.SessionId + ".jsonl"));
+                            if (transcript != null)
+                                ended.Add((s, transcript));
+                        }
+                    }
 
                     await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
-                    if (RemoteSessionActive || _session.IsBusy)
+                    var removed = new List<string>();
+                    foreach (var (info, transcript) in ended)
+                    {
+                        if (ImportEndedRemoteSession(transcript))
+                            removed.Add(info.Id!);
+                    }
+                    if (removed.Count > 0)
+                    {
+                        // drop the leftover registry entries (the transcripts stay) — best-effort, off the UI thread
+                        _ = Task.Run(async () =>
+                        {
+                            foreach (var id in removed)
+                                await ClaudeBackgroundSessions.RunAsync(exe, "rm " + id, cwd, 30000, CancellationToken.None)
+                                    .ConfigureAwait(false);
+                        });
+                    }
+
+                    var running = currentId == null ? null : background.FirstOrDefault(s =>
+                        string.Equals(s.SessionId, currentId, StringComparison.OrdinalIgnoreCase)
+                        && !ClaudeBackgroundSessions.HasEnded(s));
+                    if (running == null || RemoteSessionActive || _session.IsBusy)
                         return;
                     var session = new BackgroundRemoteSession();
                     AttachRemoteSession(session);
+                    _remoteMirrorFromStart = true; // the chat may have moved on on the phone while VS was closed
                     session.Adopt(exe, cwd, running);
                     PostRemoteSessionState();
                     PostSystemNote("Remote control is still running for this chat");
@@ -1993,6 +2035,39 @@ namespace CodeAstrogator.Bridge
                     // best-effort — nothing adopted
                 }
             }).Task.Forget();
+        }
+
+        /// <summary>Puts the conversation of a remote session that ended while VS was closed into its chat
+        /// (the CLI transcript is authoritative — it has every turn, local and remote) and reloads the view
+        /// when it is the open chat. False when the open chat is busy (left for the next start).</summary>
+        private bool ImportEndedRemoteSession(ImportedCliSession transcript)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            bool isCurrent;
+            lock (_history)
+                isCurrent = string.Equals(_history.Current.Id, transcript.SessionId, StringComparison.OrdinalIgnoreCase);
+            if (isCurrent && _session.IsBusy)
+                return false;
+
+            SessionRecord record;
+            lock (_history)
+                record = _history.Import(transcript.SessionId, transcript.Title, transcript.Messages,
+                    transcript.UpdatedAtUtc, transcript.ContextTokens);
+            SaveHistory();
+
+            if (isCurrent)
+            {
+                AttachToRecord(record);
+                SendSessionInit();
+                SendActiveFile();
+                SendTranscript(record);
+                PostSystemNote("Remote session imported — it ended while Visual Studio was closed");
+            }
+            else
+            {
+                PostSystemNote($"Remote session \"{record.Title}\" imported to the history — it ended while Visual Studio was closed");
+            }
+            return true;
         }
 
         /// <summary>Background thread: the remote session polled. Updates the panel (link/QR once known,
@@ -2027,7 +2102,7 @@ namespace CodeAstrogator.Bridge
                     return;
                 var first = _remoteMirrorStamp == DateTime.MinValue;
                 _remoteMirrorStamp = stamp;
-                if (first)
+                if (first && !_remoteMirrorFromStart)
                     return; // the panel already shows this state — only mirror what changes from now on
                 var imported = CliSessionReader.ImportTranscript(file);
                 if (imported == null)
@@ -3456,7 +3531,9 @@ namespace CodeAstrogator.Bridge
         /// </summary>
         private async Task TakePreTurnCheckpointAsync(string cwd, string sessionKey, string turnKey, JObject? message)
         {
-            PostStatus("working", "Creating checkpoint…");
+            PostStatus("working", "Creating checkpoint…", GitCheckpointService.IsFirstSnapshot(cwd)
+                ? "Creating the first checkpoint of this workspace — a one-time step that can take a minute in a large project."
+                : null);
             var info = await _checkpoints.SnapshotAsync(cwd,
                 GitCheckpointService.BuildRefName(sessionKey, turnKey + "-pre"),
                 "before turn · " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
@@ -4280,11 +4357,14 @@ namespace CodeAstrogator.Bridge
             Post(new JObject { ["type"] = "system.note", ["id"] = id, ["text"] = text });
         }
 
-        private void PostStatus(string state, string? text = null)
+        /// <param name="detail">Longer explanation, shown only as the statusbar tooltip.</param>
+        private void PostStatus(string state, string? text = null, string? detail = null)
         {
             var msg = new JObject { ["type"] = "status", ["state"] = state };
             if (text != null)
                 msg["text"] = text;
+            if (detail != null)
+                msg["detail"] = detail;
             Post(msg);
         }
 

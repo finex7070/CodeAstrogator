@@ -79,8 +79,10 @@ namespace CodeAstrogator.Services
                 CheckpointExtensionsAreWhitelist = GetBool(
                     nameof(AstrogatorOptions.CheckpointExtensionsAreWhitelist), d.CheckpointExtensionsAreWhitelist),
                 CheckpointExtensions = _store.PropertyExists(Collection, nameof(AstrogatorOptions.CheckpointExtensions))
-                    ? AstrogatorOptions.NormalizeExtensions(
-                        ParsePatterns(_store.GetString(Collection, nameof(AstrogatorOptions.CheckpointExtensions), "")))
+                    ? AstrogatorOptions.UpgradeDefaultExtensions( // an untouched pre-1.0.1 default gains the media types
+                        AstrogatorOptions.NormalizeExtensions(
+                            ParsePatterns(_store.GetString(Collection, nameof(AstrogatorOptions.CheckpointExtensions), ""))),
+                        GetBool(nameof(AstrogatorOptions.CheckpointExtensionsAreWhitelist), d.CheckpointExtensionsAreWhitelist))
                     : d.CheckpointExtensions,
             };
         }

@@ -129,6 +129,9 @@ namespace CodeAstrogator.Core
         private const int DefaultTimeoutMs = 60_000;
         private const string OversizedMarker = "# --- oversized files (auto-generated) ---";
         private const string FilterMarker = "# --- extension filter (from the settings) ---";
+        /// <summary>Commit-message line with the exact UTC ticks a snapshot read the work-tree at (the commit
+        /// date has whole seconds only). Only the subject is ever shown, so the trailer stays invisible.</summary>
+        private const string TakenTrailer = "ca-taken: ";
 
         /// <summary>
         /// What may go into a snapshot (size limit + extension black/whitelist), assigned from the
@@ -147,6 +150,26 @@ namespace CodeAstrogator.Core
         private readonly SemaphoreSlim _initLock = new SemaphoreSlim(1, 1);
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _initialized
             = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>
+        /// <c>-c</c> overrides for every git call except <c>checkout</c> (see RunAsync): the project's Git LFS clean
+        /// filter must not run in the shadow repo.
+        /// It would put every LFS-tracked file into <c>.git/lfs/objects</c> — uncompressed, outside git's object
+        /// store, so <c>gc</c> never reclaimed it (one Unity workspace: 12 GB there vs. 89 MB of git objects) — and
+        /// leave only a 130-byte pointer in the tree, which the size limit then never saw. With it off the file is
+        /// an ordinary (compressed, prunable, size-checked) blob. <c>checkout</c> keeps the filters, so a rewind
+        /// to an older pointer snapshot still gets the real content back (smudge passes plain content through).
+        /// </summary>
+        /// <summary>Per-command timeout of the first snapshot of a workspace (see WriteCurrentTreeAsync).</summary>
+        private const int FirstSnapshotTimeoutMs = 300_000;
+
+        /// <summary><c>info/exclude</c> text the "untrack now-ignored paths" check last ran against, per workspace.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _checkedExcludeRules
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly string[] NoLfsClean =
+        {
+            "-c", "filter.lfs.clean=", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
+        };
 
         // ── discovery / paths ────────────────────────────────────────────────
 
@@ -265,7 +288,8 @@ namespace CodeAstrogator.Core
                         new[] { "user.email", "checkpoints@codeastrogator.local" },
                     })
                     {
-                        await RunAsync(gitDir, null, new[] { "config", cfg[0], cfg[1] }).ConfigureAwait(false);
+                        // quoted: an unquoted "Code Astrogator" set user.name to "Code"
+                        await RunAsync(gitDir, null, new[] { "config", cfg[0], Q(cfg[1]) }).ConfigureAwait(false);
                     }
 
                     WriteMeta(solutionDir);
@@ -411,12 +435,13 @@ namespace CodeAstrogator.Core
             if (await EnsureInitializedAsync(solutionDir).ConfigureAwait(false) != null)
                 return null;
             var gitDir = GetGitDir(solutionDir);
+            var takenUtc = DateTime.UtcNow; // before the work-tree is read — see DropFilterArtifactsAsync
             var tree = await WriteCurrentTreeAsync(solutionDir, timeoutMs).ConfigureAwait(false);
             if (tree == null)
                 return null;
 
             var commit = await RunAsync(gitDir, solutionDir,
-                new[] { "commit-tree", tree!, "-m", Q(label ?? "") },
+                new[] { "commit-tree", tree!, "-m", Q(label ?? ""), "-m", Q(TakenTrailer + takenUtc.Ticks) },
                 GetIndexFile(solutionDir), timeoutMs: timeoutMs).ConfigureAwait(false);
             var sha = commit.StdOut.Trim();
             if (commit.ExitCode != 0 || sha.Length < 40)
@@ -443,9 +468,36 @@ namespace CodeAstrogator.Core
         {
             var gitDir = GetGitDir(solutionDir);
             var index = GetIndexFile(solutionDir);
+            await MigrateLfsIndexOnceAsync(gitDir, index).ConfigureAwait(false);
+            // No index yet = the first snapshot of this workspace (or the one after the LFS migration / "Delete
+            // all"): every file gets hashed and written once. In a Unity project that is ~60 000 files and well
+            // over the per-command timeout of a normal snapshot — which then failed and, with no ref, left all
+            // objects loose and unpacked for the next try. Give that one a long timeout.
+            if (!File.Exists(index))
+                timeoutMs = Math.Max(timeoutMs, FirstSnapshotTimeoutMs);
             // Rewrite the ignore rules first: the filter can have changed since the last snapshot,
             // and they have to be in place before `add -A` picks up untracked files.
             WriteExcludeFile(solutionDir, gitDir, ReadOversizedPaths(gitDir));
+            // An ignore rule doesn't untrack a path our index already has (e.g. after an extension was added to
+            // the blacklist) — drop those first, so `add` doesn't even read them again. Only when the rules
+            // changed since the last check: on 60 000 tracked paths this costs ~3 s.
+            var rules = ReadExcludeRules(gitDir);
+            if (File.Exists(index) && (!_checkedExcludeRules.TryGetValue(solutionDir, out var known) || known != rules))
+            {
+                var stale = await RunAsync(gitDir, solutionDir,
+                    new[] { "ls-files", "--cached", "--ignored", "--exclude-standard" }, index, timeoutMs: timeoutMs)
+                    .ConfigureAwait(false);
+                foreach (var chunk in ChunkPaths(SplitLines(stale.StdOut)))
+                {
+                    if (chunk.Count == 0)
+                        continue;
+                    await RunAsync(gitDir, solutionDir,
+                        Args(new[] { "update-index", "--force-remove", "--" }, chunk), index, timeoutMs: timeoutMs)
+                        .ConfigureAwait(false);
+                }
+                if (stale.ExitCode == 0)
+                    _checkedExcludeRules[solutionDir] = rules;
+            }
             // A locked/unreadable file must not abort the whole snapshot → --ignore-errors, and its
             // non-zero exit code is deliberately not treated as fatal (write-tree decides).
             await RunAsync(gitDir, solutionDir, new[] { "add", "-A", "--ignore-errors" }, index, timeoutMs: timeoutMs)
@@ -456,6 +508,49 @@ namespace CodeAstrogator.Core
             if (tree.ExitCode != 0 || sha.Length < 40)
                 return null;
             return await ApplyFilterAsync(solutionDir, sha, timeoutMs).ConfigureAwait(false);
+        }
+
+        /// <summary>The current <c>info/exclude</c> text — what the "untrack now-ignored paths" check depends on
+        /// (filter settings, oversized paths). A changed project <c>.gitignore</c> is picked up on the next VS
+        /// start, when the check runs once anyway.</summary>
+        private static string ReadExcludeRules(string gitDir)
+        {
+            try
+            {
+                var path = Path.Combine(gitDir, "info", "exclude");
+                return File.Exists(path) ? File.ReadAllText(path) : "";
+            }
+            catch
+            {
+                return Guid.NewGuid().ToString(); // unreadable → check again
+            }
+        }
+
+        /// <summary>
+        /// One-time step for a shadow repo whose snapshots went through the LFS clean filter (it has a
+        /// <c>lfs</c> store): our index still holds LFS pointers, and git keeps an index entry whose file is
+        /// unchanged on disk — so without this every unchanged LFS file would stay a pointer into the old store
+        /// forever. Dropping the private index makes the next <c>add</c> hash the real content once (slower
+        /// one time); the old store then empties as the old snapshots expire (<see cref="PruneLfsStoreAsync"/>).
+        /// Marked done in the repo config (<c>ca.lfsMigrated</c>).
+        /// </summary>
+        private static async Task MigrateLfsIndexOnceAsync(string gitDir, string index)
+        {
+            if (!Directory.Exists(Path.Combine(gitDir, "lfs")))
+                return;
+            var done = await RunAsync(gitDir, null, new[] { "config", "--get", "ca.lfsMigrated" }).ConfigureAwait(false);
+            if (done.StdOut.Trim() == "true")
+                return;
+            try
+            {
+                if (File.Exists(index))
+                    File.Delete(index);
+            }
+            catch
+            {
+                return; // try again next time
+            }
+            await RunAsync(gitDir, null, new[] { "config", "ca.lfsMigrated", "true" }).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -519,6 +614,11 @@ namespace CodeAstrogator.Core
             var prunedSha = pruned.StdOut.Trim();
             return pruned.ExitCode == 0 && prunedSha.Length >= 40 ? prunedSha : treeSha;
         }
+
+        /// <summary>True when the next snapshot has to read the whole work-tree (no private index yet — first
+        /// checkpoint of the workspace, or after "Delete all checkpoints"); the UI says it may take a while.</summary>
+        public static bool IsFirstSnapshot(string solutionDir) =>
+            !string.IsNullOrEmpty(solutionDir) && !File.Exists(GetIndexFile(solutionDir));
 
         /// <summary>Lets git pack loose objects when enough have piled up (no-op below the threshold).
         /// Fire-and-forget after a turn — <c>gc.autoDetach</c> keeps it out of our way.</summary>
@@ -645,7 +745,60 @@ namespace CodeAstrogator.Core
                 }
             }
 
-            return changes.Values.OrderBy(c => c.Path, StringComparer.OrdinalIgnoreCase).ToList();
+            var list = changes.Values.OrderBy(c => c.Path, StringComparer.OrdinalIgnoreCase).ToList();
+            // against the present work-tree (the rewind preview): what the filter left out is no change
+            return string.IsNullOrEmpty(toSha)
+                ? await DropFilterArtifactsAsync(solutionDir, fromSha, list).ConfigureAwait(false)
+                : list;
+        }
+
+        /// <summary>
+        /// For a diff from a checkpoint to the <b>present</b> work-tree: drops entries that only exist because
+        /// one of the two snapshots left a file out (LFS, extension, size — or a filter that changed in between),
+        /// not because it changed. "D" (in the checkpoint, not in the present tree) while the file is still on
+        /// disk = the present filter skips it; "A" (in the present tree, not in the checkpoint) while the file is
+        /// older than the checkpoint = it existed back then and was skipped. A rewind acting on those would
+        /// rewrite or delete files the checkpoint never covered — after LFS files started being skipped, every
+        /// asset of a Unity project would have counted as "deleted since". Matches the settings' promise that
+        /// excluded files are never restored by a rewind.
+        /// </summary>
+        private async Task<List<CheckpointFileChange>> DropFilterArtifactsAsync(string solutionDir, string fromSha,
+            List<CheckpointFileChange> changes)
+        {
+            if (!changes.Any(c => c.Status == "D" || c.Status == "A"))
+                return changes;
+            // the exact time the snapshot read the work-tree (trailer), else the commit's whole second + 1
+            var shown = await RunAsync(GetGitDir(solutionDir), null,
+                new[] { "log", "-1", "--no-walk", "--format=%ct%n%b", fromSha }).ConfigureAwait(false);
+            var taken = DateTime.MinValue;
+            if (shown.ExitCode == 0)
+            {
+                var lines = SplitLines(shown.StdOut);
+                var trailer = lines.FirstOrDefault(l => l.StartsWith(TakenTrailer, StringComparison.Ordinal));
+                if (trailer != null && long.TryParse(trailer.Substring(TakenTrailer.Length).Trim(), out var ticks)
+                    && ticks > 0 && ticks < DateTime.MaxValue.Ticks)
+                    taken = new DateTime(ticks, DateTimeKind.Utc);
+                else if (lines.Count > 0 && FromUnix(lines[0]) is var seconds && seconds != DateTime.MinValue)
+                    taken = seconds.AddSeconds(1); // whole seconds — when in doubt keep the file
+            }
+            var kept = new List<CheckpointFileChange>();
+            foreach (var change in changes)
+            {
+                var full = Path.Combine(solutionDir, change.Path.Replace('/', Path.DirectorySeparatorChar));
+                try
+                {
+                    if (change.Status == "D" && File.Exists(full))
+                        continue;
+                    // when in doubt keep the file: a leftover is harmless, deleting an asset the checkpoint
+                    // never had is not
+                    if (change.Status == "A" && taken != DateTime.MinValue && File.Exists(full)
+                        && File.GetCreationTimeUtc(full) < taken)
+                        continue;
+                }
+                catch { /* can't tell → keep it */ }
+                kept.Add(change);
+            }
+            return kept;
         }
 
         // ── restore ─────────────────────────────────────────────────────────
@@ -678,6 +831,8 @@ namespace CodeAstrogator.Core
             result.SafetySha = safety.Sha;
 
             var changes = await DiffAsync(solutionDir, sha, safety.Sha, paths).ConfigureAwait(false);
+            // the safety snapshot IS the present work-tree
+            changes = await DropFilterArtifactsAsync(solutionDir, sha, changes.ToList()).ConfigureAwait(false);
             if (changes.Count == 0)
                 return result;
 
@@ -799,7 +954,10 @@ namespace CodeAstrogator.Core
                     stale.Add(f[0]);
             }
             if (stale.Count == 0)
+            {
+                await PruneLfsStoreAsync(gitDir).ConfigureAwait(false);
                 return 0;
+            }
 
             var removed = 0;
             foreach (var refName in stale)
@@ -820,8 +978,88 @@ namespace CodeAstrogator.Core
                 .ConfigureAwait(false);
             if (SplitLines(remaining.StdOut).Count == 0)
                 DeleteDirectoryForce(repoDir);
+            else
+                await PruneLfsStoreAsync(gitDir).ConfigureAwait(false);
 
             return removed;
+        }
+
+        /// <summary>
+        /// Deletes the Git LFS objects (<c>.git/lfs/objects</c>) no remaining snapshot points to. Before the clean
+        /// filter was switched off (<see cref="NoLfsClean"/>), snapshots stored LFS-tracked files there — and that
+        /// store is not git's: <c>gc</c> never reclaimed it, so pruned checkpoints left their LFS content behind
+        /// for good (3 GB of 12 GB in one workspace). Referenced = an LFS pointer blob (<c>oid sha256:…</c>) among
+        /// the repo's objects after <c>gc --prune=now</c>. Everything unreferenced goes; an empty store goes
+        /// entirely. Best-effort: on any git failure nothing is deleted.
+        /// </summary>
+        internal static async Task PruneLfsStoreAsync(string gitDir)
+        {
+            try
+            {
+                var store = Path.Combine(gitDir, "lfs");
+                var objects = Path.Combine(store, "objects");
+                if (!Directory.Exists(objects))
+                    return;
+
+                // pointer files are ~130 bytes — only small blobs can be one
+                var check = await RunAsync(gitDir, null, new[]
+                {
+                    "cat-file", "--batch-all-objects", "--batch-check=\"%(objectname) %(objecttype) %(objectsize)\"",
+                }, timeoutMs: 300_000).ConfigureAwait(false);
+                if (check.ExitCode != 0)
+                    return;
+                var small = new StringBuilder();
+                foreach (var line in SplitLines(check.StdOut))
+                {
+                    var f = line.Split(' ');
+                    if (f.Length == 3 && f[1] == "blob" && long.TryParse(f[2], out var size) && size < 1024)
+                        small.Append(f[0]).Append('\n');
+                }
+
+                var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (small.Length > 0)
+                {
+                    var contents = await RunAsync(gitDir, null, new[] { "cat-file", "--batch" },
+                        timeoutMs: 300_000, stdin: small.ToString()).ConfigureAwait(false);
+                    if (contents.ExitCode != 0)
+                        return;
+                    foreach (var oid in ParseLfsPointerOids(contents.StdOut))
+                        referenced.Add(oid);
+                }
+
+                foreach (var file in Directory.EnumerateFiles(objects, "*", SearchOption.AllDirectories).ToList())
+                {
+                    if (referenced.Contains(Path.GetFileName(file)))
+                        continue;
+                    try
+                    {
+                        File.SetAttributes(file, FileAttributes.Normal);
+                        File.Delete(file);
+                    }
+                    catch { /* in use — next sweep */ }
+                }
+                if (referenced.Count == 0)
+                    DeleteDirectoryForce(store); // incl. lfs/tmp, lfs/incomplete
+            }
+            catch
+            {
+                // best-effort
+            }
+        }
+
+        /// <summary>The <c>oid sha256:&lt;64 hex&gt;</c> values of every LFS pointer in a <c>cat-file --batch</c> dump.</summary>
+        internal static IEnumerable<string> ParseLfsPointerOids(string batchOutput)
+        {
+            foreach (var line in (batchOutput ?? "").Split('\n'))
+            {
+                var t = line.Trim();
+                if (t.StartsWith("oid sha256:", StringComparison.Ordinal) && t.Length >= 11 + 64)
+                {
+                    var oid = t.Substring(11, 64);
+                    if (oid.All(Uri.IsHexDigit))
+                        yield return oid.ToLowerInvariant();
+                }
+            }
         }
 
         /// <summary>Bytes on disk for this workspace's checkpoints.</summary>
@@ -962,16 +1200,22 @@ namespace CodeAstrogator.Core
         /// Runs one git command. <paramref name="gitDir"/>/<paramref name="workTree"/> map to
         /// <c>--git-dir</c>/<c>--work-tree</c>; <paramref name="indexFile"/> to GIT_INDEX_FILE, so we
         /// never disturb the repo's own index. Arguments must already be quoted (see <see cref="Q"/>).
-        /// Everything is passed as arguments — no command needs stdin, which keeps the plumbing simple.
+        /// Everything is passed as arguments; only the LFS-store sweep feeds object ids via
+        /// <paramref name="stdin"/> (<c>cat-file --batch</c>) — otherwise stdin is closed at once.
         /// </summary>
         private static async Task<GitResult> RunAsync(string? gitDir, string? workTree, IReadOnlyList<string> args,
-            string? indexFile = null, int timeoutMs = DefaultTimeoutMs)
+            string? indexFile = null, int timeoutMs = DefaultTimeoutMs, string? stdin = null)
         {
             var all = new List<string> { "-c", "core.quotePath=false" };
             if (!string.IsNullOrEmpty(gitDir))
                 all.Add("--git-dir=" + Q(gitDir!));
             if (!string.IsNullOrEmpty(workTree))
                 all.Add("--work-tree=" + Q(workTree!));
+            // Every command, not just `add`: one that writes the index re-hashes "racily clean" entries (file
+            // mtime = index mtime) through the clean filter — `write-tree` right after `add` did, now and then.
+            // `checkout` (rewind) is the exception: it needs the smudge side for older pointer snapshots.
+            if (args.Count == 0 || args[0] != "checkout")
+                all.AddRange(NoLfsClean);
             all.AddRange(args);
 
             var psi = new ProcessStartInfo
@@ -1008,7 +1252,16 @@ namespace CodeAstrogator.Core
                 process.Start();
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
-                process.StandardInput.Close(); // no git command here reads stdin — never let one block on it
+                if (stdin != null)
+                {
+                    try
+                    {
+                        // stdout/stderr are already drained asynchronously, so a large input can't deadlock
+                        process.StandardInput.Write(stdin);
+                    }
+                    catch { /* git exited early — its exit code tells */ }
+                }
+                process.StandardInput.Close(); // never let a git command block on stdin
 
                 var finished = await Task.WhenAny(exited.Task, Task.Delay(timeoutMs)).ConfigureAwait(false);
                 if (finished != exited.Task)

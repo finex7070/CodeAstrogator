@@ -125,6 +125,10 @@ namespace CodeAstrogator.Services
                         goneCount = ClaudeBackgroundSessions.HasEnded(me) ? goneCount + 1 : 0;
                         if (goneCount >= 2)
                         {
+                            // drop the leftover registry entry (transcript stays) — the bridge imports now, and an
+                            // ended entry would otherwise be imported again on the next VS start
+                            if (me != null)
+                                await ClaudeBackgroundSessions.RunAsync(_exe!, "rm " + _id, _cwd, CallTimeoutMs, CancellationToken.None).ConfigureAwait(false);
                             FireEnded();
                             return;
                         }

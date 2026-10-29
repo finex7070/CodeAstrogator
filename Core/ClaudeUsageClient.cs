@@ -135,6 +135,8 @@ namespace CodeAstrogator.Core
             var arguments = "-p /usage --output-format json";
             if (!string.IsNullOrEmpty(noHooksSettings))
                 arguments += " --settings \"" + noHooksSettings + "\"";
+            if ((await ClaudeCliCapabilities.GetAsync(exe, ct).ConfigureAwait(false)).SupportsNoSessionPersistence)
+                arguments += " --no-session-persistence"; // else every poll leaves a session file behind
 
             var psi = new ProcessStartInfo
             {

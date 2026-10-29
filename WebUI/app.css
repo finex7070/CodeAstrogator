@@ -1230,16 +1230,17 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   font-size: 12px; color: var(--text);
 }
 
-/* attached-file indicators inside a sent user message (live + historic). Stacked vertically (one
-   per row) so a mix of collapsed chips and expanded preview cards stays orderly — a wrapping row
-   gets jumbled once a card expands to its own width. */
+/* attached-file indicators inside a sent user message (live + historic). Side by side where they fit,
+   wrapping into rows, tops aligned (chips and preview cards mix). A group that would need more than two
+   rows with its previews open starts collapsed (app.js startAttachmentFit) — hidden while it is measured. */
 .msg-attachments {
   display: flex;
-  flex-direction: column;
+  flex-flow: row wrap;
   align-items: flex-start;
   gap: 6px;
   margin-top: 6px;
 }
+.msg-attachments.att-fitting { visibility: hidden; }
 .msg-attachments .att-chip {
   display: inline-flex;
   align-items: center;
@@ -1268,7 +1269,6 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .att-item.expanded {
   width: fit-content;              /* hug the preview/header … */
   max-width: min(100%, 480px);     /* … capped so it stays tied to the header, not full-bleed */
-  margin-top: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;

@@ -699,7 +699,8 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **A configurable filter (`CheckpointFilter`) decides what goes in:** a size limit
     (`CheckpointMaxFileMb`, default **10**, `0` = no limit) plus an extension list
     (`CheckpointExtensions`) read either as a **blacklist** (default, seeded with
-    `DefaultCheckpointExtensions`: binaries and build output, archives, installers, dumps and logs)
+    `DefaultCheckpointExtensions`: binaries and build output, archives, installers, dumps and logs — since
+    1.0.1 also media/3D/fonts/native libs, see "Git LFS bypassed everything" below)
     or as a **whitelist** (`CheckpointExtensionsAreWhitelist`). All three live in the settings window;
     `WebViewBridge.BuildCheckpointFilter` assigns them to the service in the ctor and in
     `OnOptionsChanged`, so a change applies to the next snapshot.
@@ -718,6 +719,51 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     is written before we know its size — otherwise git would keep it for two weeks.
   - Existing oversized objects stay reachable through the snapshots that already reference them, so
     only retention or "Delete all checkpoints now" reclaims them.
+- **Git LFS bypassed everything (found 2026-10-29: 15.8 GB of checkpoints, 15.6 GB of it `.git/lfs`).**
+  The project's `.gitattributes` (`*.png filter=lfs …`, in Unity projects also `*.prefab`/`*.unity`/`*.asset`)
+  applies in the shadow repo too, and the clean filter comes from Git for Windows' **system** gitconfig. So
+  `add -A` ran `git-lfs clean` on every LFS-tracked file: the content went **uncompressed into
+  `.git/lfs/objects`** — not git's object store, so `gc --prune` never reclaimed it — and the tree got a
+  ~130-byte pointer, so the size limit never saw the real size (13 MB `.tga`s went in at "130 bytes"). One
+  Unity workspace: 12.2 GB in `lfs/` vs. 89 MB of git objects; 9.2 GB still referenced (`.tga` 2.0 GB,
+  `.hdr` 1.8 GB, `.png` 1.6 GB, `.wav` 0.5 GB, `.a` 0.4 GB, `.fbx`, … — the scenes/prefabs/anims only
+  ~0.3 GB), 3 GB orphaned by pruned snapshots. Fixes:
+  - **Every git call runs with the clean filter off** (`NoLfsClean`: `-c filter.lfs.clean= -c filter.lfs.process=
+    -c filter.lfs.required=false`, added in `RunAsync`) → every file is an ordinary zlib-compressed,
+    delta-packable, prunable blob with its real size. Not only `add`: a command that writes the index
+    re-hashes **racily clean** entries (file mtime = index mtime) through the clean filter — `write-tree`
+    right after `add` started `git-lfs filter-process` in ~1 of 8 runs (caught with `GIT_TRACE` in the test). `checkout` (rewind) keeps the filters: a pointer from an older snapshot is
+    smudged back to the real content from our `lfs/` store, and plain content passes smudge unchanged
+    (git-lfs warns "should have been a pointer", exit 0) — both verified with git-lfs 3.x.
+  - **One-time index reset** (`MigrateLfsIndexOnceAsync`, config `ca.lfsMigrated`): git keeps an index
+    entry whose file is unchanged on disk, so the pointers would have stayed forever; dropping our private
+    `ca-index` once makes the next snapshot hash the real content (slower once).
+  - **`PruneLfsStoreAsync`** (part of every retention sweep): deletes `lfs/objects` files no remaining
+    pointer blob names (`cat-file --batch-all-objects --batch-check` → blobs < 1 KB → `cat-file --batch` via
+    stdin → `oid sha256:`), the whole store once nothing references it. `RunAsync` got an optional `stdin`.
+  - **Media in the default blacklist** (`DefaultCheckpointExtensions`, 1.0.1): images, audio/video, 3D/DCC
+    files, fonts, native libs (`.a`, `.dylib`, `.aar`, `.jar`, `.unitypackage`, …). A stored list that still
+    equals the pre-1.0.1 default (`LegacyDefaultCheckpointExtensions`) is lifted on load
+    (`UpgradeDefaultExtensions`); an edited list stays as it is. "Skip all LFS files" was tried and dropped:
+    Unity projects keep scenes/prefabs (text, edited by Claude) in LFS too.
+  - **Already-tracked but now excluded paths are untracked before `add`** (`ls-files --cached --ignored
+    --exclude-standard` → `update-index --force-remove`), so a newly blacklisted extension isn't even read.
+    ~3 s on 60 000 tracked paths, so only when the `info/exclude` text changed since the last check
+    (`_checkedExcludeRules`, i.e. once per VS session and after a filter change).
+  - **First snapshot of a workspace gets a long timeout** (`FirstSnapshotTimeoutMs` = 5 min per git call when
+    our `ca-index` doesn't exist yet). The statusbar still says just "Creating checkpoint…"; `IsFirstSnapshot`
+    adds the explanation as its tooltip (`status.detail`, new optional field → `#status-text` `title`). Measured 2026-10-29 after "Delete all" in a Unity project:
+    ~60 000 files, the 30 s per-call limit of a normal snapshot was hit → no ref → nothing got packed, so
+    53 000 loose objects made even `ls-tree -rl` take 5 s. Steady state afterwards: `add` 0.3 s,
+    `write-tree` 0.1 s.
+  - `user.name` of the shadow repo is now set quoted (it was "Code" — the unquoted value split).
+  - **Rewind ignores filter artifacts** (`DropFilterArtifactsAsync`, for diffs against the present
+    work-tree: the rewind preview and `RestoreAsync`): `D` (in the checkpoint, not in the present tree) while
+    the file is still on disk = the present filter skips it → no rewrite; `A` while the file is older than
+    the checkpoint = it was skipped back then → no delete. Without this, the first rewind to an older
+    checkpoint after the blacklist change would have written every texture back (or, with a narrowed
+    filter, deleted files). The exact snapshot time is a commit-message line `ca-taken: <ticks>` (the commit
+    date has whole seconds; old snapshots fall back to that second + 1 — when in doubt a file stays).
 - **Nothing heavy on the UI thread.** The settings window measures the repo size and deletes it via
   `_package.JoinableTaskFactory` on a background thread (button shows "measuring…"/"Deleting…").
   Stat-ing 25 000 loose objects synchronously delayed the window's opening noticeably.
@@ -1093,6 +1139,11 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   `SessionStart` hook fires without the flag and **not** with it — both when the hook lives in the same
   settings file and when it comes from another scope (project `.claude/settings.json`), i.e. `disableAllHooks`
   is global, not file-local. Re-test on a CLI update.
+- **Status probes leave no session files (2026-10-29).** Being a regular CLI session, every `-p /usage` poll (once a
+  minute) and every `-p /model` probe wrote a `<id>.jsonl` into `~\.claude\projects\<munged cwd>` — found **~11,000**
+  such 4 KB files in one workspace folder. Both now pass **`--no-session-persistence`** when `--help` lists it
+  (`CliCapabilities.SupportsNoSessionPersistence`; an unknown flag would fail the probe). Verified against 2.1.312:
+  same `/usage` report, no file written. Files already written are left alone.
 
 ## Persistent CLI mode — REMOVED in 0.8.0 (2026-09-23)
 - **Gone:** `Core/ClaudePersistentProcessHost`, the `UsePersistentCli` option, the "Advanced → Use a
@@ -1343,6 +1394,16 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **Default open-state by verbosity** (`attDefaultOpen`): **compact** → all closed · **normal** → images
     open, text closed · **detailed** → all open. `applyVerbosity()` re-applies this to every existing
     `.att-item.att-expandable` (via `item.attSetOpen`, which also lazy-loads).
+  - **Side by side, collapsed beyond two rows (2026-10-29):** `.msg-attachments` is a wrapping row
+    (`flex-flow: row wrap`, tops aligned) instead of one item per line — chips and preview cards sit next to
+    each other where they fit (three phone screenshots in one row). A group that needs **more than
+    `ATT_MAX_ROWS` (2) rows** with its default previews open starts **fully collapsed**. The preview sizes are
+    only known once loaded, so `startAttachmentFit` hides the group (`.att-fitting`, `visibility: hidden`),
+    waits until no open item is `.att-loading` (set by the lazy load, cleared by `attPreviewLoaded` on
+    `img.onload`/text/downgrade; 2.5 s fallback), counts the rows (distinct `offsetTop`) and then collapses or
+    reveals. A chip clicked by hand (`data-user-toggled`) is never overridden; a verbosity switch re-applies the
+    defaults and fits again. Rows are measured once (no re-fit on resize). The mock serves a portrait SVG for
+    paths containing "phone" (and its SVG is ASCII now — `btoa("×")` made it invalid UTF-8, no preview showed).
   - **Lazy content load:** on first open the WebUI posts **`attachment.preview` (web→host)** `{ path, token }`;
     the host reads the file **off the UI thread** (`HandleAttachmentPreview` → `BuildAttachmentPreview`, image
     ≤ 16 MB → base64 data-URI, text ≤ 200k chars w/ `truncated` flag) and replies **`attachment.preview`
@@ -1398,8 +1459,21 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     records the stamp). "End remote session" = `stop` + `rm`. `remote.openTerminal` → a PowerShell console with
     `claude attach <id>` (closing it leaves the session running). `Dispose` (window/VS closing) only stops the polling;
     on the next `ready` the bridge **re-adopts** a still-running background session of the current chat
-    (`TryAdoptRemoteSession`: `agents --json`, `kind background` + `sessionId` = current record) and locks the panel
-    again ("Remote control is still running for this chat").
+    (`TryAdoptRemoteSession`: `agents --json --all`, `kind background` + `sessionId` = current record) and locks the
+    panel again ("Remote control is still running for this chat"). An adopted session mirrors from its **first**
+    look (`_remoteMirrorFromStart`) — the phone may have moved the chat on while VS was closed.
+  - **Ended while VS was closed (fix 2026-10-29):** the end-of-session import only ran from the monitor's `Ended`,
+    so a session that ended without VS watching — the user had Claude **shut the PC down** from the phone, VS died
+    with it — never reached the history: the chat showed the state from before the remote start (plus later local
+    turns), although the CLI transcript had everything (a local `--resume` turn even knew the remote turns). Such
+    an entry stays in the registry as **`"state": "done"`** (no pid; CLI 2.1.312), `HasEnded` counts `done` too.
+    Now `TryAdoptRemoteSession` also takes every **ended** background entry whose `sessionId` is a chat of this
+    workspace's history (`SessionHistoryStore.Contains`, current or archived), imports `<sessionId>.jsonl`
+    (`ImportEndedRemoteSession` → `SessionHistoryStore.Import`, the transcript is authoritative — it holds the local
+    turns too), reloads the view when it is the open chat (note "Remote session imported — it ended while Visual
+    Studio was closed") and then `claude rm`s the entry, so it happens once. The monitor also `rm`s the entry when
+    it sees the session end while VS runs (else the next start would import it a second time). `Import` keeps the
+    title of an existing record (it may have been renamed).
   - `ClaudeBackgroundSessions.RunAsync` waits for the **process**, not for EOF on its pipes (the spawned daemon could
     inherit them) — verified: the `--bg` call returns in ~2 s.
   - **WebUI:** `#remote-panel` is a **banner in the flow below the header** (`notice-banner remote-panel`, like the

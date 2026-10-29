@@ -274,6 +274,113 @@ namespace CodeAstrogator.Tests
             Assert.DoesNotContain(changes, c => c.Path == "notes.md");
         }
 
+        [Fact]
+        public async Task Snapshot_StoresLfsFilesAsPlainBlobs_AndARewindLeavesSkippedOnesAlone()
+        {
+            if (!HasGit)
+                return;
+            const string v1 = "layered image v1\n";
+            Write(".gitattributes", "*.psd filter=lfs diff=lfs merge=lfs -text\n*.cs text\n");
+            Write("Art/hero.psd", v1);
+
+            // the project's LFS clean filter must not run: the real content (not a pointer) goes into the tree
+            _svc.Filter = new CheckpointFilter();
+            var old = await SnapshotAsync("1-pre");
+            var entry = Git("ls-tree -l " + old!.Sha + " -- Art/hero.psd");
+            Assert.Contains(" " + v1.Length + "\t", entry);
+            // also not via `write-tree` re-hashing the just-added, "racily clean" files (it did, now and then)
+            Assert.False(Directory.Exists(Path.Combine(GitCheckpointService.GetRepoDir(_root), ".git", "lfs")));
+
+            // later the extension is blacklisted: the tracked path is dropped from the next snapshot
+            _svc.Filter = new CheckpointFilter { Extensions = new[] { ".psd" } };
+            var now = await SnapshotAsync("2-pre");
+            Assert.DoesNotContain("Art/hero.psd", Git("ls-tree -r --name-only " + now!.Sha));
+            Assert.Contains("src/Program.cs", Git("ls-tree -r --name-only " + now.Sha));
+
+            // the asset changed since — but the old checkpoint is no reason to rewrite it (nor to call it deleted)
+            Write("Art/hero.psd", "layered image v2\n");
+            Write("src/Program.cs", "one\nCHANGED\nthree\n");
+            var preview = await _svc.DiffAsync(_root, old.Sha, null, null);
+            Assert.DoesNotContain(preview, c => c.Path == "Art/hero.psd");
+            var result = await _svc.RestoreAsync(_root, old.Sha, null, Ref("safety-1"));
+
+            Assert.Null(result.Error);
+            Assert.Contains("src/Program.cs", result.Restored);
+            Assert.Equal("layered image v2\n", Read("Art/hero.psd"));
+        }
+
+        [Fact]
+        public async Task Rewind_DoesNotDeleteAFileTheCheckpointLeftOut()
+        {
+            if (!HasGit)
+                return;
+            // notes.md existed but was filtered out when the checkpoint was taken; the filter changed since
+            Write("notes.md", "keep me\n");
+            File.SetCreationTimeUtc(Full("notes.md"), DateTime.UtcNow.AddMinutes(-5));
+            _svc.Filter = new CheckpointFilter { Extensions = new[] { ".md" } };
+            var pre = await SnapshotAsync("1-pre");
+
+            _svc.Filter = new CheckpointFilter();
+            Write("src/new.cs", "created after the checkpoint\n");
+            var result = await _svc.RestoreAsync(_root, pre!.Sha, null, Ref("safety-1"));
+
+            Assert.Null(result.Error);
+            Assert.True(File.Exists(Full("notes.md")));       // left out back then → not "created since"
+            Assert.False(File.Exists(Full("src/new.cs")));    // really created since → removed
+        }
+
+        [Fact]
+        public async Task Snapshot_MigratesAnLfsEraIndexOnce()
+        {
+            if (!HasGit)
+                return;
+            Assert.NotNull(await SnapshotAsync("1-pre"));
+            var gitDir = Path.Combine(GitCheckpointService.GetRepoDir(_root), ".git");
+            Directory.CreateDirectory(Path.Combine(gitDir, "lfs", "objects")); // as left by the LFS clean filter
+
+            var after = await SnapshotAsync("2-pre");
+            Assert.NotNull(after);
+            Assert.Equal("true", Git("config --get ca.lfsMigrated"));
+            Assert.Contains("src/Program.cs", Git("ls-tree -r --name-only " + after!.Sha)); // index rebuilt, nothing lost
+        }
+
+        [Fact]
+        public void UntouchedLegacyExtensionList_IsUpgraded_EditedOnesStay()
+        {
+            var legacy = new List<string>(Options.AstrogatorOptions.LegacyDefaultCheckpointExtensions);
+            Assert.Contains(".tga", Options.AstrogatorOptions.UpgradeDefaultExtensions(legacy, whitelist: false));
+
+            var edited = new List<string>(legacy) { ".foo" };
+            Assert.Same(edited, Options.AstrogatorOptions.UpgradeDefaultExtensions(edited, whitelist: false));
+            Assert.Same(legacy, Options.AstrogatorOptions.UpgradeDefaultExtensions(legacy, whitelist: true));
+        }
+
+        [Fact]
+        public async Task PruneLfsStore_DeletesOnlyUnreferencedObjects()
+        {
+            if (!HasGit)
+                return;
+            Assert.NotNull(await SnapshotAsync("1-pre"));
+            var gitDir = Path.Combine(GitCheckpointService.GetRepoDir(_root), ".git");
+            const string kept = "1111111111111111111111111111111111111111111111111111111111111111";
+            const string orphan = "2222222222222222222222222222222222222222222222222222222222222222";
+            foreach (var oid in new[] { kept, orphan })
+            {
+                var path = Path.Combine(gitDir, "lfs", "objects", oid.Substring(0, 2), oid.Substring(2, 2), oid);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, "asset bytes");
+            }
+            // a pointer blob for `kept` (as an older snapshot with the LFS clean filter left behind)
+            var pointer = Path.Combine(_root, "pointer.txt");
+            File.WriteAllText(pointer, "version https://git-lfs.github.com/spec/v1\noid sha256:" + kept + "\nsize 11\n");
+            Git("hash-object -w \"" + pointer + "\"");
+
+            await GitCheckpointService.PruneLfsStoreAsync(gitDir);
+
+            Assert.True(File.Exists(Path.Combine(gitDir, "lfs", "objects", "11", "11", kept)));
+            Assert.False(File.Exists(Path.Combine(gitDir, "lfs", "objects", "22", "22", orphan)));
+        }
+
         [Theory]
         [InlineData(false, "a.exe", 10, true)]   // blacklisted extension
         [InlineData(false, "a.cs", 10, false)]
