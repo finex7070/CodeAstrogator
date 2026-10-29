@@ -3531,7 +3531,9 @@ namespace CodeAstrogator.Bridge
         /// </summary>
         private async Task TakePreTurnCheckpointAsync(string cwd, string sessionKey, string turnKey, JObject? message)
         {
-            PostStatus("working", "Creating checkpoint…");
+            PostStatus("working", "Creating checkpoint…", GitCheckpointService.IsFirstSnapshot(cwd)
+                ? "Creating the first checkpoint of this workspace — a one-time step that can take a minute in a large project."
+                : null);
             var info = await _checkpoints.SnapshotAsync(cwd,
                 GitCheckpointService.BuildRefName(sessionKey, turnKey + "-pre"),
                 "before turn · " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
@@ -4355,11 +4357,14 @@ namespace CodeAstrogator.Bridge
             Post(new JObject { ["type"] = "system.note", ["id"] = id, ["text"] = text });
         }
 
-        private void PostStatus(string state, string? text = null)
+        /// <param name="detail">Longer explanation, shown only as the statusbar tooltip.</param>
+        private void PostStatus(string state, string? text = null, string? detail = null)
         {
             var msg = new JObject { ["type"] = "status", ["state"] = state };
             if (text != null)
                 msg["text"] = text;
+            if (detail != null)
+                msg["detail"] = detail;
             Post(msg);
         }
 

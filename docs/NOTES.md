@@ -699,7 +699,8 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **A configurable filter (`CheckpointFilter`) decides what goes in:** a size limit
     (`CheckpointMaxFileMb`, default **10**, `0` = no limit) plus an extension list
     (`CheckpointExtensions`) read either as a **blacklist** (default, seeded with
-    `DefaultCheckpointExtensions`: binaries and build output, archives, installers, dumps and logs)
+    `DefaultCheckpointExtensions`: binaries and build output, archives, installers, dumps and logs — since
+    1.0.1 also media/3D/fonts/native libs, see "Git LFS bypassed everything" below)
     or as a **whitelist** (`CheckpointExtensionsAreWhitelist`). All three live in the settings window;
     `WebViewBridge.BuildCheckpointFilter` assigns them to the service in the ctor and in
     `OnOptionsChanged`, so a change applies to the next snapshot.
@@ -718,6 +719,51 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     is written before we know its size — otherwise git would keep it for two weeks.
   - Existing oversized objects stay reachable through the snapshots that already reference them, so
     only retention or "Delete all checkpoints now" reclaims them.
+- **Git LFS bypassed everything (found 2026-10-29: 15.8 GB of checkpoints, 15.6 GB of it `.git/lfs`).**
+  The project's `.gitattributes` (`*.png filter=lfs …`, in Unity projects also `*.prefab`/`*.unity`/`*.asset`)
+  applies in the shadow repo too, and the clean filter comes from Git for Windows' **system** gitconfig. So
+  `add -A` ran `git-lfs clean` on every LFS-tracked file: the content went **uncompressed into
+  `.git/lfs/objects`** — not git's object store, so `gc --prune` never reclaimed it — and the tree got a
+  ~130-byte pointer, so the size limit never saw the real size (13 MB `.tga`s went in at "130 bytes"). One
+  Unity workspace: 12.2 GB in `lfs/` vs. 89 MB of git objects; 9.2 GB still referenced (`.tga` 2.0 GB,
+  `.hdr` 1.8 GB, `.png` 1.6 GB, `.wav` 0.5 GB, `.a` 0.4 GB, `.fbx`, … — the scenes/prefabs/anims only
+  ~0.3 GB), 3 GB orphaned by pruned snapshots. Fixes:
+  - **Every git call runs with the clean filter off** (`NoLfsClean`: `-c filter.lfs.clean= -c filter.lfs.process=
+    -c filter.lfs.required=false`, added in `RunAsync`) → every file is an ordinary zlib-compressed,
+    delta-packable, prunable blob with its real size. Not only `add`: a command that writes the index
+    re-hashes **racily clean** entries (file mtime = index mtime) through the clean filter — `write-tree`
+    right after `add` started `git-lfs filter-process` in ~1 of 8 runs (caught with `GIT_TRACE` in the test). `checkout` (rewind) keeps the filters: a pointer from an older snapshot is
+    smudged back to the real content from our `lfs/` store, and plain content passes smudge unchanged
+    (git-lfs warns "should have been a pointer", exit 0) — both verified with git-lfs 3.x.
+  - **One-time index reset** (`MigrateLfsIndexOnceAsync`, config `ca.lfsMigrated`): git keeps an index
+    entry whose file is unchanged on disk, so the pointers would have stayed forever; dropping our private
+    `ca-index` once makes the next snapshot hash the real content (slower once).
+  - **`PruneLfsStoreAsync`** (part of every retention sweep): deletes `lfs/objects` files no remaining
+    pointer blob names (`cat-file --batch-all-objects --batch-check` → blobs < 1 KB → `cat-file --batch` via
+    stdin → `oid sha256:`), the whole store once nothing references it. `RunAsync` got an optional `stdin`.
+  - **Media in the default blacklist** (`DefaultCheckpointExtensions`, 1.0.1): images, audio/video, 3D/DCC
+    files, fonts, native libs (`.a`, `.dylib`, `.aar`, `.jar`, `.unitypackage`, …). A stored list that still
+    equals the pre-1.0.1 default (`LegacyDefaultCheckpointExtensions`) is lifted on load
+    (`UpgradeDefaultExtensions`); an edited list stays as it is. "Skip all LFS files" was tried and dropped:
+    Unity projects keep scenes/prefabs (text, edited by Claude) in LFS too.
+  - **Already-tracked but now excluded paths are untracked before `add`** (`ls-files --cached --ignored
+    --exclude-standard` → `update-index --force-remove`), so a newly blacklisted extension isn't even read.
+    ~3 s on 60 000 tracked paths, so only when the `info/exclude` text changed since the last check
+    (`_checkedExcludeRules`, i.e. once per VS session and after a filter change).
+  - **First snapshot of a workspace gets a long timeout** (`FirstSnapshotTimeoutMs` = 5 min per git call when
+    our `ca-index` doesn't exist yet). The statusbar still says just "Creating checkpoint…"; `IsFirstSnapshot`
+    adds the explanation as its tooltip (`status.detail`, new optional field → `#status-text` `title`). Measured 2026-10-29 after "Delete all" in a Unity project:
+    ~60 000 files, the 30 s per-call limit of a normal snapshot was hit → no ref → nothing got packed, so
+    53 000 loose objects made even `ls-tree -rl` take 5 s. Steady state afterwards: `add` 0.3 s,
+    `write-tree` 0.1 s.
+  - `user.name` of the shadow repo is now set quoted (it was "Code" — the unquoted value split).
+  - **Rewind ignores filter artifacts** (`DropFilterArtifactsAsync`, for diffs against the present
+    work-tree: the rewind preview and `RestoreAsync`): `D` (in the checkpoint, not in the present tree) while
+    the file is still on disk = the present filter skips it → no rewrite; `A` while the file is older than
+    the checkpoint = it was skipped back then → no delete. Without this, the first rewind to an older
+    checkpoint after the blacklist change would have written every texture back (or, with a narrowed
+    filter, deleted files). The exact snapshot time is a commit-message line `ca-taken: <ticks>` (the commit
+    date has whole seconds; old snapshots fall back to that second + 1 — when in doubt a file stays).
 - **Nothing heavy on the UI thread.** The settings window measures the repo size and deletes it via
   `_package.JoinableTaskFactory` on a background thread (button shows "measuring…"/"Deleting…").
   Stat-ing 25 000 loose objects synchronously delayed the window's opening noticeably.

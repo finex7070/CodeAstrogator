@@ -651,7 +651,7 @@
       case "session.init": return applySessionInit(m);
       case "session.list": return renderHistoryList(m.sessions || []);
       case "transcript.load": return loadTranscript(m);
-      case "status": return applyStatus(m.state, m.text);
+      case "status": return applyStatus(m.state, m.text, m.detail);
       case "assistant.start": return assistantStart(m.id);
       case "assistant.delta": return assistantDelta(m.id, m.text);
       case "assistant.end": return assistantEnd(m.id);
@@ -1259,7 +1259,8 @@
     "waiting-permission": "Awaiting approval",
     error: "Error",
   };
-  function applyStatus(s, text) {
+  // `detail` (optional): the longer explanation, shown only as the tooltip — the statusbar stays short.
+  function applyStatus(s, text, detail) {
     const prev = state.status;
     state.status = s;
     // A new turn is starting (idle/error → working, not a mid-turn permission round-trip) → forget the
@@ -1274,6 +1275,7 @@
     if (s !== "working" && s !== "waiting-permission") clearRunningAgents();
     statusbar.setAttribute("data-state", s);
     statusText.textContent = text || STATUS_TEXT[s] || s;
+    statusText.title = detail || "";
     // send <-> stop
     if (s === "working") {
       sendBtn.classList.add("stop");

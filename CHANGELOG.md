@@ -4,6 +4,16 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.0.2] – 2026-10-29
+
+### Fixed
+- **Checkpoints take a fraction of the disk space in projects that use Git LFS.** Snapshots ran the project's Git LFS filter, so every LFS-tracked file — textures, audio, models, in Unity projects also scenes and prefabs — was stored as an uncompressed full copy that was never cleaned up, and the "Skip files larger than" limit never applied to them because it only saw the tiny LFS pointer. One Unity workspace had over 12 GB of checkpoint data this way. Snapshots now store such files like any other file (compressed, size limit applies), leftover LFS copies of deleted checkpoints are removed on the next Visual Studio start, and the rest disappears as older checkpoints expire (or right away with "Delete all checkpoints now"). Rewinding to an older checkpoint keeps working.
+- **The first checkpoint of a large project no longer fails.** In a big workspace (tens of thousands of files) the very first snapshot — or the first one after "Delete all checkpoints now" — could run into a time limit, so that turn got no rewind point and the next one had to start over. It now gets the time it needs; hovering "Creating checkpoint…" in the status bar explains that it's a one-time step. Every later checkpoint is quick, and the check for newly excluded files no longer runs on every snapshot.
+- **Rewind no longer touches files a checkpoint didn't cover.** If the extension list or size limit changed after a checkpoint was taken, a rewind could write back files that are now excluded, or delete files that had only been left out of the checkpoint. Both are now left alone, as the settings promise.
+
+### Changed
+- **Images, audio, video, 3D models, fonts and native libraries are left out of checkpoints by default** (`.png`, `.tga`, `.psd`, `.exr`, `.hdr`, `.wav`, `.mp3`, `.mp4`, `.fbx`, `.blend`, `.ttf`, `.a`, …). A rewind is meant for code and text — in game projects these assets were almost all of the checkpoint size. If you never edited the extension list, it is extended automatically; an edited list stays as it is.
+
 ## [1.0.1] – 2026-10-29
 
 ### Changed

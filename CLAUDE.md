@@ -118,6 +118,12 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   `%TEMP%\claude\<MungePath(cwd)>\<session>\tasks\<task_id>.output` (UTF-8, angekündigt per
   `system/task_started` mit `tool_use_id`, s. NOTES „Live console output", `TaskOutputWatcher`). Beim
   CLI-Update gegentesten; fällt sie weg, zeigt die Card einfach wieder nur das Endergebnis.
+- **Checkpoints + Git LFS (2026-10-29):** Die `.gitattributes` des Projekts gelten auch im Shadow-Repo, der
+  LFS-Clean-Filter kommt aus der System-gitconfig → ohne Gegenmaßnahme landen LFS-Dateien unkomprimiert in
+  `.git/lfs` (von `gc` nie aufgeräumt) und das Größenlimit sieht nur den Pointer (15 GB bei Jan). Deshalb läuft
+  **jeder** Git-Aufruf mit `NoLfsClean` (`-c filter.lfs.clean= …`, in `RunAsync` — auch `write-tree` hashte „racily
+  clean" Einträge durch den Filter); nur `checkout` behält die Filter (alte Pointer-Snapshots). Nicht
+  „alle LFS-Dateien überspringen" — Unity hält auch Prefabs/Szenen in LFS (s. NOTES „Git LFS bypassed everything").
 - **Stop von Commands (2026-10-28):** Turn-Stop killt den **ganzen Prozessbaum** der CLI (`ProcessTree.KillTree`
   = `taskkill /T /F`) — ein bloßes `Process.Kill()` ließ laufende Bash/PowerShell-Kinder verwaist weiterlaufen.
   Der Stop-Button pro Shell-Card (`tool.stop`) findet die Shell unter den Kindern von `claude.exe` über deren
