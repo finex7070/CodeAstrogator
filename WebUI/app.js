@@ -1674,9 +1674,14 @@
     const expand = state.verbosity === "detailed";
     transcriptInner.querySelectorAll(".thinking-card, .tool-card:not(.todo-card)")
       .forEach((c) => c.classList.toggle("collapsed", !expand));
-    // re-apply attachment-preview defaults for the new verbosity (lazy-loads any newly opened)
-    transcriptInner.querySelectorAll(".att-item.att-expandable").forEach((item) => {
-      if (typeof item.attSetOpen === "function") item.attSetOpen(attDefaultOpen(item.dataset.kind || ""));
+    // re-apply attachment-preview defaults for the new verbosity (lazy-loads any newly opened),
+    // then the row fit again (more than ATT_MAX_ROWS rows → the group collapses)
+    transcriptInner.querySelectorAll(".msg-attachments").forEach((group) => {
+      group.dataset.userToggled = "";
+      group.querySelectorAll(":scope > .att-item.att-expandable").forEach((item) => {
+        if (typeof item.attSetOpen === "function") item.attSetOpen(attDefaultOpen(item.dataset.kind || ""));
+      });
+      startAttachmentFit(group);
     });
   }
   function formatNum(n) { return (Number(n) || 0).toLocaleString("en-US"); }
@@ -1934,6 +1939,7 @@
         function ensureLoaded() {
           if (loaded) return;
           loaded = true;
+          item.classList.add("att-loading"); // cleared by attPreviewLoaded (row fit waits for it)
           const token = "attp-" + (++attPreviewSeq);
           attPreviewReg[token] = { item: item, kind: kind, previewEl: preview };
           post("attachment.preview", { path: String(path), token: token });
@@ -1944,6 +1950,7 @@
           if (open) ensureLoaded();
         };
         chip.addEventListener("click", function () {
+          ch.dataset.userToggled = "1"; // the row fit never overrides a choice made by hand
           item.attSetOpen(!item.classList.contains("expanded"));
         });
         if (attDefaultOpen(kind)) item.attSetOpen(true);
@@ -1951,6 +1958,48 @@
       ch.appendChild(item);
     });
     body.appendChild(ch);
+    startAttachmentFit(ch);
+  }
+
+  // Attachments sit side by side where they fit (wrapping rows). A group that needs more than
+  // ATT_MAX_ROWS rows with its default previews open starts fully collapsed. The preview sizes are only
+  // known once loaded, so the group is measured then — invisible meanwhile so it doesn't visibly jump.
+  const ATT_MAX_ROWS = 2;
+  function startAttachmentFit(group) {
+    clearTimeout(group.attFitTimer);
+    group.dataset.fitDone = "";
+    if (!group.querySelector(":scope > .att-item.expanded")) { // nothing open → nothing to fit
+      group.dataset.fitDone = "1";
+      group.classList.remove("att-fitting");
+      return;
+    }
+    group.classList.add("att-fitting");
+    group.attFitTimer = setTimeout(() => fitAttachmentGroup(group, true), 2500); // a preview that never answers
+    requestAnimationFrame(() => fitAttachmentGroup(group, false));
+  }
+  function fitAttachmentGroup(group, force) {
+    if (group.dataset.fitDone === "1") return;
+    if (!force && group.querySelector(":scope > .att-item.expanded.att-loading")) return; // wait for the rest
+    group.dataset.fitDone = "1";
+    clearTimeout(group.attFitTimer);
+    if (group.dataset.userToggled !== "1" && attRowCount(group) > ATT_MAX_ROWS) {
+      group.querySelectorAll(":scope > .att-item").forEach((it) => {
+        if (typeof it.attSetOpen === "function") it.attSetOpen(false);
+      });
+    }
+    group.classList.remove("att-fitting");
+  }
+  function attRowCount(group) {
+    const tops = new Set();
+    group.querySelectorAll(":scope > .att-item").forEach((it) => tops.add(Math.round(it.offsetTop)));
+    return tops.size;
+  }
+  // A preview finished (image decoded, text filled, or downgraded) → the group may be ready to measure.
+  function attPreviewLoaded(item) {
+    item.classList.remove("att-loading");
+    const group = item.parentNode;
+    if (group && group.classList && group.classList.contains("att-fitting"))
+      requestAnimationFrame(() => fitAttachmentGroup(group, false));
   }
 
   // host→web reply to an attachment.preview request: fill (or downgrade) the matching chip.
@@ -1978,11 +2027,13 @@
         chip.parentNode.replaceChild(clone, chip);
       }
       previewEl.remove();
+      attPreviewLoaded(item);
       return;
     }
     if (m.kind === "image") {
       const img = el("img", "att-img");
       img.alt = "";
+      img.onload = img.onerror = () => attPreviewLoaded(item); // its size counts for the row fit
       img.src = m.dataUri;
       // Click → lightbox. The inline preview is capped at 320px high, which is too small to judge a
       // screenshot; the overlay shows it big and zoomable without leaving the chat.
@@ -1996,6 +2047,7 @@
       pre.textContent = m.text || "";
       previewEl.appendChild(pre);
       if (m.truncated) previewEl.appendChild(el("div", "att-trunc", "… preview truncated"));
+      attPreviewLoaded(item);
     }
   }
 
@@ -5461,13 +5513,15 @@
         case "attachment.preview": {
           const isImg = /\.(png|jpe?g|gif|bmp|webp|svg|ico|apng|avif)$/i.test(String(msg.path || ""));
           if (isImg) {
-            const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400">' +
+            // "phone" in the name → a portrait phone screenshot (exercises the side-by-side attachment rows)
+            const [w, h] = /phone/i.test(String(msg.path)) ? [400, 780] : [640, 400];
+            const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">' +
               '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
               '<stop offset="0" stop-color="#8d5fc7"/><stop offset="1" stop-color="#2b6cb0"/></linearGradient></defs>' +
-              '<rect width="640" height="400" fill="url(#g)"/>' +
+              '<rect width="' + w + '" height="' + h + '" fill="url(#g)"/>' +
               '<circle cx="200" cy="150" r="70" fill="none" stroke="#fff" stroke-width="6"/>' +
-              '<text x="320" y="360" fill="#fff" font-family="sans-serif" font-size="28" text-anchor="middle">' +
-              'mock preview 640×400</text></svg>';
+              '<text x="' + w / 2 + '" y="' + (h - 40) + '" fill="#fff" font-family="sans-serif" font-size="28" text-anchor="middle">' +
+              'mock preview ' + w + 'x' + h + '</text></svg>'; // ASCII only: btoa() of "×" is no valid UTF-8 → broken SVG
             return sendIn("attachment.preview", { token: msg.token, ok: true, kind: "image",
               dataUri: "data:image/svg+xml;base64," + btoa(svg) }, 200);
           }

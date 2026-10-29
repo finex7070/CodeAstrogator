@@ -1093,6 +1093,11 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   `SessionStart` hook fires without the flag and **not** with it — both when the hook lives in the same
   settings file and when it comes from another scope (project `.claude/settings.json`), i.e. `disableAllHooks`
   is global, not file-local. Re-test on a CLI update.
+- **Status probes leave no session files (2026-10-29).** Being a regular CLI session, every `-p /usage` poll (once a
+  minute) and every `-p /model` probe wrote a `<id>.jsonl` into `~\.claude\projects\<munged cwd>` — found **~11,000**
+  such 4 KB files in one workspace folder. Both now pass **`--no-session-persistence`** when `--help` lists it
+  (`CliCapabilities.SupportsNoSessionPersistence`; an unknown flag would fail the probe). Verified against 2.1.312:
+  same `/usage` report, no file written. Files already written are left alone.
 
 ## Persistent CLI mode — REMOVED in 0.8.0 (2026-09-23)
 - **Gone:** `Core/ClaudePersistentProcessHost`, the `UsePersistentCli` option, the "Advanced → Use a
@@ -1343,6 +1348,16 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   - **Default open-state by verbosity** (`attDefaultOpen`): **compact** → all closed · **normal** → images
     open, text closed · **detailed** → all open. `applyVerbosity()` re-applies this to every existing
     `.att-item.att-expandable` (via `item.attSetOpen`, which also lazy-loads).
+  - **Side by side, collapsed beyond two rows (2026-10-29):** `.msg-attachments` is a wrapping row
+    (`flex-flow: row wrap`, tops aligned) instead of one item per line — chips and preview cards sit next to
+    each other where they fit (three phone screenshots in one row). A group that needs **more than
+    `ATT_MAX_ROWS` (2) rows** with its default previews open starts **fully collapsed**. The preview sizes are
+    only known once loaded, so `startAttachmentFit` hides the group (`.att-fitting`, `visibility: hidden`),
+    waits until no open item is `.att-loading` (set by the lazy load, cleared by `attPreviewLoaded` on
+    `img.onload`/text/downgrade; 2.5 s fallback), counts the rows (distinct `offsetTop`) and then collapses or
+    reveals. A chip clicked by hand (`data-user-toggled`) is never overridden; a verbosity switch re-applies the
+    defaults and fits again. Rows are measured once (no re-fit on resize). The mock serves a portrait SVG for
+    paths containing "phone" (and its SVG is ASCII now — `btoa("×")` made it invalid UTF-8, no preview showed).
   - **Lazy content load:** on first open the WebUI posts **`attachment.preview` (web→host)** `{ path, token }`;
     the host reads the file **off the UI thread** (`HandleAttachmentPreview` → `BuildAttachmentPreview`, image
     ≤ 16 MB → base64 data-URI, text ≤ 200k chars w/ `truncated` flag) and replies **`attachment.preview`
@@ -1398,8 +1413,21 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     records the stamp). "End remote session" = `stop` + `rm`. `remote.openTerminal` → a PowerShell console with
     `claude attach <id>` (closing it leaves the session running). `Dispose` (window/VS closing) only stops the polling;
     on the next `ready` the bridge **re-adopts** a still-running background session of the current chat
-    (`TryAdoptRemoteSession`: `agents --json`, `kind background` + `sessionId` = current record) and locks the panel
-    again ("Remote control is still running for this chat").
+    (`TryAdoptRemoteSession`: `agents --json --all`, `kind background` + `sessionId` = current record) and locks the
+    panel again ("Remote control is still running for this chat"). An adopted session mirrors from its **first**
+    look (`_remoteMirrorFromStart`) — the phone may have moved the chat on while VS was closed.
+  - **Ended while VS was closed (fix 2026-10-29):** the end-of-session import only ran from the monitor's `Ended`,
+    so a session that ended without VS watching — the user had Claude **shut the PC down** from the phone, VS died
+    with it — never reached the history: the chat showed the state from before the remote start (plus later local
+    turns), although the CLI transcript had everything (a local `--resume` turn even knew the remote turns). Such
+    an entry stays in the registry as **`"state": "done"`** (no pid; CLI 2.1.312), `HasEnded` counts `done` too.
+    Now `TryAdoptRemoteSession` also takes every **ended** background entry whose `sessionId` is a chat of this
+    workspace's history (`SessionHistoryStore.Contains`, current or archived), imports `<sessionId>.jsonl`
+    (`ImportEndedRemoteSession` → `SessionHistoryStore.Import`, the transcript is authoritative — it holds the local
+    turns too), reloads the view when it is the open chat (note "Remote session imported — it ended while Visual
+    Studio was closed") and then `claude rm`s the entry, so it happens once. The monitor also `rm`s the entry when
+    it sees the session end while VS runs (else the next start would import it a second time). `Import` keeps the
+    title of an existing record (it may have been renamed).
   - `ClaudeBackgroundSessions.RunAsync` waits for the **process**, not for EOF on its pipes (the spawned daemon could
     inherit them) — verified: the `--bg` call returns in ~2 s.
   - **WebUI:** `#remote-panel` is a **banner in the flow below the header** (`notice-banner remote-panel`, like the

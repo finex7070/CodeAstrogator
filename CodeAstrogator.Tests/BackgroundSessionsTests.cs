@@ -54,6 +54,11 @@ namespace CodeAstrogator.Tests
     ""startedAt"": 1793183877252, ""sessionId"": ""8a6d7f9e-c2b0-4e06-9d7a-5ee80fc262f1"", ""state"": ""stopped"" } ]";
             Assert.True(ClaudeBackgroundSessions.HasEnded(ClaudeBackgroundSessions.ParseAgents(stopped).Single()));
             Assert.True(ClaudeBackgroundSessions.HasEnded(null)); // no longer listed
+
+            // the host died with the PC (shutdown while the session ran) — CLI 2.1.312
+            const string done = @"[ { ""id"": ""8a6d7f9e"", ""cwd"": ""C:\\work"", ""kind"": ""background"",
+    ""startedAt"": 1793183877252, ""sessionId"": ""8a6d7f9e-c2b0-4e06-9d7a-5ee80fc262f1"", ""name"": ""demo"", ""state"": ""done"" } ]";
+            Assert.True(ClaudeBackgroundSessions.HasEnded(ClaudeBackgroundSessions.ParseAgents(done).Single()));
         }
 
         [Fact]

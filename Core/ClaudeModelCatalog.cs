@@ -416,6 +416,8 @@ namespace CodeAstrogator.Core
             var arguments = "-p /model --model " + modelId + " --output-format json";
             if (!string.IsNullOrEmpty(noHooksSettings))
                 arguments += " --settings \"" + noHooksSettings + "\"";
+            if ((await ClaudeCliCapabilities.GetAsync(exePath, ct).ConfigureAwait(false)).SupportsNoSessionPersistence)
+                arguments += " --no-session-persistence"; // a probe needs no session file
 
             var output = await RunAsync(exePath, arguments, workingDirectory, ct).ConfigureAwait(false);
             return output == null ? null : ParseModelKnown(output, modelId);

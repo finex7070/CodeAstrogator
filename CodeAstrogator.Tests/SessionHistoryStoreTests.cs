@@ -53,6 +53,29 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void Import_ReplacesMessagesButKeepsTheTitle()
+        {
+            // a remote session that ended while VS was closed: the transcript wins, the (renamed) title stays
+            var store = SessionHistoryStore.LoadFrom(_path);
+            store.Current.Id = "cli-777";
+            store.Current.HasCliSession = true;
+            store.Current.Title = "Checkout refactor";
+            store.Current.Messages.Add(Msg("user", "Start"));
+            Assert.True(store.Contains("CLI-777"));
+            Assert.False(store.Contains("cli-other"));
+
+            var record = store.Import("cli-777", "Start", new[] { Msg("user", "Start"), Msg("user", "From the phone") },
+                DateTime.UtcNow);
+
+            Assert.Same(store.Current, record);
+            Assert.Equal("Checkout refactor", record.Title);
+            Assert.Equal(2, record.Messages.Count);
+
+            var fresh = store.Import("cli-new", "Phone only", new[] { Msg("user", "Phone only") }, DateTime.UtcNow);
+            Assert.Equal("Phone only", fresh.Title); // a new record takes the transcript's title
+        }
+
+        [Fact]
         public void Load_FromMissingFile_IsEmpty()
         {
             var store = SessionHistoryStore.LoadFrom(_path);

@@ -4,6 +4,15 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.0.1] – 2026-10-29
+
+### Changed
+- **Attachments sit side by side.** The files attached to a message are no longer listed one below the other: they line up next to each other wherever they fit, so a few phone screenshots appear as one row of previews. When there are so many that they would need more than two rows, they start collapsed — click any of them to open its preview.
+
+### Fixed
+- **Remote Control: nothing gets lost when the session ends while Visual Studio is closed.** If a remote session ended without Visual Studio watching — for example because the PC was shut down from the phone — the chat only showed the state from before Remote Control was started; everything done on the phone was missing (Claude itself still knew it). On the next start the extension now picks up such a session, loads its whole conversation into the chat ("Remote session imported — it ended while Visual Studio was closed") and cleans up the leftover entry. A remote session that is still running after a restart now also shows what happened on the phone in the meantime right away, and a renamed chat keeps its name when the remote conversation is imported.
+- **No more pile of session files from the usage meters.** Checking the usage limits (once a minute) and the available models ran small Claude Code sessions, and each one left a file in `%USERPROFILE%\.claude\projects` — tens of thousands over time, and they cluttered Claude Code's own session list. These checks no longer save anything, and the files already left behind are removed when Visual Studio starts (only files that are nothing but such a check; your conversations are never touched).
+
 ## [1.0.0] – 2026-10-28
 
 ### Added

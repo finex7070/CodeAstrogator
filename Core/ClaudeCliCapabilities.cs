@@ -70,6 +70,9 @@ namespace CodeAstrogator.Core
             // --bg (2.1.29x): background sessions hosted by the CLI's daemon — Remote Control without a
             // console window (see ClaudeBackgroundSessions).
             var backgroundSessions = Regex.IsMatch(help, @"--bg\b");
+            // --no-session-persistence: the status probes (/usage every minute, /model) would otherwise
+            // each leave a session file in ~/.claude/projects (thousands a week).
+            var noSessionPersistence = help.IndexOf("--no-session-persistence", StringComparison.Ordinal) >= 0;
 
             var start = help.IndexOf("--permission-mode", StringComparison.Ordinal);
             if (start < 0)
@@ -96,6 +99,7 @@ namespace CodeAstrogator.Core
                 SupportsPromptSuggestions = promptSuggestions,
                 SupportsReplayUserMessages = replayUserMessages,
                 SupportsBackgroundSessions = backgroundSessions,
+                SupportsNoSessionPersistence = noSessionPersistence,
             };
         }
 
@@ -188,6 +192,9 @@ namespace CodeAstrogator.Core
         /// <summary>CLI accepts <c>--bg</c> (background sessions: <c>agents --json</c>, <c>logs</c>,
         /// <c>stop</c>, <c>rm</c>, <c>attach</c>).</summary>
         public bool SupportsBackgroundSessions { get; set; }
+
+        /// <summary>CLI accepts <c>--no-session-persistence</c> (a <c>-p</c> run leaves no session file).</summary>
+        public bool SupportsNoSessionPersistence { get; set; }
 
         /// <summary>The value to pass for "ask the user about everything", or null to omit the flag
         /// (legacy CLIs, where omission still means exactly that).</summary>

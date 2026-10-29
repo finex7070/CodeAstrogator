@@ -126,8 +126,9 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
 - **Remote Control (seit 1.0.0, CLI 2.1.29x+):** läuft als **CLI-Hintergrund-Session** (`claude --bg --resume <id>
   --remote-control <name>`, `Services/BackgroundRemoteSession`) — kein Konsolenfenster; Link aus `claude logs <id>` → QR im
   Panel; Status/Ende über `claude agents --json`; Ende = `claude stop` + `claude rm`; Transcript wird live aus der Session-
-  `.jsonl` gespiegelt; überlebt VS (Re-Adopt beim nächsten Start). Ausgabeformate undokumentiert (s. NOTES „Remote
-  Control") — beim CLI-Update gegentesten. **`claude remote-control --help` NICHT aufrufen** (ignoriert `--help`, startet
+  `.jsonl` gespiegelt; überlebt VS (Re-Adopt beim nächsten Start). Endet sie, während VS zu ist (z. B. PC-Shutdown →
+  Registry-Eintrag `"state": "done"`), importiert der nächste Start den Verlauf aus der `.jsonl` und `rm`t den Eintrag.
+  Ausgabeformate undokumentiert (s. NOTES „Remote Control") — beim CLI-Update gegentesten. **`claude remote-control --help` NICHT aufrufen** (ignoriert `--help`, startet
   einen Server). Ältere CLI ohne `--bg` → alter Konsolen-Weg (`RemoteTerminalLauncher`).
 - **Prompt-Suggestions + stream-json-Input (2026-10-08, CLI 2.1.287):** Der Prompt geht als **stream-json-
   User-Message** über stdin (`--input-format stream-json`, `Core/StreamJsonInput`, stdin zu beim `result` — weiterhin

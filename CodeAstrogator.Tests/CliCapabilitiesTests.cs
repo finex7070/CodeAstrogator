@@ -63,6 +63,17 @@ Options:
         }
 
         [Fact]
+        public void ParseHelp_NoSessionPersistence_OnlyWhenListed()
+        {
+            Assert.False(ClaudeCliCapabilities.ParseHelp(Help2_1_263).SupportsNoSessionPersistence);
+
+            var withFlag = Help2_1_263 +
+                "  --no-session-persistence              Disable session persistence - sessions\n" +
+                "                                        will not be saved to disk\n";
+            Assert.True(ClaudeCliCapabilities.ParseHelp(withFlag).SupportsNoSessionPersistence);
+        }
+
+        [Fact]
         public void ParseHelp_LegacyCli_HasNoManual_SoTheFlagIsOmitted()
         {
             var caps = ClaudeCliCapabilities.ParseHelp(HelpLegacy);

@@ -111,14 +111,15 @@ namespace CodeAstrogator.Core
             return last;
         }
 
-        /// <summary>True when a background session is gone: no longer listed, or listed as stopped/exited
-        /// (a stopped entry carries no pid).</summary>
+        /// <summary>True when a background session is gone: no longer listed, or listed as stopped/exited/done
+        /// (an ended entry carries no pid; one whose host died with the PC shows as <c>"state": "done"</c>).</summary>
         public static bool HasEnded(BackgroundSessionInfo? session)
         {
             if (session == null)
                 return true;
             var state = session.State ?? "";
             if (state.Equals("stopped", StringComparison.OrdinalIgnoreCase)
+                || state.Equals("done", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("exited", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("failed", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("error", StringComparison.OrdinalIgnoreCase))

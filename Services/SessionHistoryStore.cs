@@ -212,19 +212,28 @@ namespace CodeAstrogator.Services
                 _sessions.Insert(0, Current);
         }
 
+        /// <summary>True when the history holds a session with this id (current or archived).</summary>
+        public bool Contains(string id) =>
+            string.Equals(Current.Id, id, StringComparison.OrdinalIgnoreCase)
+            || _sessions.Any(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+
         /// <summary>
         /// Inserts or replaces a session imported from the CLI's own store (remote
         /// control). The transcript is authoritative — existing messages are replaced.
+        /// An existing session keeps its title (it may have been renamed).
         /// </summary>
         public SessionRecord Import(string id, string title, IEnumerable<JObject> messages, DateTime updatedAtUtc, long contextTokens = 0)
         {
             var record = Current.Id == id ? Current : _sessions.FirstOrDefault(s => s.Id == id);
             if (record == null)
             {
-                record = new SessionRecord { Id = id };
+                record = new SessionRecord { Id = id, Title = title };
                 _sessions.Insert(0, record);
             }
-            record.Title = title;
+            else if (string.IsNullOrWhiteSpace(record.Title) || record.Title == "Untitled")
+            {
+                record.Title = title;
+            }
             record.HasCliSession = true;
             record.UpdatedAtUtc = updatedAtUtc;
             record.ContextTokens = contextTokens;
