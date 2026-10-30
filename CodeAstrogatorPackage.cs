@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.Design;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using CodeAstrogator.Bridge;
@@ -259,13 +261,37 @@ namespace CodeAstrogator
         /// Applies edited values (from the settings window), persists them, and notifies
         /// listeners so the chat updates live. UI thread.
         /// </summary>
-        internal void UpdateOptions(AstrogatorOptions updated)
+        internal void UpdateOptions(AstrogatorOptions updated, bool preview = false)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             Copy(from: updated, to: _options);
             SaveOptions();
-            OptionsChanged?.Invoke();
-            RunRetentionCleanup(); // a shortened retention window should take effect immediately
+            OptionsPreview = preview;
+            try
+            {
+                OptionsChanged?.Invoke();
+            }
+            finally
+            {
+                OptionsPreview = false;
+            }
+            // a shortened retention window takes effect right away — but not while the settings window
+            // applies live: a dropdown passing "1 day" on the way must not delete anything (runs on close)
+            if (!preview)
+                RunRetentionCleanup();
+        }
+
+        /// <summary>True while <see cref="OptionsChanged"/> runs for a live change in the settings window
+        /// (<see cref="UpdateOptions"/> with <c>preview</c>): handlers skip what cannot be undone (deleting
+        /// removed fonts) — the window may still be cancelled. The final apply on close does it.</summary>
+        internal bool OptionsPreview { get; private set; }
+
+        /// <summary>An independent copy of the current options (the settings window's state to revert to).</summary>
+        internal AstrogatorOptions SnapshotOptions()
+        {
+            var copy = new AstrogatorOptions();
+            Copy(from: _options, to: copy);
+            return copy;
         }
 
         /// <summary>Persists the current snapshot. UI thread. Used by the gear popover writes.</summary>
@@ -294,6 +320,16 @@ namespace CodeAstrogator
                 ? new System.Collections.Generic.List<string>(from.AutoApprovePatterns)
                 : new System.Collections.Generic.List<string>();
             to.AccentColor = from.AccentColor ?? "";
+            to.SyntaxTheme = AstrogatorOptions.NormalizeSyntaxTheme(from.SyntaxTheme);
+            to.UserMessageColor = from.UserMessageColor ?? "";
+            to.ColorBlindDiffs = from.ColorBlindDiffs;
+            to.BubbleIntensity = AstrogatorOptions.NormalizeBubbleIntensity(from.BubbleIntensity);
+            to.CustomFonts = (from.CustomFonts ?? new List<string>()).Where(f => !string.IsNullOrWhiteSpace(f))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            to.ChatFont = AstrogatorOptions.NormalizeFont(from.ChatFont, to.CustomFonts);
+            to.ChatFontScale = AstrogatorOptions.ClampFontScale(from.ChatFontScale);
+            to.CodeFont = AstrogatorOptions.NormalizeFont(from.CodeFont, to.CustomFonts);
+            to.CodeFontScale = AstrogatorOptions.ClampFontScale(from.CodeFontScale);
             to.NoticeFetchEnabled = from.NoticeFetchEnabled;
             to.NoticeFetchDecided = from.NoticeFetchDecided;
             to.UpdateCheckEnabled = from.UpdateCheckEnabled;
@@ -346,7 +382,7 @@ namespace CodeAstrogator
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var window = new AstrogatorSettingsWindow(this, _options);
-            window.ShowModal(); // Save applies + persists; Cancel/X discards (AstrogatorSettingsWindow)
+            window.ShowModal(); // changes apply live; Cancel/Esc reverts, Done/X keeps (AstrogatorSettingsWindow)
         }
 
         internal DTE2? GetDte()
@@ -369,12 +405,15 @@ namespace CodeAstrogator
         internal string? GetSolutionDirectory()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (GetService(typeof(SVsSolution)) is IVsSolution solution
-                && ErrorHandler.Succeeded(solution.GetSolutionInfo(out var dir, out _, out _))
-                && !string.IsNullOrEmpty(dir))
-            {
+            if (!(GetService(typeof(SVsSolution)) is IVsSolution solution))
+                return null;
+            if (ErrorHandler.Succeeded(solution.GetSolutionInfo(out var dir, out _, out _)) && !string.IsNullOrEmpty(dir))
                 return dir;
-            }
+            // "Open a folder" (no .sln): GetSolutionInfo can come back empty while the solution directory property
+            // holds the folder — without this fallback such a workspace used the "global" chat history.
+            if (ErrorHandler.Succeeded(solution.GetProperty((int)__VSPROPID.VSPROPID_SolutionDirectory, out var prop))
+                && prop is string folder && !string.IsNullOrEmpty(folder))
+                return folder;
             return null;
         }
     }

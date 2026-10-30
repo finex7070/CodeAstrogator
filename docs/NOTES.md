@@ -22,9 +22,9 @@ Major only on request.
   1. **Settings via the new window** (WritableSettingsStore): gear → "Advanced options…"
      → window opens, all options editable (Model/Effort have moved into the popover),
      theme-consistent (Dark/Light: text + field
-     backgrounds follow); "Reset to defaults" loads defaults into the form; **Save** applies +
-     persists (persistent across VS restart), **Cancel/X** discards; Theme/Verbosity take effect
-     live. On store error: ⚠ system note in the chat +
+     backgrounds follow); "Reset to defaults" loads defaults into the form; changes apply live and
+     persist (across VS restart), **Cancel/Esc** reverts, **Done/X** keeps (since 2026-10-29, see
+     "Settings window layout"). On store error: ⚠ system note in the chat +
      `%LocalAppData%\CodeAstrogator\settings-error.log`.
   2. Active-file chip: name+`:lines`, truncation on long names, click = session toggle
      (struck through), disappears when the option is off.
@@ -237,9 +237,28 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 ## Settings window layout (2026-10-02)
 - Every block is a **card** (`Section(title, params UIElement[])` in `AstrogatorSettingsWindow`): bold
   title, 1 px rounded border in `VsBrushes.ToolWindowBorderKey`, 12 px padding, 12 px gap below.
-- Columns: **left** Claude CLI · Appearance & transcript · Behavior · Announcements & updates · History &
-  storage; **right** Permissions · Checkpoints (rewind). Permissions moved right because "Announcements &
-  updates" grew (Check now buttons, auto-update) and the left column had become much longer than the right.
+- **Three columns (2026-10-29)** — two had grown taller than the screen (Fonts section) and needed scrolling:
+  **left** Claude CLI · Appearance · Fonts · History & storage; **middle** Permissions · Behavior ·
+  Announcements & updates; **right** Checkpoints (rewind) alone (the tallest block). Width
+  `min(1340, work area − 40)`, height still `SizeToContent` capped to the work area (scrolls only past it).
+- **Theme + transcript verbosity are no longer in the window** (2026-10-29) — they live in the gear popover
+  only (they were in both). The window carries them over from the live options like the other
+  popover-managed values (model·mode, accent, syntax theme); the section is now just "Appearance".
+- **Live apply (2026-10-29)** — no Save button any more: every change applies right away
+  (`ScheduleApply` → 350 ms `DispatcherTimer` → `ApplyAndPersist(preview: true)` →
+  `CodeAstrogatorPackage.UpdateOptions(o, preview)`: copied, persisted, `OptionsChanged` raised), so fonts
+  and colors can be tried out in the chat while the window is open (modal, but the WebView keeps rendering).
+  Text fields (exe path, prompt timeout, MB limit, a typed hex color) apply on **Enter / leaving the field**
+  and only when their text was edited; DataGrid rows after the cell edit (no `CommitEdit` during a preview —
+  it would end the edit under the cursor). **Held back while previewing** (`preview: true` →
+  `CodeAstrogatorPackage.OptionsPreview`): the retention cleanup (a dropdown passing "1 day" must not delete
+  history) and `CustomFontStore.DeleteUnused` in `SendFontState` (a removed font must survive a Cancel).
+  **Buttons:** "Reset to defaults" (loads the defaults, applied live) · hint "Changes apply right away." ·
+  **Cancel** (Esc) = `RevertAndClose` → `UpdateOptions(_original)` with the `SnapshotOptions()` copy taken at
+  open (fonts imported meanwhile become unreferenced and are deleted) · **Done** (Enter) and the window's
+  **X** keep the changes: the final `ApplyAndPersist(preview: false)` on `Closed` flushes open edits and runs
+  what was held back — only if something was changed (`_dirty`), so opening + closing does not mark the
+  consent options as decided.
 - "Update ready" banner order: text · "What's new ↗" · **Restart now** last (it closes Visual Studio).
 
 ## Manual "Check now" (settings window, 2026-10-02)
@@ -487,10 +506,87 @@ compact_boundary evaluation) — details in the respective sections below.
   = default). The host validates (`NormalizeHexColor`), stores it in `AstrogatorOptions.AccentColor` +
   `SaveOptions`. `session.init` additionally carries **`accent`**; the UI applies it via `applyAccent`
   (`:root` inline overrides). From the gear popover (swatches + custom picker).
+- **Colors (2026-10-29, 1.1.0).** One host→web message **`appearance.state`** `{ syntaxTheme, userColor,
+  bubbleIntensity, colorBlindDiffs }` on `ready` and after every settings save (`SendAppearanceState`, which also sets
+  `Editor.EditReviewPalette.ColorBlind`).
+  - **Syntax theme** (gear popover, under the accent color; web→host **`syntax.set`** `{ theme }` →
+    `AstrogatorOptions.SyntaxTheme`): `default` (the accent-based token colors as before), `vs` (Dark+/Light+),
+    `github`, `monokai`, `solarized`. Each has a dark and a light token set (`SYNTAX_THEMES` in app.js), applied as
+    `--tok-kw/str/num/com/fn` (`.tok-*` use them with the old colors as fallback) and re-applied when the panel theme
+    switches (`applyThemeDependentColors`, also called from `applyTheme`). Only token colors; the code-block
+    background stays the panel's. The dropdown is a **customizable `<select>`** (`appearance: base-select` under
+    `@supports`, Chromium 135+; WebView2 runtime here 156): the open list uses `--bg-elevated`, accent hover/check
+    instead of the OS blue (user feedback); an older runtime falls back to the native list. Note: options only react
+    to trusted clicks — a synthetic `option.click()` in a test doesn't select.
+  - **Settings window** (Appearance): **color of your messages** (editable combo: presets or a typed
+    `#hex`, `UserMessageColor`, "" = built-in blue → `--msg-user-bg/border/fg` with the dark/light alphas of the
+    stylesheet), **message bubble tint** (`BubbleIntensity` off/subtle/normal/strong → `:root.bubbles-*`; subtle/strong
+    via `color-mix`), **color-blind friendly diffs** (`ColorBlindDiffs` → `:root.diffs-cb` overrides `--diff-add/del` and
+    the new `--diff-add-fg/--diff-del-fg` with blue/orange, light variants under `[data-theme="light"]`; the inline
+    editor review switches via `EditReviewPalette` — the adorner's and scrollbar margin's brushes became properties
+    reading the current palette, picked up on the next redraw).
+- **Prompt suggestion persisted (2026-10-30, 1.1.0).** `SessionRecord.PromptSuggestion` (history JSON `promptSuggestion`) is set when
+  `PromptSuggestionEvent` arrives for the current chat, cleared in `RunPrompt` and on web→host `prompt.suggestionDismissed`
+  (Escape on the ghost text); `transcript.load` carries `promptSuggestion` (only while the option is on) and `loadTranscript`
+  restores it unless a turn or remote session is active — so it is back after a VS restart / solution reload / history switch.
+- **Chat history follows the workspace (2026-10-29, 1.1.0).** `SessionHistoryStore` is per workspace (`GetHistoryPath`:
+  SHA-1 of the solution dir, `global.json` without one) and the bridge picked it once in its ctor. After a VS restart the tool
+  window is often created before the solution finished loading → `global` store; it never switched, so the restored
+  "last chat" was the global store's — an old conversation (here one from months earlier, its CLI session filed under another
+  project's folder) — and the next prompts resumed it with the real workspace as cwd. After the next restart the panel
+  came up on the right store and that afternoon seemed lost (it sat in `global.json`). Fix: the bridge subscribes to
+  `Shell.Events.SolutionEvents` (open/close solution, open/close folder) and checks on `ready`; `CheckWorkspaceSwitch`
+  saves, `SessionHistoryStore.ReloadFrom` (same instance, so all `lock (_history)` stay valid), `ResetSession`, closes a
+  pending turn review, then `SendInitialSession` (restores the new workspace's last chat) + a note. During a turn or a
+  remote session it only marks `_workspaceSwitchPending`; `OnTurnCompleted` and the remote end retry. Typical trigger: VS opened via the start window (the layout incl. the panel loads first, the solution after). Also
+  `GetSolutionDirectory` now falls back to `VSPROPID_SolutionDirectory` — in "Open a folder" mode `GetSolutionInfo` can be empty
+  (the August chat in `global.json` came from a folder-mode workspace).
+- **Fonts (2026-10-29, from the first Marketplace review: "Would be nice to change the font").** **Settings window →
+  Fonts** (first in the gear popover; moved there so the popover keeps only Appearance, Accent color, Syntax theme and
+  Verbosity) has two rows, **UI** and **Code**, each a font list plus a size-factor list (0.7× … 1.5×); the own-fonts list
+  below feeds both lists live (`RefreshFontCombos`). The web→host `font.set` of the popover version is gone; the
+  settings save carries the values and `OnOptionsChanged` → `font.state` applies them.
+  **UI** (internally still `target: "chat"`, options `ChatFont`/`ChatFontSize`) sets **`--font-chat`** — all text that
+  isn't code: transcript, tool-card heads, todos, notes, prompt box, composer chips, key hints, empty state, dialogs —
+  **and `--font-ui`** — title, popovers, buttons, model button, statusbar (user feedback: those stayed Segoe UI).
+  **Code** sets **`--font-code`** (default `var(--font-mono)`) = real code only (code blocks, inline code, `.tool-body`,
+  `.diff`, `.perm-json`, console, file previews, any `.transcript-inner pre`). No rule uses `--font-mono` directly; the
+  "Code Astrogator" wordmark keeps `--font-serif` (branding). The first entry of both dropdowns is **Default** (id
+  `default`, `AstrogatorOptions.DefaultFont`): UI = Segoe UI chrome + Cascadia text as before, Code = Cascadia;
+  "Cascadia Code" makes everything Cascadia. **Sizes are factors** (0.7× … 1.5× in 0.1 steps — a first 0.25×–2× range was too wide to be usable, options `ChatFontScale`/`CodeFontScale` in percent, `FontScales`,
+  `ClampFontScale` snaps to the nearest, 0 → 100): every `font-size: Npx` in app.css is `calc(Npx * var(--fs))` (and the
+  one px line-height), so each element keeps its own proportion. `--fs` defaults to `var(--fs-ui)`; `.code-block`,
+  `.tool-body`, `.diff`, `.perm-json`, `.att-pre`, `.tool-console` switch it to `var(--fs-code)` (custom properties
+  inherit, so everything inside follows); a todo card's `.tool-body.todo-list` switches back to the UI factor. Inline
+  code stays with its sentence (UI factor). `applyFonts` sets `--fs-ui`/`--fs-code` on `:root` (the first version had px
+  sizes for the transcript only, which left most of the panel unscaled — user feedback).
+  - **Built-in fonts:** Default, Cascadia Code, **Roboto** (not installed on Windows → shipped in
+    `WebUI/fonts/` as woff2, Latin + Latin Extended, 400/700/italic, `@font-face` with `local()` first; SIL OFL,
+    `WebUI/fonts/Roboto-OFL.txt`), Arial and Times New Roman (the best-known sans-serif and serif).
+  - **The user's own fonts** are added/removed in the **settings window** (Fonts → "Your own
+    fonts", "Add font file…" / "Remove", multi-select .ttf/.otf/.woff/.woff2 ≤ 10 MB). `CustomFontStore` copies
+    them to `%LocalAppData%\CodeAstrogator\fonts` at once (originals can move); `AstrogatorOptions.CustomFonts`
+    holds the file names. A font added and then cancelled, or removed, is deleted by `CustomFontStore.DeleteUnused`
+    on the next `font.state`.
+  - **Options:** `ChatFont` / `CodeFont` = `default|cascadia|roboto|arial|times|custom:<file>` (`NormalizeFont`: a
+    `custom:` id must name a loaded font, else `default`), `ChatFontScale` / `CodeFontScale` (percent, see
+    above). `font.state` carries `scale` instead of a px size; all four values are edited in the settings window.
+  - **`font.state` (host → web)** on `ready` and after a settings save: `{ chat: {font,size},
+    code: {font,size}, custom: [{id, name}], faces: { "<custom id>": dataUri } }` — data URIs only for the custom
+    fonts in use; the UI registers each once as `FontFace("AstroFontN")` (a broken file falls back to the stack).
+  - Verified in the browser mock: Roboto loads from the bundled files, chat 14 px / code 13 px apply, a code-font
+    change leaves the chat font alone, inline code and code blocks follow the code font.
 - **`verbosity.set` (web → host)** `{ level: "compact"|"normal"|"detailed" }` +
   `session.init.verbosity` — purely a client-side display density (the host only persists
   the string + forwards it; CLI output is unaffected). **Compact** (`v-compact`) hides
-  `.sys-note` + `.thinking-card` via CSS. **Normal** (no class) shows everything; thinking
+  `.sys-note` + `.thinking-card` via CSS — and since 2026-10-29 (1.1.0, user request: compact looked almost like
+  normal) every tool card that doesn't need the user: finished ones (`.tool-ok` / `.tool-err` / `.tool-stopped` — incl.
+  auto-accepted edits and finished subagents) and `.todo-card` (the Tasks bar shows the list). Still shown: a tool card
+  without a status class = still running (live console + stop button), `.perm-card` (Ask mode approvals, also after
+  the decision) and `.q-card`. Commands that never asked ("Auto-accept commands", an auto-approve pattern, read-only
+  commands the CLI doesn't prompt for) have no permission card, so their finished tool card hides; auto-accepted edits
+  are pre-decided permission cards → marked `.auto-approved` (live: `m.autoApproved`; persisted: the permission record
+  carries `autoApproved`, `RecordPermissionMessage(…, autoApproved: true)`) and hidden as well. **Normal** (no class) shows everything; thinking
   **and** tool cards start collapsed. **Detailed** (`v-detailed`) starts thinking **and** tool
   cards expanded (input/output visible) — wired via `collapsedInit()` at card creation
   (thinking `upgradeThinkingToCard`, live tool card, transcript-rebuild tool card).
@@ -1016,6 +1112,13 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   log capture with `run_in_background` ("tell me when you're done testing") — the chat stayed on
   "Working…" and the only way to answer was Stop, which killed the capture ("Background shell command didn't
   finish before the previous session ended", `status: stopped`).
+  - **One footer for a run of follow-up turns (2026-10-29, 1.1.0).** A watched log reports often, and every
+    report is a CLI turn of its own with its own `result` → a "time · tokens · cost" footer after almost every
+    message (user report). The bridge now flags `turn.result.followUp` (`_inFollowUpTurn`: set on
+    `FollowUpTurnStartedEvent`, cleared in `RunPrompt`); the UI (`turnResult`, `footerChain`) removes the previous
+    footer and renders one summed footer below the newest message — base = the chain's total at the first result
+    of a follow-up turn, the chain's base for further results of the same turn (subagent results still replace).
+    The tooltip names how many follow-ups it includes; a prompt the user sends starts a new chain.
   - **Measured against CLI 2.1.287** (probe: `claude -p --input-format stream-json`, stdin kept open, Haiku,
     `sleep 35` in the background): a **second user message written to stdin while the task runs is
     answered right away** (`init` → answer → `result`, task untouched); when the task ends the CLI reports it
@@ -1484,6 +1587,16 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     browser), status text. Statusbar "Remote: Claude is working…" while busy. The console fallback uses the same
     banner (no QR/link — the console shows them). Composer stays locked as before (two processes on one
     conversation would race).
+  - **Prompting from VS during a remote session — investigated 2026-10-29 (CLI 2.1.312), not built (user
+    decision).** The CLI has **no way to send input to a running background session**: `agents` (only
+    `--json` listing + dispatch defaults), `attach` (interactive TUI only), `logs`, `stop`, `rm`, `respawn`;
+    `claude daemon --help` lists only lifecycle (`run`/`status`/`logs`/`uninstall`/`stop`). Options weighed:
+    (a) `claude attach` in a hidden ConPTY and typing the prompt as keystrokes — undocumented TUI, breaks on
+    any UI change or permission prompt → rejected; (b) a parallel `-p --resume` turn — two writers on one
+    transcript → rejected; (c) **take back per prompt**: only while the remote session is `idle` → `stop` +
+    `rm` → run the turn here → restart `--bg --resume <id> --remote-control` (same link, per the measurement
+    above; reconnect ~8-10 s; open question whether the Claude app shows the VS turn after the restart — the
+    model has it, the new session loads the whole transcript). (c) is the viable one if this comes up again.
   - **Tests:** `BackgroundSessionsTests` (start output, logs → link, agents running/stopped, garbage). E2E by hand
     against 2.1.294 with the built DLL: start 1.9 s, link after 8 s, `idle`, end clean, daemon gone, registry empty.
 - **The console variant (fallback, unchanged since 2026-06-21):**

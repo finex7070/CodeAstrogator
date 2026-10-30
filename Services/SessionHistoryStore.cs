@@ -40,6 +40,10 @@ namespace CodeAstrogator.Services
         /// is the difference to this. Null = not known yet (record older than this field, imported).</summary>
         public double? CostTotalUsd { get; set; }
 
+        /// <summary>The CLI's prediction of the next prompt (ghost text in the empty composer), kept so it survives a
+        /// VS restart / solution reload; cleared when a prompt is sent or the suggestion is dismissed.</summary>
+        public string? PromptSuggestion { get; set; }
+
         public string Preview =>
             Messages.LastOrDefault(m => m.Value<string>("text") is { Length: > 0 })
                 ?.Value<string>("text") is string t
@@ -106,6 +110,7 @@ namespace CodeAstrogator.Services
                         ContextWindow = s.Value<long?>("contextWindow") ?? 0,
                         ContextUsage = s["contextUsage"] as JObject,
                         CostTotalUsd = s.Value<double?>("costTotalUsd"),
+                        PromptSuggestion = s.Value<string>("promptSuggestion"),
                     };
                     foreach (var m in s["messages"] as JArray ?? new JArray())
                     {
@@ -120,6 +125,21 @@ namespace CodeAstrogator.Services
                 // corrupt history file — start fresh rather than break the panel
             }
             return store;
+        }
+
+        /// <summary>The history file this store reads/writes (one per workspace, see <see cref="GetHistoryPath"/>).</summary>
+        public string? FilePath => _path;
+
+        /// <summary>Switches this store to another workspace's history file (the panel followed a solution/folder
+        /// being opened or closed): drops the in-memory sessions and loads that file's, with an empty current
+        /// session. The instance stays the same, so everything that locks on it keeps working. Save first.</summary>
+        public void ReloadFrom(string path, int retentionDays = 0)
+        {
+            var other = LoadFrom(path, retentionDays);
+            _sessions.Clear();
+            _sessions.AddRange(other._sessions);
+            _path = other._path;
+            Current = new SessionRecord();
         }
 
         /// <summary>Writes all sessions (incl. the active one). Call under the store lock.</summary>
@@ -146,6 +166,7 @@ namespace CodeAstrogator.Services
                         ["contextWindow"] = s.ContextWindow,
                         ["contextUsage"] = s.ContextUsage?.DeepClone(),
                         ["costTotalUsd"] = s.CostTotalUsd,
+                        ["promptSuggestion"] = s.PromptSuggestion,
                         ["messages"] = messages,
                     });
                     if (sessions.Count >= MaxPersistedSessions)

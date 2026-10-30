@@ -4,6 +4,24 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.1.0] – 2026-10-29
+
+### Added
+- **Choose your fonts and font sizes.** **Advanced options** has a new **Fonts** section with two rows: **UI** (the whole panel: conversation, prompt box, menus, buttons and status bar) and **Code** (code blocks, inline code, diffs and command output). Each gets its own font and a size factor from 0.7× to 1.5× that scales every text in that area by the same amount. Besides **Default** (the familiar look) you can pick Cascadia Code, Roboto (included with the extension), Arial and Times New Roman. Thanks for the suggestion in the first Marketplace review!
+- **Syntax themes for code.** Below the accent color in the gear menu you can now pick the colors of code blocks: Default (based on your accent color, as before), Visual Studio, GitHub, Monokai or Solarized. Each comes in a dark and a light variant that follows the panel theme.
+- **More color settings** in **Advanced options → Appearance**: the color of your own messages (a preset or any hex color), how strongly messages are tinted (off, subtle, normal, strong), and **color-blind friendly diffs** — blue for added and orange for removed lines instead of green and red, in the panel and in the inline review in the editor.
+- **Use your own fonts.** In the same **Fonts** section you can add `.ttf`, `.otf`, `.woff` or `.woff2` files (and remove them again); they then show up in both font lists. Added fonts are copied into the extension's own folder, so they keep working even if you move or delete the original file.
+
+### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
+- **Advanced options apply right away.** There is no Save button any more: every change takes effect as you make it, so you can try fonts, sizes and colors and watch the chat change while the window is open. Text fields (like the Claude path or the prompt timeout) apply when you press Enter or leave the field. **Done** (or the window's X) keeps the changes, **Cancel** (or Esc) puts everything back the way it was when you opened the window. Shortened retention times only start deleting old chats, images and checkpoints once you close the window, and a removed font is only deleted then, too.
+- **Advanced options fit on the screen.** The window now has three columns instead of two, so it no longer needs scrolling on a normal screen. **Theme** and **transcript verbosity** are only in the gear menu now. They used to be in both places.
+- **Compact verbosity shows only what needs you.** In Compact mode the conversation now hides every tool card that doesn't need your input: finished commands that ran without asking (Auto-accept commands, auto-approve patterns), file reads and searches, edits that were accepted automatically, subagents and the todo card (the Tasks bar still shows the list). What stays: every approval you were asked for (edits in Ask mode, commands), Claude's questions, and a command while it is running, so you can still watch or stop it.
+
+### Fixed
+- **Your chats no longer end up in the wrong workspace after a restart.** When Visual Studio reopened a solution, the chat panel was often ready before the solution had finished loading — and then stayed on the chats that belong to no workspace. Your next prompts quietly continued an old, unrelated chat there (and after the next restart the conversation seemed to be gone). The panel now follows the solution or folder you open or close: it switches to that workspace's chats and restores its last one. If a turn or a remote session is running at that moment, it switches right after.
+- **One footer per turn, even while background tasks run.** When a background task (say, a log Claude is watching) reports something, Claude answers it with a short turn of its own — and each of those got its own "time · tokens · cost" line, so the footer appeared after nearly every message. These reactions now fold into the footer of the turn before: it moves below the newest message and adds up their time, tokens and cost (the tooltip says how many follow-ups it includes). A message you send starts a new footer.
+
 ## [1.0.2] – 2026-10-29
 
 ### Fixed
@@ -12,12 +30,14 @@ All notable changes to Code Astrogator are documented in this file.
 - **Rewind no longer touches files a checkpoint didn't cover.** If the extension list or size limit changed after a checkpoint was taken, a rewind could write back files that are now excluded, or delete files that had only been left out of the checkpoint. Both are now left alone, as the settings promise.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **New store name and description.** The extension is now listed as **"Code Astrogator - Claude Code for Visual Studio"**, with a description and README that lead with what sets it apart: a real chat UI instead of a terminal, reviewing Claude's edits inline in the editor, checkpoints and Remote Control. Visual Studio 2022 (17.14 or later) is now named as supported next to 2026. Inside Visual Studio it is still plain "Code Astrogator".
 - **Images, audio, video, 3D models, fonts and native libraries are left out of checkpoints by default** (`.png`, `.tga`, `.psd`, `.exr`, `.hdr`, `.wav`, `.mp3`, `.mp4`, `.fbx`, `.blend`, `.ttf`, `.a`, …). A rewind is meant for code and text — in game projects these assets were almost all of the checkpoint size. If you never edited the extension list, it is extended automatically; an edited list stays as it is.
 
 ## [1.0.1] – 2026-10-29
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Attachments sit side by side.** The files attached to a message are no longer listed one below the other: they line up next to each other wherever they fit, so a few phone screenshots appear as one row of previews. When there are so many that they would need more than two rows, they start collapsed — click any of them to open its preview.
 
 ### Fixed
@@ -34,6 +54,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **See how full the context is.** The status bar shows "Context 19%" next to the session and weekly meters (yellow from 75 %, red from 90 %). Click it for the breakdown, like the Context panel in the Claude app: used / maximum tokens, a bar, and one line per category (messages, system tools, MCP tools, system prompt, skills, memory files, custom agents, autocompact buffer, free space, plus the tool definitions that are only loaded when needed). Expandable lists show the MCP servers, memory files, custom agents and skills with their size. A "Compact" button runs `/compact` right from there (highlighted from 75 %, unavailable while a turn runs). The figures come from Claude Code itself after every turn, at no extra cost, and use the real context window of the model (e.g. 1M for Opus 5.5). They are kept with the conversation, so they are there again when you switch back to it.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Remote Control without a console window, with a QR code and a live view.** With a current Claude Code CLI (2.1.29x or newer), "Remote Control" no longer opens a PowerShell window. Claude Code runs the session in the background itself, and the chat panel shows a bar at the top with a **QR code** to scan with your phone, the link (plus "Copy link") and whether Claude is working or waiting; click the bar to fold the code away. The conversation below stays visible and **updates live** as you work from the phone or claude.ai/code. "Open in terminal" opens the same session in a console if you want it there too — closing that window leaves the session running. "End remote session" stops it cleanly and brings the chat back to this window. The session also survives closing Visual Studio: if you are still working on it from your phone, the panel picks it up again the next time you open this chat. The same chat always gets the same remote link. With an older CLI, Remote Control works as before (console window).
 - **Running work is listed above the input.** The task checklist moved from the top of the panel down to the input, joining the other live lists in a fixed order: tasks, then background tasks, then running subagents.
 - **Keep prompting while edits wait for review.** With "Review all edits at end of turn", the list of changed files used to block the next prompt until everything was reviewed. Now you can just continue: the changes of the following turns are added to the same list, each file still compared against how it was before Claude first touched it. Decisions you already made in the editor are kept for files that did not change again. While a turn runs, the review buttons wait; starting a new chat is still blocked while files are listed.
@@ -52,6 +73,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Prompt suggestions.** After each turn, Claude Code predicts what you are likely to type next — "run the tests", "python calc.py", "commit this" — and it appears as grey text in the empty input box, with a small "Tab to use" hint next to it. Press **Tab** to take it over into the input, then edit it or send it with Enter; **Esc** dismisses it. It is never sent on its own. The suggestion arrives a few seconds after Claude has finished, and sometimes none comes at all — Claude Code only suggests something when the next step is obvious from the conversation. It costs one small extra request per turn (it mostly reuses the cached conversation); you can switch it off under Settings → Behavior → "Suggest the next prompt". It needs a recent Claude Code CLI — with an older one the option simply does nothing.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Claude Haiku 5.5 joined the model list.** It is the new current Haiku and takes Haiku 4.5's place at the top of the picker; Haiku 4.5 stays selectable under "More models". As with every new model, it only shows up once your Claude Code CLI can run it — until then the picker keeps Haiku 4.5 on top and switches over by itself after you update the CLI.
 - **A turn now counts as finished as soon as Claude's answer is complete.** Until now the chat waited for the Claude Code process to exit. With prompt suggestions the process stays alive a few seconds longer to work out the suggestion, and the chat would have shown "Working…" all that time. If Claude started a command in the background, the old behaviour stays: the turn only ends after Claude's follow-up to that command.
 - **Attached images now always reach Claude.** Images used to be passed to Claude Code as file references, which it only reads up to 256 KB — anything bigger (almost every pasted screenshot) arrived as a bare file name, so Code Astrogator told Claude to open those files itself. Images in the usual formats (PNG, JPEG, GIF, WebP, BMP) up to 32 MB each and 36 MB per message are now sent along with your message directly, and Claude sees them right away, without an extra step. Tested with screenshots of every size, a 35 MB image, very wide images and five large images in one message. Only images beyond those limits or in other formats (such as TIFF) still use the old route.
@@ -61,6 +83,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.9.0] – 2026-10-02
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The settings window is easier to scan.** Each group of settings now sits in its own framed box, and the two columns are better balanced: "Permissions" moved to the right above "Checkpoints", "History & storage" to the bottom of the left column.
 
 ### Added
@@ -72,6 +95,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.8.2] – 2026-09-23
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Claude Sonnet 5.5 joined the model list.** It is the new current Sonnet and takes Sonnet 5's place at the top of the picker; Sonnet 5 stays selectable under "More models". As with every new model, it only shows up once your Claude Code CLI can run it — until then the picker keeps Sonnet 5 on top and switches over by itself after you update the CLI.
 - **The chat now uses the full width of the tool window.** In a wide window, messages and cards used to stop at a centred column about 900 px wide, well short of the input box below. They now run the full width, flush with the input box.
 
@@ -89,6 +113,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **A turn no longer shows as finished ("0s") the moment you send a prompt.** If Claude had started a command in the background during the previous turn, the Claude Code CLI now first reports on that command before it gets to your new prompt — and it closes that report with its own "turn finished" message. Code Astrogator took that message for the end of your turn: a "0s · $…" footer appeared immediately while Claude was still thinking, and everything that belongs at the end of a turn ran too early — including the changed-files review of "Review all edits at end of turn" and the usage refresh. That report is now recognised and skipped, so the footer and the end-of-turn steps wait for the real end of your turn. It happened with any model, not just Opus 5.5.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Thinking cards now look like the other cards.** Once Claude's thinking turns into a card, it sits flush with the tool cards instead of being indented, and it is a neutral grey card with a grey border instead of a transparent box with a near-black edge.
 
 ---
@@ -101,6 +126,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Older model generations moved into a "More models" submenu.** The picker now shows one entry per family — the newest Fable, Opus, Sonnet and Haiku your CLI can run — and keeps the rest behind a single row that opens a panel to the left on hover; the picker itself never changes size. The row has its own radio button, so you can see at a glance that your current model is one of the older ones, and the panel shows which one. Selectable models: Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Opus 4.6 and Sonnet 4.6, minus whatever your CLI does not know.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Fable 5.1 replaced Fable 5 at the top of the picker**, and Fable 5 moved into the submenu together with the older Opus and Sonnet generations — they stay selectable because they are cheaper and some workflows still run on them. An existing chat that was saved with a model no longer on the list keeps running on that model: it is shown as an extra, selected entry and the pill displays its plain model ID.
 - **The extension is easier to find in the Marketplace.** It is now listed as **"Code Astrogator — Claude Code Chat"** and carries search tags (claude, claude code, anthropic, ai, chat, …) — searching for "claude" simply did not turn it up before. This only affects the store listing and the row in the Extensions manager; inside Visual Studio it is still plain "Code Astrogator" (View → Other Windows, the tool-window tab and the editor context menu are unchanged).
 
@@ -117,6 +143,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **The end-of-turn review no longer fails quietly.** If a turn ends with nothing to review although the option is on, the chat now says why instead of showing nothing: either the turn was not armed (with the "switch it off and on again" remedy), or individual files had to be dropped because their pre-edit state could not be read — those are deliberately never reverted, since reverting against an unreliable snapshot could destroy your work.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Re-verified the permission hook against Claude Code CLI 2.1.263** (the notes were still on 2.1.178). The MCP protocol, the streamed tool result and the guarantee that the CLI waits for our reply before writing a file are all unchanged. The permission modes were renamed, though: the old default/ask mode is now called `manual`, and leaving the flag off no longer means "ask" — see the fix above. One thing to keep in mind: if you set `permissions.defaultMode` in your own `~/.claude/settings.json` to a mode that applies edits without asking (`acceptEdits`, `dontAsk`, `bypassPermissions`), that still takes edits off the hook, and the end-of-turn review then has nothing to build a diff from — which it now reports instead of staying silent.
 
 ---
@@ -134,6 +161,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **After a rewind, Claude is told about it.** The next prompt carries a note saying which point the files were rolled back to, how many files were written back, and that the later turns are to be treated as discarded. Without it Claude would keep reasoning about file contents that no longer exist. Note that the conversation rewind marks those turns rather than deleting them: they still sit in the CLI session's context, so they still cost tokens.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The settings window is now two columns.** With the checkpoint options added, a single column had grown taller than most screens. The window is wider instead, with the sections split left and right; the buttons stay at the bottom across both.
 
 ### Fixed
@@ -144,6 +172,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.6.8] – 2026-08-26
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The open button now uses your default program for anything that isn't a Visual Studio file.** Opening a PNG from a card or an attachment chip put it into Visual Studio's own image editor; it now opens in whatever program Windows uses for that file type — your image viewer for pictures, the PDF reader for PDFs, Word/Excel for documents, and so on. Files that belong to Visual Studio (source code, projects and solutions, config and data files read as text, Markdown, plain text, and extensionless files such as `Makefile` or `LICENSE`) still open in the IDE as before. If a file type has no program associated with it, it opens in Visual Studio rather than making Windows ask you which app to use, and folders are still revealed in Explorer. This also works when the default app is one of the Windows Store apps such as Photos or Media Player, which report no program path at all. Executables, installers and script hosts (`.exe`, `.dll`, `.msi`, `.vbs`, `.jar`, `.lnk`, `.reg`, …) are deliberately *not* launched — they are shown in Explorer, so a click in the chat can never run something a turn just produced. Batch/PowerShell/JS files still open as text in the IDE.
 
 ### Fixed
@@ -187,6 +216,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.6.4] – 2026-07-26
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The Model · Mode picker now offers the Claude 5 family.** `Opus 5` (`claude-opus-5`) and `Sonnet 5` (`claude-sonnet-5`) were added, and the superseded `Opus 4.7` and `Sonnet 4.6` were removed. `Fable 5`, `Opus 4.8` and `Haiku 4.5` stay. The list is ordered strongest → lightest: Fable 5 · Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5.
 
 ---
@@ -203,6 +233,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Incidental errors now appear as dismissible banners instead of in the chat.** Problems from UI actions — a file that couldn't be opened, a failed clipboard paste, a review that couldn't open, a remote import that failed — used to be inserted into the conversation as an error block that stayed there forever. They now surface as a color-coded, closable banner at the top of the chat (above the transcript), stacking when several occur and supporting optional auto-close, without cluttering the conversation or changing the turn status. Open-in-editor, clipboard-paste, and insert-into-editor failures auto-dismiss after 10 seconds; genuine turn/streaming failures still appear inline in the transcript as before.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The open button now appears only on genuine file/folder cards.** The rule for showing the open-in-editor button was tightened: it still appears for all file tools (Read, Write, Edit, MultiEdit, Notebook edits) and folder/search tools (Grep, Glob), but no longer for command tools (Bash/PowerShell) or for other tools (e.g. MCP tools) that happen to carry a `path` argument pointing at something that isn't a local file or folder. Previously any tool with a bare `path` field could show a button that then failed on click.
 
 ---
@@ -214,6 +245,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Attached files in a prompt now show an expandable inline preview.** Files listed under a sent user message are expandable when the file is an image or a text/code file: the chip gains a chevron and, when opened, turns into a single connected card — the filename as the header bar with the preview docked directly beneath it (the image itself, or the file's text in a monospaced panel), width-capped so it stays visibly tied to that filename rather than spanning the whole message. Hovering a chip shows the file's full path. The default open-state follows the verbosity setting — **Compact**: all collapsed; **Normal**: images open, text collapsed; **Detailed**: all open (switching verbosity re-applies this). Previews load lazily and work for chats reopened from history. Files that no longer exist on disk — or that aren't a previewable image/text type — stay as plain, non-expandable name chips, exactly as before.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Announcement and update banners now check GitHub hourly instead of every 3 hours.** The shared fetch throttle (`MIN_INTERVAL`) for both the announcement (`notice.json`) and the GitHub release update-check dropped from ≥3 h to ≥1 h between fetch attempts. Everything else is unchanged — still opt-in, still only on window open, and both success and failure still reset the timer.
 
 ---
@@ -221,6 +253,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.6.1] – 2026-07-09
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The turn-end review now completes per file only when you say so.** Previously, deciding the last change in a file auto-finished that file — it dropped out of the review and off the chat list immediately. Now the file stays until you explicitly finish it. The editor's floating review toolbar gained a **Finish** button (enabled once every change is decided) and a **Reset** button (clears all decisions in the file so you can start over), and each file's chip in the chat list now has its own **Finish** button that enables as soon as all its changes are decided. (Permission-prompt reviews in Ask mode are unchanged — those still resolve automatically once every change is decided.)
 
 ### Added
@@ -265,6 +298,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.5.3] – 2026-07-01
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Approved edits/commands now show a spinner while they run.** After you approve a permission prompt, the card shows "✓ Approved" until the action finishes, then flips to "✓ Applied". During that gap the action is actually executing, but nothing indicated it was still working. A small spinner now appears at the far right of the card while it runs (matching the Bash/command tool cards) and disappears once the result ("Applied"/"Failed") arrives.
 - **The composer placeholder now hints at Shift+Enter, and the Ctrl+Esc shortcut was removed.** The empty message box used to read *"ctrl esc to focus or unfocus Claude"* — but Windows reserves Ctrl+Esc for the Start menu, so that shortcut couldn't work anyway. The placeholder now reads **"Chart a course for Claude…  ·  Shift+Enter for a new line"**, and the (non-functional) Ctrl+Esc focus toggle has been dropped.
 - **"Add selection to prompt" now adds a compact attachment chip instead of pasting a code block.** Right-clicking an editor selection and choosing *Add selection to prompt* used to dump a fenced code block (the file name, then the raw selected lines) straight into the composer text. It now adds a small `@`-reference chip labelled with the file name and line range (e.g. `CLAUDE.md:14-17`) to the composer's attachment strip — the same place and style as attached files and the active-file chip — leaving what you type untouched. Claude reads exactly those lines from the file when the turn is sent.
@@ -307,6 +341,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Answering one of Claude's questions no longer leaves a "failed" card.** With `AskUserQuestion`, the interactive question card and the underlying tool call arrive over two independent channels; when they raced, answering left a duplicate tool card stuck showing "failed" even though the answer was accepted. The duplicate is now suppressed.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Remote control now opens your *current* chat, interactively.** Clicking the remote-control button used to start a hidden `claude remote-control` server in a **brand-new** session and only loaded the result into the chat after you ended it. It now opens the **current conversation** in an **interactive** Claude Code session with Remote Control enabled — `claude --resume <id> --remote-control` — in a **PowerShell** console, so you continue *this* chat from the Claude app or claude.ai/code (a fresh chat with no session yet starts a new remote session). Open the connection link shown in that console. The chat panel locks while it's running; **closing the console or clicking "End remote session"** re-imports the now-advanced conversation. (It runs in a console rather than the VS integrated terminal, whose API can't be referenced from this project without dragging in incompatible VS-18/.NET-10 assemblies — see `docs/NOTES.md`.)
 
 ---
@@ -320,6 +355,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Jump to next/previous change.** A small floating toolbar (pinned to the top-right of the editor) with ▲/▼ buttons that scroll to the previous/next change in the review, plus a "N to review" counter.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The "Review edits in the editor" toggle moved into the Permission menu** (the model/mode popover), nested directly beneath the mode it applies to: it now sits under **"Ask before edits"** and only shows while Ask is selected, mirroring **"Auto-accept commands"** which sits under "Auto-accept edits". A sub-toggle that doesn't apply to the currently selected mode is hidden rather than shown dimmed.
 
 ---
@@ -327,6 +363,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.4.3] – 2026-06-18
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **The "Code Astrogator" wordmark on the welcome screen now uses the accent color.** It was rendered in the default text color; it now picks up `--accent` (so it also follows a custom accent color set in the gear popover).
 - **"Detailed" verbosity now actually differs from "Normal."** Verbosity is a transcript display setting with three levels; previously *Normal* and *Detailed* were nearly identical — the only difference was whether thinking cards started expanded, and even that didn't apply to cards already on screen when you switched. Now *Detailed* starts **both thinking and tool cards expanded** (showing each tool call's input and output inline), while *Normal* keeps them collapsed (click to expand) and *Compact* still hides system notes and thinking entirely. Switching the level also re-applies to the cards already in the current transcript, and the gear popover now shows a one-line description of each level.
 - **The assistant message avatar is now the Code Astrogator head** instead of the `✳` sparkle glyph. Each of Claude's messages in the transcript is prefixed with the small astronaut-head logo (`WebUI\head.png`, derived from the head master); the user `›` glyph and system notes are unchanged.
@@ -351,6 +388,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.4.1] – 2026-06-17
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Settings window polish.** Long checkbox labels (under "Announcements & updates") now wrap instead of being clipped at the right edge, and the window's height is capped to the screen — when the content is taller than the display it scrolls instead of growing off-screen (fixes usability on smaller screens).
 - **Usage meters now refresh periodically while idle.** Previously they only updated on window open and after each turn. They are now also refreshed every 5 minutes whenever no turn is running, so the session/weekly utilization stays current without sending a prompt (the `/usage` fetch runs locally, `num_turns: 0`, no cost). Skipped while a turn is in progress (the post-turn refresh covers that).
 
@@ -393,6 +431,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Discontinuation notice** as a banner at the top of the window (below the header): points out that the extension will receive **no more updates** as of June 15, 2026 due to Anthropic's change to subscription usage of the Agent SDK / `claude -p`, including a link to the [support docs](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan). Closable with ✕; reappears each time the window is opened (after every VS start).
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **External links (`target="_blank"`) now open in the system browser** instead of in a WebView2 popup window — applies to the banner link **and** links in rendered responses (`NewWindowRequested` handler, http/https only).
 
 ---
@@ -400,6 +439,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.3.7] – 2026-06-10
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Usage meters now get their data via the CLI's `/usage` slash command** instead of the scraped OAuth token. `ClaudeUsageClient.FetchAsync` runs `claude -p /usage --output-format json` (runs **locally, no API turn, no cost** — `num_turns: 0`) and parses the report text: `Current session: N%` → session meter, `Current week (all models): N%` → weekly meter; the per-model lines (e.g. "Sonnet only") are ignored. Reset times (`resets Jun 10, 1pm`) are parsed as local time for the tooltip (including year-boundary rollover). Works with any CLI auth.
 
 ### Fixed
@@ -425,6 +465,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.3.5] – 2026-06-05
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Always popover** is now as wide as the permission card and shows patterns as an editable list (input + ✕ per row, "+ Add pattern") instead of a textarea.
 - **`ShellCommandSplitter.ExtractCommands`** splits commands quote- and here-string-aware into real sub-commands (newlines / `;` / `&&` / `||` / `&` / `|`), discarding variable assignments and bare variables. `Wildcardize` turns quote contents into `*`.
 - **Stricter matching:** A call is only auto-approved when every sub-command is covered by a pattern.
@@ -441,6 +482,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **`accent.set` message** (web → host): hex validated via `NormalizeHexColor`.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Auto-approve patterns as a JSON array:** `AstrogatorOptions.AutoApprovePatterns` is now `List<string>`; the WritableSettingsStore persists it as a JSON array. Backward compatible: `ParsePatterns` also reads the old newline format.
 - **Claude bubble** (background + ✳ icon) in the accent color (from clay orange to purple).
 - **Tool cards** get a soft result tint: success → subtle green (`.tool-ok`), error → subtle red (`.tool-err`).
@@ -451,6 +493,7 @@ All notable changes to Code Astrogator are documented in this file.
 ## [0.3.3] – 2026-06-05
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Auto-approve patterns in the settings window** now as a theme-tinted `DataGrid` list (one column, editable cells) with "Add" and "Remove" buttons instead of a multi-line TextBox.
 
 ---
@@ -494,6 +537,7 @@ All notable changes to Code Astrogator are documented in this file.
 - The card collapses after answering (chevron + answer summary, click re-expands).
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - `sendPrompt` always scrolls all the way down after sending (unconditional `scrollToBottom()`).
 
 ---
@@ -504,6 +548,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **MCP tool cards** (`mcp__server__tool`): show only the tool name, no trailing "{" anymore.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Tool card title** now comes from the input instead of the output line: Read shows `File.cs:offset-end`, Edit/Write the file name, Grep the pattern, Bash/PowerShell the command. Applies live and historically.
 - **Command preview** in the tool and permission card header for Bash/PowerShell (`input.command`, newlines → spaces, truncated).
 
@@ -515,6 +560,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Markdown tables (GFM):** detection of header + delimiter row, alignment, inline-formatted cells in a scrollable `.md-table-wrap`.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Message backgrounds:** user bubbles blue, Claude bubbles orange-tinted (theme-aware vars in dark & light).
 - **Auto-approved edits** appear as a green permission card (pre-decided, `autoApproved:true`) instead of a tool card with a system note.
 
@@ -529,6 +575,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **"Working" indicator:** animated rocket + a random space-astrogator one-liner + animated dots while `status === "working"`. `prefers-reduced-motion` stops the animation.
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Turn footer** slimmed down: price and token count removed; footer = `<hr>` + readable duration (`formatDuration`: `130000ms → "2m 10s"`).
 - **Ctx % meter** and `/compact` click trigger removed entirely. `contextTokens` stays in the contract but is no longer displayed.
 - **Thinking line** now shows only `✻ Thinking…` (no `~n tok` suffix).
@@ -567,6 +614,7 @@ All notable changes to Code Astrogator are documented in this file.
 - **Settings window (`AstrogatorSettingsWindow`):** opened via gear → "Advanced options…". VS-themed (dark/light via `VsResourceKeys` styles). Save/Cancel semantics (Cancel/X discards, only Save persists).
 
 ### Changed
+- **The prompt suggestion survives a restart.** The grey next-prompt suggestion in the empty input box is now kept with the chat, so it is still there after reopening Visual Studio or reloading the solution. It goes away once you send a prompt or dismiss it with Escape.
 - **Settings rebuild:** Unified Settings in-proc API removed (service not available in VS 2026). Back to pure VSSDK + `WritableSettingsStore` (`AstrogatorSettingsStore`).
 - Empty state: inline SVG robot replaced with the logo; wordmark → "Code Astrogator"; tagline → "// pre-flight check complete. where to, captain?".
 

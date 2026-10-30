@@ -43,8 +43,8 @@ namespace CodeAstrogator.Editor
         private const double MarkWidth = 6.0;
         private const double MarkHeight = 4.0;
 
-        private static readonly Brush AddMark = Frozen(Color.FromRgb(0x3F, 0xB9, 0x50));        // green — additions
-        private static readonly Brush DelMark = Frozen(Color.FromRgb(0xF8, 0x51, 0x49));        // red — pure deletion
+        private static Brush AddMark => EditReviewPalette.Current.AddText;      // green/blue — additions
+        private static Brush DelMark => EditReviewPalette.Current.DeleteText;   // red/orange — pure deletion
         private static readonly Brush ModMark = Frozen(Color.FromRgb(0x9B, 0x7C, 0xF0));        // purple — changed (add+del)
         private static readonly Brush DoneMark = Frozen(Color.FromArgb(0x66, 0x9A, 0x9A, 0x9A)); // dim grey — decided
 
