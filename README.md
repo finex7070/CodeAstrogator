@@ -175,7 +175,7 @@ happens remotely shows up live in the panel.
   paste (a screenshot alone is a valid prompt; several attachments sit side by side), web browsing, the
   active editor file with the selected lines, and editor right-click → "Add file / selection to prompt".
 - **Session history** per workspace; conversations resume across VS restarts.
-- **Theming**: Dark / Light / Auto (follows VS), an accent color, three verbosity levels.
+- **Theming**: Dark / Light / Auto (follows VS), an accent color, syntax themes for code (Visual Studio, GitHub, Monokai, Solarized), the color of your own messages and how strongly messages are tinted, color-blind friendly diffs (blue/orange), three verbosity levels, and the font and size for the UI and for code separately (Cascadia Code, Roboto, Arial, Times New Roman, or your own font files).
 - **Automatic updates** (opt-in) from the GitHub releases, plus announcement banners.
 
 ## Requirements
@@ -244,6 +244,8 @@ This project is open-source and available under the AGPLv3 license.
 🔄 Copyleft: If you distribute a modified version — or make one available to others — you must release your modifications under the same AGPLv3 license. Closed-source proprietary forks are not allowed.
 
 See the [LICENSE](LICENSE) file for full details.
+
+The bundled Roboto font is licensed under the SIL Open Font License 1.1 (`WebUI/fonts/Roboto-OFL.txt`).
 
 > "Claude" and "Claude Code" are products of Anthropic; this extension integrates the Claude Code CLI but is not affiliated with or endorsed by Anthropic.
 

@@ -38,6 +38,70 @@ namespace CodeAstrogator.Options
         /// use the built-in per-theme default. Set from the gear popover's color picker.</summary>
         public string AccentColor { get; set; } = "";
 
+        /// <summary>Colors of code blocks (gear popover → Syntax theme, under the accent color): one of
+        /// <see cref="SyntaxThemes"/>; each has a dark and a light variant that follows the panel theme.</summary>
+        public string SyntaxTheme { get; set; } = "default";
+        public static readonly string[] SyntaxThemes = { "default", "vs", "github", "monokai", "solarized" };
+
+        /// <summary>Tint of your own messages as CSS hex; empty = the built-in blue (settings window).</summary>
+        public string UserMessageColor { get; set; } = "";
+
+        /// <summary>Diffs in blue/orange instead of green/red — panel and inline editor review (settings window).</summary>
+        public bool ColorBlindDiffs { get; set; }
+
+        /// <summary>How strongly message bubbles are tinted: <c>off</c> | <c>subtle</c> | <c>normal</c> | <c>strong</c>.</summary>
+        public string BubbleIntensity { get; set; } = "normal";
+        public static readonly string[] BubbleIntensities = { "off", "subtle", "normal", "strong" };
+
+        public static string NormalizeSyntaxTheme(string? v) => SyntaxThemes.Contains(v ?? "") ? v! : "default";
+        public static string NormalizeBubbleIntensity(string? v) => BubbleIntensities.Contains(v ?? "") ? v! : "normal";
+
+        /// <summary>Font of the whole panel (gear popover → Font → UI): a built-in id (<see cref="BuiltInFonts"/>)
+        /// or <c>custom:&lt;file&gt;</c> = one of <see cref="CustomFonts"/>.</summary>
+        public string ChatFont { get; set; } = DefaultFont;
+
+        /// <summary>UI size factor in percent (<see cref="FontScales"/>): every element's own font size × it.</summary>
+        public int ChatFontScale { get; set; } = 100;
+
+        /// <summary>Font of code blocks, diffs and command output (gear popover → Font → Code).</summary>
+        public string CodeFont { get; set; } = DefaultFont;
+
+        /// <summary>Code size factor in percent (<see cref="FontScales"/>).</summary>
+        public int CodeFontScale { get; set; } = 100;
+
+        /// <summary>The size factors the dropdowns offer, in percent (0.7× … 1.5× in 0.1 steps; below/above that the panel is hardly
+        /// usable).</summary>
+        public static readonly int[] FontScales = { 70, 80, 90, 100, 110, 120, 130, 140, 150 };
+
+        /// <summary>The user's own fonts, added/removed in the settings window: file names under
+        /// <c>%LocalAppData%\CodeAstrogator\fonts</c> (copies, so moving the original doesn't matter).</summary>
+        public List<string> CustomFonts { get; set; } = new List<string>();
+
+        /// <summary><c>default</c> = the built-in look: UI → Segoe UI for the chrome + Cascadia Code for the text,
+        /// Code → Cascadia Code.</summary>
+        public const string DefaultFont = "default";
+        public const string CustomFontPrefix = "custom:";
+
+        /// <summary>The fonts every dropdown offers: Default, Cascadia Code, Roboto (shipped in the WebUI, OFL),
+        /// and the best-known sans-serif and serif fonts of Windows.</summary>
+        public static readonly string[] BuiltInFonts = { "default", "cascadia", "roboto", "arial", "times" };
+
+        /// <summary>A known font id, or <see cref="DefaultFont"/>. <c>custom:x</c> must name a loaded font.</summary>
+        public static string NormalizeFont(string? value, IEnumerable<string>? customFonts)
+        {
+            var v = (value ?? "").Trim();
+            if (BuiltInFonts.Contains(v))
+                return v;
+            if (v.StartsWith(CustomFontPrefix, System.StringComparison.Ordinal)
+                && (customFonts ?? Enumerable.Empty<string>()).Contains(v.Substring(CustomFontPrefix.Length), System.StringComparer.OrdinalIgnoreCase))
+                return v;
+            return DefaultFont;
+        }
+
+        /// <summary>The nearest offered size factor (<see cref="FontScales"/>); 0 or less = 100 (1×).</summary>
+        public static int ClampFontScale(int percent) =>
+            percent <= 0 ? 100 : FontScales.OrderBy(s => System.Math.Abs(s - percent)).First();
+
         /// <summary>Whether the WebUI may periodically fetch the announcement/notice file from the
         /// project's GitHub (a network request on each window open) and show it as a banner.
         /// Off by default; the user opts in via the first-run consent popup or the settings window.</summary>

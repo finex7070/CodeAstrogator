@@ -37,6 +37,7 @@ namespace CodeAstrogator.Bridge
         private readonly SessionHistoryStore _history;
         private JObject? _streamingAssistant; // transcript accumulator for the active assistant block
         private bool _turnHadAssistantOutput; // gates the result-text fallback (decision #8)
+        private bool _inFollowUpTurn;         // the running turn was started by the CLI (background task), not a prompt
         private bool _sessionStartAnnounced;  // "Session started" note, once per session (decision #9)
         private UsageSnapshot? _lastUsage;    // session/weekly plan utilization (from `claude -p /usage`)
         private string? _planLabel;           // "Team Plan" etc. from ~/.claude.json
@@ -47,6 +48,7 @@ namespace CodeAstrogator.Bridge
         private IRemoteSession? _remoteTerminal; // Remote Control: CLI background session (or the console fallback)
         private DateTime _remoteMirrorStamp;     // last-seen write time of the remote session's transcript
         private bool _remoteAdoptChecked;        // looked for a still-running background session once
+        private bool _workspaceSwitchPending;    // the solution/folder changed during a turn/remote session → switch after
         private bool _remoteMirrorFromStart;     // adopted session: the shown chat may be stale → mirror the first look too
         private string? _remoteProjectDir;       // ~\.claude\projects\<munged cwd> (guarded by _history)
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
@@ -164,6 +166,14 @@ namespace CodeAstrogator.Bridge
                 SessionHistoryStore.GetHistoryPath(package.GetSolutionDirectory()),
                 package.GetOptions().HistoryRetentionDays);
 
+            // The history belongs to the open solution/folder. After a VS restart the tool window is often created
+            // before the solution has finished loading (→ "global" history) — follow the workspace when it opens or
+            // closes instead of staying on the store picked here (see CheckWorkspaceSwitch).
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterOpenSolution += OnWorkspaceOpenedOrClosed;
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterCloseSolution += OnWorkspaceOpenedOrClosed;
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterOpenFolder += OnWorkspaceOpenedOrClosed;
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterCloseFolder += OnWorkspaceOpenedOrClosed;
+
             _activeDocs = new ActiveDocumentTracker(package);
             _activeDocs.ActiveDocumentChanged += OnActiveDocumentChanged;
 
@@ -203,6 +213,10 @@ namespace CodeAstrogator.Bridge
             _package.ManualCheckRequested -= OnManualCheckRequested;
             _activeDocs.ActiveDocumentChanged -= OnActiveDocumentChanged;
             _activeDocs.Dispose();
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterOpenSolution -= OnWorkspaceOpenedOrClosed;
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterCloseSolution -= OnWorkspaceOpenedOrClosed;
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterOpenFolder -= OnWorkspaceOpenedOrClosed;
+            Microsoft.VisualStudio.Shell.Events.SolutionEvents.OnAfterCloseFolder -= OnWorkspaceOpenedOrClosed;
             _session.EventReceived -= OnSessionEvent;
             _session.TurnCompleted -= OnTurnCompleted;
             _webView.WebMessageReceived -= OnWebMessageReceived;
@@ -255,7 +269,10 @@ namespace CodeAstrogator.Bridge
             switch (msg.Value<string>("type"))
             {
                 case "ready":
+                    CheckWorkspaceSwitch(); // the solution may have opened before the events were wired
                     SendTheme();
+                    SendFontState();
+                    SendAppearanceState();
                     SendAuthState();
                     SendInitialSession();
                     SendSlashCommands(); // re-send the CLI-reported list after a WebView reload
@@ -406,6 +423,15 @@ namespace CodeAstrogator.Bridge
                     break;
                 case "accent.set":
                     HandleAccentSet(msg.Value<string>("color") ?? "");
+                    break;
+                case "prompt.suggestionDismissed": // Escape on the ghost text → don't bring it back after a restart
+                    lock (_history)
+                        _history.Current.PromptSuggestion = null;
+                    SaveHistory();
+                    break;
+                case "syntax.set":
+                    _package.GetOptions().SyntaxTheme = AstrogatorOptions.NormalizeSyntaxTheme(msg.Value<string>("theme"));
+                    _package.SaveOptions(); // applied optimistically in the UI
                     break;
                 case "permission.decision":
                     HandlePermissionDecision(msg);
@@ -601,6 +627,9 @@ namespace CodeAstrogator.Bridge
             SyncSessionSettingsFromOptions();
 
             _turnHadAssistantOutput = false;
+            _inFollowUpTurn = false;       // a turn the user started (its footer starts a new sum)
+            lock (_history)
+                _history.Current.PromptSuggestion = null; // it predicted this prompt — used up either way
             CarryTurnReviewIntoNextTurn(); // a pending review keeps collecting this turn's changes
 
             // Checkpoint bookkeeping for this turn (UI-thread reads; the snapshot itself runs below,
@@ -916,7 +945,7 @@ namespace CodeAstrogator.Bridge
 
         /// <summary>Records a decided permission card (role "permission") into the history, replacing
         /// the redundant tool message of the same tool_use_id (the permission card represents it).</summary>
-        private void RecordPermissionMessage(PendingPermission p, string status)
+        private void RecordPermissionMessage(PendingPermission p, string status, bool autoApproved = false)
         {
             var rec = new JObject
             {
@@ -929,6 +958,8 @@ namespace CodeAstrogator.Bridge
             };
             if (p.Diff != null)
                 rec["diff"] = p.Diff;
+            if (autoApproved)
+                rec["autoApproved"] = true; // no decision was asked for → Compact hides it after a reload too
             lock (_history)
             {
                 var msgs = _history.Current.Messages;
@@ -1102,7 +1133,7 @@ namespace CodeAstrogator.Bridge
                 Post(card);
                 RecordPermissionMessage(
                     new PendingPermission { RequestId = requestId, ToolName = toolName, Input = inputClone, Diff = diff },
-                    "approved");
+                    "approved", autoApproved: true);
             }).Task.Forget();
         }
 
@@ -1611,6 +1642,79 @@ namespace CodeAstrogator.Bridge
             return false;
         }
 
+        private void OnWorkspaceOpenedOrClosed(object sender, EventArgs e)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread(); // solution events arrive on the UI thread
+            CheckWorkspaceSwitch();
+        }
+
+        /// <summary>
+        /// Makes the chat history follow the open solution/folder. The store was picked when the tool window was
+        /// created; after a VS restart that is often before the solution finished loading, so the panel sat on the
+        /// "global" history and the next prompts went on in that store's last chat — an unrelated, old conversation
+        /// resumed in the real workspace (user report 2026-10-29: half an afternoon landed in a chat from August).
+        /// Saves the current history, loads the new workspace's and restores its last chat like a fresh start. While
+        /// a turn or a remote session runs the switch waits (<see cref="_workspaceSwitchPending"/>) and is retried
+        /// when it ends. Also called on <c>ready</c>, in case the solution opened before these events were wired.
+        /// </summary>
+        private void CheckWorkspaceSwitch()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_disposed)
+                return;
+            var dir = _package.GetSolutionDirectory();
+            var path = SessionHistoryStore.GetHistoryPath(dir);
+            string? current;
+            lock (_history)
+                current = _history.FilePath;
+            if (string.Equals(path, current, StringComparison.OrdinalIgnoreCase))
+            {
+                _workspaceSwitchPending = false;
+                return;
+            }
+            if (_session.IsBusy || RemoteSessionActive)
+            {
+                _workspaceSwitchPending = true; // retried from OnTurnCompleted / the remote end
+                return;
+            }
+            _workspaceSwitchPending = false;
+
+            lock (_history)
+            {
+                _history.Save();
+                _history.ReloadFrom(path, _package.GetOptions().HistoryRetentionDays);
+            }
+            _session.ResetSession(); // the old workspace's CLI session (and a process kept for its tasks) ends
+            _sessionStartAnnounced = false;
+            _remoteAdoptChecked = false;
+            _activeFileSessionEnabled = ActiveFileDefaultOn;
+            if (HasPendingTurnReview())
+            {
+                _editReview.CloseAllTurnReviews();
+                ResetTurnReviewState();
+            }
+            if (!_uiReady)
+                return; // "ready" renders the (new) history's initial session
+            SendInitialSession();
+            SendActiveFile();
+            TryAdoptRemoteSession();
+            PostSystemNote(string.IsNullOrEmpty(dir)
+                ? "No solution or folder open — showing the chats that belong to no workspace"
+                : "Showing the chats of " + System.IO.Path.GetFileName(dir!.TrimEnd('\\', '/')));
+        }
+
+        /// <summary>Background-thread entry for a deferred workspace switch (turn ended, remote session ended).</summary>
+        private void RetryPendingWorkspaceSwitch()
+        {
+            if (!_workspaceSwitchPending)
+                return;
+            _package.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await _package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                CheckWorkspaceSwitch();
+            }).Task.Forget();
+        }
+
         private void HandleSessionNew()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -1779,6 +1883,8 @@ namespace CodeAstrogator.Bridge
                 ["sessionId"] = record.Id,
                 ["title"] = record.Title,
                 ["messages"] = messages,
+                // the last turn's next-prompt prediction, back after a restart (off → none)
+                ["promptSuggestion"] = _package.GetOptions().PromptSuggestions ? record.PromptSuggestion : null,
             });
             PostCheckpointExpiry(record); // grey out rewind buttons whose snapshot the retention sweep took
         }
@@ -1802,6 +1908,60 @@ namespace CodeAstrogator.Bridge
             _package.SaveOptions();
         }
 
+        /// <summary>host→web <c>appearance.state</c>: syntax theme (gear popover), the color of your own messages, the
+        /// bubble tint and color-blind diffs (settings window). Also switches the inline editor review's palette.</summary>
+        private void SendAppearanceState()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var o = _package.GetOptions();
+            Editor.EditReviewPalette.ColorBlind = o.ColorBlindDiffs;
+            Post(new JObject
+            {
+                ["type"] = "appearance.state",
+                ["syntaxTheme"] = AstrogatorOptions.NormalizeSyntaxTheme(o.SyntaxTheme),
+                ["userColor"] = NormalizeHexColor(o.UserMessageColor ?? ""),
+                ["bubbleIntensity"] = AstrogatorOptions.NormalizeBubbleIntensity(o.BubbleIntensity),
+                ["colorBlindDiffs"] = o.ColorBlindDiffs,
+            });
+        }
+
+        /// <summary>host→web <c>font.state</c>: chat and code font (id + size), the user's own fonts for the
+        /// dropdowns, and — only for the ones in use — their files as data URIs (<c>faces</c>) for a FontFace.
+        /// Also deletes stored fonts the settings window removed.</summary>
+        private void SendFontState()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = _package.GetOptions();
+            var custom = (options.CustomFonts ?? new System.Collections.Generic.List<string>())
+                .Where(CustomFontStore.Exists).ToList();
+            // not during a live change of the settings window: it can still be cancelled (and the font back)
+            if (!_package.OptionsPreview)
+                CustomFontStore.DeleteUnused(custom);
+            var chat = AstrogatorOptions.NormalizeFont(options.ChatFont, custom);
+            var code = AstrogatorOptions.NormalizeFont(options.CodeFont, custom);
+
+            var faces = new JObject();
+            foreach (var id in new[] { chat, code }.Distinct())
+            {
+                if (!id.StartsWith(AstrogatorOptions.CustomFontPrefix, StringComparison.Ordinal))
+                    continue;
+                var data = CustomFontStore.ReadDataUri(id.Substring(AstrogatorOptions.CustomFontPrefix.Length));
+                if (data != null)
+                    faces[id] = data;
+            }
+            Post(new JObject
+            {
+                ["type"] = "font.state",
+                ["chat"] = new JObject { ["font"] = chat, ["scale"] = AstrogatorOptions.ClampFontScale(options.ChatFontScale) },
+                ["code"] = new JObject { ["font"] = code, ["scale"] = AstrogatorOptions.ClampFontScale(options.CodeFontScale) },
+                ["custom"] = new JArray(custom.Select(f => (JToken)new JObject
+                {
+                    ["id"] = AstrogatorOptions.CustomFontPrefix + f,
+                    ["name"] = CustomFontStore.DisplayName(f),
+                })),
+                ["faces"] = faces,
+            });
+        }
         /// <summary>Returns a normalized <c>#rrggbb</c> string, or "" if not a valid hex color.</summary>
         private static string NormalizeHexColor(string color)
         {
@@ -2350,12 +2510,14 @@ namespace CodeAstrogator.Bridge
                 if (discoveryError != null)
                 {
                     PostNotify("Importing the remote session failed: " + discoveryError);
+                    CheckWorkspaceSwitch();
                     return;
                 }
 
                 if (imported.Count == 0)
                 {
                     PostSystemNote("Remote control ended — no changes to import");
+                    CheckWorkspaceSwitch();
                     return;
                 }
 
@@ -2380,6 +2542,7 @@ namespace CodeAstrogator.Bridge
                     ? "Remote session imported"
                     : $"Remote control ended — {imported.Count} sessions imported (latest loaded)");
                 SaveHistory();
+                CheckWorkspaceSwitch(); // the solution changed while the remote session ran
             }).Task.Forget();
         }
 
@@ -2894,8 +3057,10 @@ namespace CodeAstrogator.Bridge
             {
                 case FollowUpTurnStartedEvent:
                     // A background task finished and the CLI answers it with a turn of its own (the process
-                    // was kept alive for its tasks) — show it like any turn.
+                    // was kept alive for its tasks) — show it like any turn. Its result is flagged followUp, so the
+                    // UI folds its footer into the one of the turn before instead of adding one per reaction.
                     _turnHadAssistantOutput = false;
+                    _inFollowUpTurn = true;
                     PostStatus("working");
                     // it may edit files under review — free their read-only buffers (marshals itself)
 #pragma warning disable VSTHRD010
@@ -3044,7 +3209,7 @@ namespace CodeAstrogator.Bridge
                         Post(card);
                         RecordPermissionMessage(
                             new PendingPermission { RequestId = tool.ToolUseId, ToolName = tool.Name, Input = tool.Input, Diff = diff },
-                            "approved");
+                            "approved", autoApproved: true);
                     }
                     break;
 
@@ -3182,6 +3347,8 @@ namespace CodeAstrogator.Bridge
                     {
                         ["type"] = "turn.result",
                         ["sessionId"] = turn.SessionId,
+                        // a turn the CLI started by itself (background task reported) — not one the user sent
+                        ["followUp"] = _inFollowUpTurn,
                         // this turn's cost (session total minus the total after the previous turn) —
                         // null when no baseline is known; the session total goes along for the tooltip
                         ["costUsd"] = turnCost,
@@ -3229,7 +3396,15 @@ namespace CodeAstrogator.Bridge
 
                 case PromptSuggestionEvent suggestion:
                     // Arrives after the turn was already handed back (see ClaudeSessionService). The UI
-                    // shows it as ghost text in the empty composer; Tab takes it over.
+                    // shows it as ghost text in the empty composer; Tab takes it over. Kept on the chat record
+                    // so it is back after a VS restart / solution reload (sent along with transcript.load).
+                    lock (_history)
+                    {
+                        if (string.IsNullOrEmpty(suggestion.SessionId)
+                            || string.Equals(suggestion.SessionId, _history.Current.Id, StringComparison.OrdinalIgnoreCase))
+                            _history.Current.PromptSuggestion = suggestion.Suggestion;
+                    }
+                    SaveHistory();
                     Post(new JObject
                     {
                         ["type"] = "prompt.suggestion",
@@ -3277,6 +3452,7 @@ namespace CodeAstrogator.Bridge
             RefreshUsage(); // the turn just consumed quota — update the meters
             TakePostTurnCheckpoint(); // "after" snapshot → this turn's diff is pre..post
             SaveHistory();
+            RetryPendingWorkspaceSwitch(); // the solution changed while this turn ran
         }
 
         /// <summary>
@@ -3416,6 +3592,8 @@ namespace CodeAstrogator.Bridge
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             SendTheme();
+            SendFontState();  // fonts added/removed in the settings window → dropdowns + active fonts
+            SendAppearanceState(); // message color, bubble tint, color-blind diffs live in the settings window
             SendActiveFile(); // the auto-add-active-file toggle may have changed
             SendBannerSettings(); // announcement/update opt-in may have changed in the settings window
             SendCheckpointSettings(); // checkpoints are only configured there → push the new state

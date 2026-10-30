@@ -35,25 +35,27 @@ namespace CodeAstrogator.Editor
         public static bool TryGet(IWpfTextView view, out EditReviewViewAdorner? adorner) =>
             ByView.TryGetValue(view, out adorner);
 
-        private static readonly Brush DeleteFill = Frozen(Color.FromArgb(0x33, 0xF8, 0x51, 0x49));      // red ~.20
-        private static readonly Brush DeleteFillDim = Frozen(Color.FromArgb(0x14, 0xF8, 0x51, 0x49));   // red faint
-        private static readonly Brush AddFill = Frozen(Color.FromArgb(0x33, 0x3F, 0xB9, 0x50));         // green ~.20
-        private static readonly Brush AddFillDim = Frozen(Color.FromArgb(0x12, 0x3F, 0xB9, 0x50));      // green faint
-        // Stronger fills used for the "winning" side once a decision is made (accepted-add / reverted-del),
-        // so the chosen outcome reads clearly against the dimmed losing side.
-        private static readonly Brush DeleteFillStrong = Frozen(Color.FromArgb(0x52, 0xF8, 0x51, 0x49)); // red ~.32
-        private static readonly Brush AddFillStrong = Frozen(Color.FromArgb(0x52, 0x3F, 0xB9, 0x50));    // green ~.32
-        private static readonly Brush AddText = Frozen(Color.FromRgb(0x3F, 0xB9, 0x50));
-        private static readonly Brush DeleteText = Frozen(Color.FromRgb(0xF8, 0x51, 0x49));       // red — removed (ghost)
+        // Added = green, removed = red — or blue/orange with "Color-blind friendly diffs" (EditReviewPalette).
+        // ~.20 fills, faint ones for the losing side, and stronger fills for the "winning" side once a decision is
+        // made (accepted-add / reverted-del), so the chosen outcome reads clearly against the dimmed losing side.
+        private static Brush DeleteFill => EditReviewPalette.Current.DeleteFill;
+        private static Brush DeleteFillDim => EditReviewPalette.Current.DeleteFillDim;
+        private static Brush AddFill => EditReviewPalette.Current.AddFill;
+        private static Brush AddFillDim => EditReviewPalette.Current.AddFillDim;
+        private static Brush DeleteFillStrong => EditReviewPalette.Current.DeleteFillStrong;
+        private static Brush AddFillStrong => EditReviewPalette.Current.AddFillStrong;
+        private static Brush AddText => EditReviewPalette.Current.AddText;
+        private static Brush DeleteText => EditReviewPalette.Current.DeleteText;   // removed (ghost)
         private static readonly Brush DimText = Frozen(Color.FromArgb(0x99, 0x9A, 0x9A, 0x9A));
 
-        // Accept/Keep = green, Reject/Revert = red. Outline when not chosen, solid fill + white text when chosen.
-        private static readonly Color AcceptColor = Color.FromRgb(0x3F, 0xB9, 0x50);
-        private static readonly Color RejectColor = Color.FromRgb(0xF8, 0x51, 0x49);
-        private static readonly Brush AcceptBrush = Frozen(AcceptColor);
-        private static readonly Brush RejectBrush = Frozen(RejectColor);
-        private static readonly Brush AcceptFillSolid = Frozen(Color.FromArgb(0xF0, 0x2E, 0x7D, 0x39)); // green chosen bg
-        private static readonly Brush RejectFillSolid = Frozen(Color.FromArgb(0xF0, 0xB3, 0x3A, 0x33)); // red chosen bg
+        // Accept/Keep = the added color, Reject/Revert = the removed color. Outline when not chosen, solid fill +
+        // white text when chosen.
+        private static Color AcceptColor => EditReviewPalette.Current.AddColor;
+        private static Color RejectColor => EditReviewPalette.Current.DelColor;
+        private static Brush AcceptBrush => EditReviewPalette.Current.AddText;
+        private static Brush RejectBrush => EditReviewPalette.Current.DeleteText;
+        private static Brush AcceptFillSolid => EditReviewPalette.Current.AddFillSolid;
+        private static Brush RejectFillSolid => EditReviewPalette.Current.DeleteFillSolid;
         private static readonly Brush BtnChosenText = Frozen(Colors.White);
         private static readonly Brush BtnInactiveBg = Frozen(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF)); // faint tint
         // Neutral toolbar buttons (Prev/Next); Reset gets an amber "undo" tint.

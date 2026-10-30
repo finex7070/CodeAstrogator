@@ -53,6 +53,42 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void PromptSuggestion_SurvivesSaveAndLoad()
+        {
+            var store = SessionHistoryStore.LoadFrom(_path);
+            store.Current.Id = "cli-9";
+            store.Current.HasCliSession = true;
+            store.Current.Messages.Add(Msg("user", "Fix the cart"));
+            store.Current.PromptSuggestion = "run the tests again";
+            store.Save();
+
+            Assert.Equal("run the tests again", SessionHistoryStore.LoadFrom(_path).Load("cli-9")!.PromptSuggestion);
+        }
+
+        [Fact]
+        public void ReloadFrom_SwitchesToAnotherWorkspacesHistory()
+        {
+            var otherPath = Path.Combine(Path.GetDirectoryName(_path)!, "other.json");
+            var other = SessionHistoryStore.LoadFrom(otherPath);
+            other.Current.Id = "cli-other";
+            other.Current.Messages.Add(Msg("user", "Other workspace"));
+            other.Save();
+
+            var store = SessionHistoryStore.LoadFrom(_path);
+            store.Current.Id = "cli-global";
+            store.Current.Messages.Add(Msg("user", "Global chat"));
+            store.Save();
+
+            store.ReloadFrom(otherPath);
+
+            Assert.Equal(otherPath, store.FilePath);
+            Assert.Empty(store.Current.Messages);            // starts like a fresh panel; the caller restores
+            Assert.NotNull(store.Load("cli-other"));
+            Assert.Null(store.Load("cli-global"));            // the global chat stays in its own file
+            Assert.NotNull(SessionHistoryStore.LoadFrom(_path).Load("cli-global"));
+        }
+
+        [Fact]
         public void Import_ReplacesMessagesButKeepsTheTitle()
         {
             // a remote session that ended while VS was closed: the transcript wins, the (renamed) title stays

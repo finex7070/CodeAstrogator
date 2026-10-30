@@ -210,6 +210,8 @@
   // footer/divider before rendering the latest (the last result = the real turn total). Reset at the
   // start of the next turn so a completed turn's footer stays put.
   let curTurnDivider = null, curTurnFooter = null;
+  // The footer a follow-up turn (background task reaction) folds into — see turnResult; reset with the transcript.
+  let footerChain = null;
 
   function resetTasks() {
     state.tasks = [];
@@ -652,6 +654,8 @@
       case "session.list": return renderHistoryList(m.sessions || []);
       case "transcript.load": return loadTranscript(m);
       case "status": return applyStatus(m.state, m.text, m.detail);
+      case "font.state": return applyFontState(m);
+      case "appearance.state": return applyAppearance(m);
       case "assistant.start": return assistantStart(m.id);
       case "assistant.delta": return assistantDelta(m.id, m.text);
       case "assistant.end": return assistantEnd(m.id);
@@ -755,6 +759,7 @@
     }
     state.appliedThemeVars = nextKeys;
     if (state.accent) applyAccent(state.accent); // recompute hover shade for the new theme
+    if (state.appearance) applyThemeDependentColors(); // syntax tokens + own-message color have dark/light variants
   }
 
   // ---- Custom brand/accent color ------------------------------------------
@@ -787,6 +792,77 @@
     docEl.style.setProperty("--msg-assistant-bg", rgba(0.14));
     docEl.style.setProperty("--msg-assistant-border", rgba(0.46));
     docEl.style.setProperty("--msg-assistant-fg", state.accent);
+  }
+
+  // ---- appearance.state: syntax theme (gear popover), own-message color, bubble tint, color-blind diffs ----
+  // Syntax themes: token colors per panel theme (dark/light). "default" = the accent-based stylesheet colors.
+  const SYNTAX_THEMES = {
+    default: { label: "Default (accent)" },
+    vs: { label: "Visual Studio",
+      dark: { kw: "#569cd6", str: "#ce9178", num: "#b5cea8", com: "#6a9955", fn: "#dcdcaa" },
+      light: { kw: "#0000ff", str: "#a31515", num: "#098658", com: "#008000", fn: "#795e26" } },
+    github: { label: "GitHub",
+      dark: { kw: "#ff7b72", str: "#a5d6ff", num: "#79c0ff", com: "#8b949e", fn: "#d2a8ff" },
+      light: { kw: "#cf222e", str: "#0a3069", num: "#0550ae", com: "#6e7781", fn: "#8250df" } },
+    monokai: { label: "Monokai",
+      dark: { kw: "#f92672", str: "#e6db74", num: "#ae81ff", com: "#75715e", fn: "#a6e22e" },
+      light: { kw: "#e14775", str: "#cc7a0a", num: "#7058be", com: "#a59f85", fn: "#269d69" } },
+    solarized: { label: "Solarized",
+      dark: { kw: "#859900", str: "#2aa198", num: "#d33682", com: "#586e75", fn: "#268bd2" },
+      light: { kw: "#859900", str: "#2aa198", num: "#d33682", com: "#93a1a1", fn: "#268bd2" } },
+  };
+  state.appearance = { syntaxTheme: "default", userColor: "", bubbleIntensity: "normal", colorBlindDiffs: false };
+
+  function applyAppearance(m) {
+    state.appearance = {
+      syntaxTheme: SYNTAX_THEMES[m.syntaxTheme] ? m.syntaxTheme : "default",
+      userColor: m.userColor || "",
+      bubbleIntensity: m.bubbleIntensity || "normal",
+      colorBlindDiffs: !!m.colorBlindDiffs,
+    };
+    const cl = document.documentElement.classList;
+    cl.toggle("diffs-cb", state.appearance.colorBlindDiffs);
+    ["off", "subtle", "strong"].forEach((b) => cl.toggle("bubbles-" + b, state.appearance.bubbleIntensity === b));
+    applyThemeDependentColors();
+  }
+
+  // Both depend on dark/light → re-run from applyTheme too.
+  function applyThemeDependentColors() {
+    const rs = document.documentElement.style;
+    const light = state.resolvedTheme === "light";
+    const theme = SYNTAX_THEMES[state.appearance.syntaxTheme];
+    const tokens = theme && (light ? theme.light : theme.dark);
+    ["kw", "str", "num", "com", "fn"].forEach((k) =>
+      tokens ? rs.setProperty("--tok-" + k, tokens[k]) : rs.removeProperty("--tok-" + k));
+    const rgb = hexToRgb(state.appearance.userColor);
+    if (rgb) {
+      const rgba = (a) => `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
+      rs.setProperty("--msg-user-bg", rgba(light ? 0.10 : 0.14));
+      rs.setProperty("--msg-user-border", rgba(light ? 0.38 : 0.45));
+      rs.setProperty("--msg-user-fg", state.appearance.userColor);
+    } else {
+      ["--msg-user-bg", "--msg-user-border", "--msg-user-fg"].forEach((k) => rs.removeProperty(k));
+    }
+  }
+
+  // Gear popover → Syntax theme (under the accent color)
+  function buildSyntaxPicker() {
+    const select = document.createElement("select");
+    select.className = "font-select syntax-select";
+    Object.keys(SYNTAX_THEMES).forEach((key) => {
+      const o = document.createElement("option");
+      o.value = key;
+      o.textContent = SYNTAX_THEMES[key].label;
+      select.appendChild(o);
+    });
+    select.value = state.appearance.syntaxTheme;
+    select.title = "Colors of code blocks (each theme has a dark and a light variant)";
+    select.addEventListener("change", () => {
+      state.appearance.syntaxTheme = select.value;
+      applyThemeDependentColors();
+      post("syntax.set", { theme: select.value });
+    });
+    return select;
   }
 
   function applyAuth(m) {
@@ -827,7 +903,7 @@
     state.expiredCheckpoints.clear();
     lastUserRow = null;
     transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     renderEmptyOrSignin();
     updateTitle();
@@ -854,7 +930,8 @@
   }
 
   function loadTranscript(m) {
-    setPromptSuggestion("");
+    // a stored next-prompt suggestion of this chat comes back (VS restart, solution reload, history switch)
+    setPromptSuggestion(m.promptSuggestion && !state.remoteActive && !isTurnActive() ? m.promptSuggestion : "");
     state.sessionId = m.sessionId;
     state.title = m.title || state.title;
     state.messages = [];
@@ -864,7 +941,7 @@
     state.expiredCheckpoints.clear(); // host re-reports pruned snapshots after this load
     lastUserRow = null;
     transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     updateTitle();
     const msgs = m.messages || [];
@@ -1665,7 +1742,7 @@
 
   /**
    * Verbosity:
-   *  - compact  → hides system notes + thinking entirely (CSS .v-compact)
+   *  - compact  → hides system notes, thinking and every tool card that doesn't need the user (finished\r\n   *               ones, incl. auto-accepted edits, and the todo card); approvals, questions and a running\r\n   *               command stay (CSS .v-compact)
    *  - normal   → everything shown; thinking + tool cards collapsed (click to expand)
    *  - detailed → thinking + tool cards expanded by default (input/output visible)
    * Switching re-applies the density to cards already in the transcript (todo cards stay open).
@@ -1730,7 +1807,7 @@
   // -------------------------------------------------------------------------
   function renderEmptyOrSignin() {
     transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     if (!state.loggedIn) {
       const wrap = el("div", "signin-state");
@@ -2577,7 +2654,8 @@
     const existingPerm = transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(m.requestId) + '"]');
     if (existingPerm) existingPerm.remove();
 
-    const card = el("div", "perm-card");
+    // auto-approved = pre-decided, nothing to answer (Compact hides it like a finished tool card)
+    const card = el("div", "perm-card" + (m.autoApproved ? " auto-approved" : ""));
     card.dataset.requestId = m.requestId;
     const head = el("div", "perm-head");
     head.appendChild(toolIcon(m.toolName)); // same icon set as tool cards (pencil for Edit/Write)
@@ -3178,26 +3256,45 @@
     taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     clearRunningAgents();   // turn ended → no agents can still be running
     updateStatusbar();
+    // Turns the CLI starts by itself while background tasks run (followUp: each reported task event gets
+    // a short reaction) don't get a footer each: theirs folds into the footer of the turn before, which
+    // moves below the newest message and sums duration, tokens and cost. A prompt you send starts a new sum.
+    const cur = { d: m.durationMs || 0, t: m.turnOutputTokens || 0, c: m.costUsd || 0, n: 1 };
+    let base = { d: 0, t: 0, c: 0, n: 0 };
+    if (m.followUp && footerChain) {
+      if (curTurnFooter) {
+        base = footerChain.base;            // another result of the same follow-up turn → replace, don't add
+      } else {
+        base = footerChain.total;           // first result of this follow-up → the chain so far is the base
+        if (footerChain.divider) footerChain.divider.remove();
+        if (footerChain.footer) footerChain.footer.remove();
+      }
+    }
     // Collapse multiple result events in one turn (subagent results + the main total) to a single
     // footer: drop the previous one from THIS turn, then render the latest (see curTurnFooter note).
     if (curTurnDivider) { curTurnDivider.remove(); curTurnDivider = null; }
     if (curTurnFooter) { curTurnFooter.remove(); curTurnFooter = null; }
+    const total = { d: base.d + cur.d, t: base.t + cur.t, c: base.c + cur.c, n: base.n + cur.n };
     // turn separator + footer: elapsed time · tokens generated this turn · cost
     curTurnDivider = el("hr", "turn-divider");
     appendNode(curTurnDivider);
     const parts = [];
-    if (m.durationMs != null) parts.push(formatDuration(m.durationMs));
-    if (m.turnOutputTokens) parts.push(formatNum(m.turnOutputTokens) + " tok");
+    if (m.durationMs != null || total.d) parts.push(formatDuration(total.d));
+    if (total.t) parts.push(formatNum(total.t) + " tok");
     // costUsd = this turn's share (host: session total minus the previous total; null when unknown)
-    if (m.costUsd) parts.push(formatCost(m.costUsd));
+    if (total.c) parts.push(formatCost(total.c));
     if (parts.length) {
       curTurnFooter = el("div", "sys-note turn-footer", parts.join(" · "));
-      const tip = ["Duration · tokens generated in this turn · its cost"];
+      const tip = [total.n > 1
+        ? "Duration · tokens generated · cost of this turn and the " + (total.n - 1)
+          + " follow-up turn" + (total.n > 2 ? "s" : "") + " background tasks triggered"
+        : "Duration · tokens generated in this turn · its cost"];
       if (m.sessionCostUsd) tip.push("Session total so far: " + formatCost(m.sessionCostUsd));
       tip.push("Cost at API list prices — with a Claude subscription this is not billed.");
       curTurnFooter.title = tip.join("\n");
       appendNode(curTurnFooter);
     }
+    footerChain = { base, total, divider: curTurnDivider, footer: curTurnFooter };
   }
 
   // -------------------------------------------------------------------------
@@ -3451,7 +3548,7 @@
       }
       case "permission": {
         const status = msg.status || "approved";
-        const card = el("div", "perm-card decided");
+        const card = el("div", "perm-card decided" + (msg.autoApproved ? " auto-approved" : ""));
         const sc = permStatusClass(status);
         if (sc) card.classList.add(status, sc);
         const head = el("div", "perm-head");
@@ -3948,6 +4045,7 @@
     }
     if (e.key === "Escape" && promptSuggestion && input.value === "") {
       setPromptSuggestion("");
+      post("prompt.suggestionDismissed", {}); // the host forgets it too (else it returns after a restart)
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -4740,13 +4838,73 @@
     state.title = "Untitled";
     state.activeAssistant = null;
     transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; // transcript cleared → drop stale turn-footer refs
+    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     updateTitle();
     renderEmptyOrSignin();
     applyStatus("ready");
     post("session.new", {});
   });
+
+  // Fonts (settings window → Fonts; host → font.state): "chat" (the UI row) = --font-chat (all text that isn't code: transcript, tool-card heads,
+  // todos, notes, prompt box, chips, hints, dialogs), "code" = --font-code (code blocks, inline code, diffs,
+  // tool input/output, console). Each has a font id and a size (0 = default). The user's
+  // own fonts are added in the settings window; the host sends their names (custom) and, for the ones in
+  // use, their files as data URIs (faces) to register as FontFace.
+  const BUILTIN_FONTS = [
+    ["default", "Default", null], // UI: Segoe UI chrome + Cascadia text (the stylesheet); Code: Cascadia
+    ["cascadia", "Cascadia Code", '"Cascadia Code", "Cascadia Mono", Consolas, monospace'],
+    ["roboto", "Roboto", 'Roboto, "Segoe UI", sans-serif'],
+    ["arial", "Arial", "Arial, Helvetica, sans-serif"],
+    ["times", "Times New Roman", '"Times New Roman", Times, serif'],
+  ];
+  const fontFaces = {}; // custom id → { family, face }
+  state.fonts = { chat: { font: "default", scale: 100 }, code: { font: "default", scale: 100 }, custom: [] };
+
+  /** The CSS font stack for a font id; null = "default" (leave the stylesheet's own fonts in place). */
+  function fontStack(id) {
+    const builtIn = BUILTIN_FONTS.find((f) => f[0] === id);
+    if (builtIn) return builtIn[2];
+    const face = fontFaces[id];
+    return face ? '"' + face.family + '", "Cascadia Code", Consolas, monospace' : null;
+  }
+
+  function registerFontFace(id, dataUri) {
+    if (fontFaces[id]) return;
+    const family = "AstroFont" + (Object.keys(fontFaces).length + 1);
+    try {
+      const face = new FontFace(family, "url(" + dataUri + ")");
+      document.fonts.add(face);
+      face.load().catch(() => {}); // a broken file falls back to the rest of the stack
+      fontFaces[id] = { family, face };
+    } catch (e) { /* invalid font → stack fallback */ }
+  }
+
+  function applyFontState(m) {
+    const faces = m.faces || {};
+    Object.keys(faces).forEach((id) => registerFontFace(id, faces[id]));
+    state.fonts = {
+      chat: m.chat || state.fonts.chat,
+      code: m.code || state.fonts.code,
+      custom: m.custom || state.fonts.custom,
+    };
+    applyFonts();
+  }
+
+  function applyFonts() {
+    const rs = document.documentElement.style;
+    const chat = state.fonts.chat, code = state.fonts.code;
+    // "UI" (target chat) = the whole panel: the text font (--font-chat) and the chrome font (--font-ui:
+    // title, menus, buttons, statusbar). "Default" keeps both stylesheet fonts.
+    const uiStack = fontStack(chat.font);
+    ["--font-chat", "--font-ui"].forEach((v) => uiStack ? rs.setProperty(v, uiStack) : rs.removeProperty(v));
+    const codeStack = fontStack(code.font);
+    if (codeStack) rs.setProperty("--font-code", codeStack); else rs.removeProperty("--font-code");
+    const factor = (s) => (s > 0 && s !== 100 ? String(s / 100) : null);
+    const ui = factor(chat.scale), cd = factor(code.scale);
+    if (ui) rs.setProperty("--fs-ui", ui); else rs.removeProperty("--fs-ui");
+    if (cd) rs.setProperty("--fs-code", cd); else rs.removeProperty("--fs-code");
+  }
 
   // Accent-color picker: preset swatches + a native custom color input. Choosing one applies
   // it instantly (applyAccent) and persists it host-side (accent.set). "Default" clears it.
@@ -4812,11 +4970,19 @@
     });
     pop.appendChild(seg);
 
+    // Accent color — custom brand color (persisted host-side, applied as :root overrides)
+    pop.appendChild(el("div", "appearance-title appearance-title-2", "Accent color"));
+    pop.appendChild(buildAccentPicker());
+
+    // Syntax theme — colors of code blocks
+    pop.appendChild(el("div", "appearance-title appearance-title-2", "Syntax theme"));
+    pop.appendChild(buildSyntaxPicker());
+
     // Verbosity — controls how much of each turn the transcript shows
     pop.appendChild(el("div", "appearance-title appearance-title-2", "Verbosity"));
     const segV = el("div", "segmented");
     const VERBOSITY_HINTS = {
-      compact: "Hides system notes and thinking; tool calls collapsed.",
+      compact: "Only what needs you: approvals, questions and running commands. Finished tool calls, thinking and notes are hidden.",
       normal: "Shows everything; thinking and tool cards collapsed (click to expand).",
       detailed: "Shows everything with thinking and tool cards (input/output) expanded.",
     };
@@ -4835,10 +5001,6 @@
     });
     pop.appendChild(segV);
     pop.appendChild(vHint);
-
-    // Accent color — custom brand color (persisted host-side, applied as :root overrides)
-    pop.appendChild(el("div", "appearance-title appearance-title-2", "Accent color"));
-    pop.appendChild(buildAccentPicker());
 
     // NOTE: no checkpoint toggle here — checkpoints (on/off, retention, disk usage) live in the
     // settings window under "Checkpoints (rewind)"; a change there arrives as checkpoint.settings.
@@ -5437,6 +5599,8 @@
         }
         case "theme.setMode": return onThemeMode(msg.mode);
         case "accent.set": return; // applied optimistically in the UI; mock just persists nothing
+        case "syntax.set": return;
+        case "prompt.suggestionDismissed": return;
         case "model.set": return; // echoed into state already
         case "effort.set": return;
         case "mode.set": return;

@@ -47,6 +47,16 @@ namespace CodeAstrogator.Services
                 AutoAcceptCommands = GetBool(nameof(AstrogatorOptions.AutoAcceptCommands), d.AutoAcceptCommands),
                 AutoApprovePatterns = GetPatterns(nameof(AstrogatorOptions.AutoApprovePatterns), d.AutoApprovePatterns),
                 AccentColor = GetString(nameof(AstrogatorOptions.AccentColor), d.AccentColor),
+                SyntaxTheme = AstrogatorOptions.NormalizeSyntaxTheme(GetString(nameof(AstrogatorOptions.SyntaxTheme), d.SyntaxTheme)),
+                UserMessageColor = GetString(nameof(AstrogatorOptions.UserMessageColor), d.UserMessageColor),
+                ColorBlindDiffs = GetBool(nameof(AstrogatorOptions.ColorBlindDiffs), d.ColorBlindDiffs),
+                BubbleIntensity = AstrogatorOptions.NormalizeBubbleIntensity(GetString(nameof(AstrogatorOptions.BubbleIntensity), d.BubbleIntensity)),
+                // font ids are validated where they are used (they depend on CustomFonts)
+                ChatFont = GetString(nameof(AstrogatorOptions.ChatFont), d.ChatFont),
+                ChatFontScale = AstrogatorOptions.ClampFontScale(GetInt(nameof(AstrogatorOptions.ChatFontScale), d.ChatFontScale)),
+                CodeFont = GetString(nameof(AstrogatorOptions.CodeFont), d.CodeFont),
+                CodeFontScale = AstrogatorOptions.ClampFontScale(GetInt(nameof(AstrogatorOptions.CodeFontScale), d.CodeFontScale)),
+                CustomFonts = GetPatterns(nameof(AstrogatorOptions.CustomFonts), d.CustomFonts),
                 NoticeFetchEnabled = GetBool(nameof(AstrogatorOptions.NoticeFetchEnabled), d.NoticeFetchEnabled),
                 NoticeFetchDecided = GetBool(nameof(AstrogatorOptions.NoticeFetchDecided), d.NoticeFetchDecided),
                 UpdateCheckEnabled = GetBool(nameof(AstrogatorOptions.UpdateCheckEnabled), d.UpdateCheckEnabled),
@@ -101,6 +111,16 @@ namespace CodeAstrogator.Services
             _store.SetString(Collection, nameof(AstrogatorOptions.AutoApprovePatterns),
                 JsonConvert.SerializeObject(Normalize(o.AutoApprovePatterns)));
             _store.SetString(Collection, nameof(AstrogatorOptions.AccentColor), o.AccentColor ?? "");
+            _store.SetString(Collection, nameof(AstrogatorOptions.SyntaxTheme), AstrogatorOptions.NormalizeSyntaxTheme(o.SyntaxTheme));
+            _store.SetString(Collection, nameof(AstrogatorOptions.UserMessageColor), o.UserMessageColor ?? "");
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ColorBlindDiffs), o.ColorBlindDiffs);
+            _store.SetString(Collection, nameof(AstrogatorOptions.BubbleIntensity), AstrogatorOptions.NormalizeBubbleIntensity(o.BubbleIntensity));
+            _store.SetString(Collection, nameof(AstrogatorOptions.ChatFont), o.ChatFont ?? AstrogatorOptions.DefaultFont);
+            _store.SetInt32(Collection, nameof(AstrogatorOptions.ChatFontScale), AstrogatorOptions.ClampFontScale(o.ChatFontScale));
+            _store.SetString(Collection, nameof(AstrogatorOptions.CodeFont), o.CodeFont ?? AstrogatorOptions.DefaultFont);
+            _store.SetInt32(Collection, nameof(AstrogatorOptions.CodeFontScale), AstrogatorOptions.ClampFontScale(o.CodeFontScale));
+            _store.SetString(Collection, nameof(AstrogatorOptions.CustomFonts),
+                JsonConvert.SerializeObject(o.CustomFonts ?? new List<string>()));
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.NoticeFetchEnabled), o.NoticeFetchEnabled);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.NoticeFetchDecided), o.NoticeFetchDecided);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ModelCatalogFetchEnabled), o.ModelCatalogFetchEnabled);
