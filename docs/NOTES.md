@@ -689,8 +689,11 @@ compact_boundary evaluation) — details in the respective sections below.
 - **Pure web-side** (`app.js` "Prompt queue", `index.html` `.send-slot`, `app.css`) — no new host↔web message:
   a queued prompt reaches the host as an ordinary `prompt.send` once the turn is over.
 - **Stop lives in the working indicator** (the rocket line at the bottom of the transcript): a small
-  "■ Stop" pill (`.wi-stop` → `requestStop`) right after the one-liner — user decision 2026-11-04 (a first
-  version floated it above the send button). The indicator now shows for the **whole turn**, i.e. also on
+  "■ Stop" pill (`.wi-stop` → `requestStop`) — user decision 2026-11-04 (a first version floated it above
+  the send button). **Right-aligned since 1.2.1** (`margin-left: auto`): right after the one-liner it moved
+  with every dot step (1 → 3 dots) and every phrase change. The dots also reserve the width of "···" (an
+  invisible `::before` in the same grid cell) so the line itself no longer jitters. Measured: one stop
+  position across six phrases + the waiting state (a one-time 10 px shift when the transcript scrollbar appears). The indicator now shows for the **whole turn**, i.e. also on
   **"Awaiting approval"** (`showWorkingIndicator(waiting)`: class `.waiting`, rocket rests, no dots, text
   "Waiting for your answer"; `refreshWorkingPhrase` leaves that text alone; back to a random phrase on
   `working`). Before, the combined send/stop button showed a disabled Send there — no way to stop while a

@@ -2099,8 +2099,17 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   100% { transform: translate(0, 1px) rotate(-6deg); }
 }
 .working-indicator .wi-text { color: var(--comment); }
+/* the dots animate between 1 and 3 — an invisible "···" in the same grid cell keeps the width fixed, so
+   the stop button after them doesn't jitter */
+.working-indicator .wi-dots { display: inline-grid; }
+.working-indicator .wi-dots::before {
+  content: "···";
+  visibility: hidden;
+  grid-area: 1 / 1;
+}
 .working-indicator .wi-dots::after {
   content: "·";
+  grid-area: 1 / 1;
   animation: wi-dots 1.2s steps(4, end) infinite;
 }
 @keyframes wi-dots {
@@ -2110,12 +2119,14 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   75%  { content: "··"; }
   100% { content: "·"; }
 }
-/* the turn's stop button, right after the one-liner */
+/* the turn's stop button, on the right edge of the line — a fixed spot: the one-liner changes length
+   with every new phrase, so a button right after it would jump around */
 .working-indicator .wi-stop {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-left: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
   padding: 2px 9px 2px 7px;
   border: 1px solid var(--border);
   border-radius: 999px;
