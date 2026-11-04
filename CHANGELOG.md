@@ -4,6 +4,11 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.2.1] – 2026-11-04
+
+### Fixed
+- **The Stop button stays put.** It sat right after the "working" line and moved with every step of the animated dots and every new one-liner. It now has a fixed place at the right end of that line.
+
 ## [1.2.0] – 2026-11-04
 
 ### Added
