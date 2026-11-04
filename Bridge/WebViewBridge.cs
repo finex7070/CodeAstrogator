@@ -54,6 +54,12 @@ namespace CodeAstrogator.Bridge
         private readonly ActiveDocumentTracker _activeDocs; // active editor tab → auto-reference
         private bool _activeFileSessionEnabled = true; // per-session override (seeded from ActiveFileOnByDefault; AutoAddActiveFile has priority)
         private readonly McpPermissionBridge _permission; // in-process MCP permission server (§A5)
+        // "Notify me" (opt-in): Windows notifications at turn end and for prompts that wait for the user.
+        // Prompt toasts are tagged with their request id (removed once answered), the turn-end toast with TurnToastTag.
+        private readonly WindowsToastNotifier _toasts;
+        private const string TurnToastTag = "turn";
+        private string? _turnResultText; // the main result's text, for the turn-end toast (stream thread)
+        private string? _toastWorkspace; // the running turn's cwd (set in RunPrompt — GetSolutionDirectory is UI-thread only)
         // ── file checkpoints (rewind) ────────────────────────────────────────────
         // A snapshot of the work-tree is taken before each prompt and at the end of each turn, so
         // "what changed during Claude's turn" is a tree-to-tree diff (covers bash/scripts, not just
@@ -159,6 +165,8 @@ namespace CodeAstrogator.Bridge
             };
             try { _permission.Start(); } catch { /* leave unavailable */ }
             _session.PermissionBridge = _permission;
+            _toasts = new WindowsToastNotifier(_package.ActivateChatWindow,
+                error => PostNotify("Windows notification could not be shown: " + error, "warning"));
             // Inline edit-review (opt-in): opens edited files with a red/green diff + per-hunk
             // Accept/Reject; calls FinalizeEditReview when every hunk in a request is decided.
             _editReview = new EditReviewController(_package, FinalizeEditReview);
@@ -628,6 +636,9 @@ namespace CodeAstrogator.Bridge
 
             _turnHadAssistantOutput = false;
             _inFollowUpTurn = false;       // a turn the user started (its footer starts a new sum)
+            _turnResultText = null;
+            _toastWorkspace = cwd;
+            _toasts.Remove(TurnToastTag);  // the user is back — the last "finished" notification is done
             lock (_history)
                 _history.Current.PromptSuggestion = null; // it predicted this prompt — used up either way
             CarryTurnReviewIntoNextTurn(); // a pending review keeps collecting this turn's changes
@@ -808,6 +819,9 @@ namespace CodeAstrogator.Bridge
                 }
                 Post(card);
                 PostStatus("waiting-permission");
+                NotifyToast(req.RequestId, isQuestion
+                    ? ToastContent.ForQuestion(req.Input)
+                    : ToastContent.ForPermission(req.ToolName, req.Input));
             }).Task.Forget();
 
             // VSTHRD003: this TCS is ours (settled by ResolvePending), not foreign work.
@@ -939,6 +953,7 @@ namespace CodeAstrogator.Bridge
             if (!_pendingPermissions.TryRemove(requestId, out var p))
                 return null;
             p.Registration.Dispose();
+            _toasts.Remove(requestId); // answered / expired — its notification is stale now
             p.Tcs.TrySetResult(new PermissionDecision { Behavior = behavior, Message = message, UpdatedInput = updatedInput });
             return p;
         }
@@ -3315,6 +3330,7 @@ namespace CodeAstrogator.Bridge
                     break;
 
                 case TurnResultEvent turn:
+                    _turnResultText = turn.ResultText; // for the turn-end notification (OnTurnCompleted)
                     var turnCost = TurnCostUsd(turn); // before HasCliSession flips below
                     _history.Current.UpdatedAtUtc = DateTime.UtcNow;
                     if (turn.NumTurns > 0 && !string.IsNullOrEmpty(turn.SessionId))
@@ -3449,6 +3465,10 @@ namespace CodeAstrogator.Bridge
             {
                 PostStatus("ready");
             }
+            // a turn the user stopped needs no notification — they are right there
+            if (!exit.WasCancelled)
+                NotifyToast(TurnToastTag, ToastContent.ForTurnEnd(_turnResultText, error));
+            _turnResultText = null;
             RefreshUsage(); // the turn just consumed quota — update the meters
             TakePostTurnCheckpoint(); // "after" snapshot → this turn's diff is pre..post
             SaveHistory();
@@ -4556,6 +4576,22 @@ namespace CodeAstrogator.Bridge
                 ["ts"] = DateTime.UtcNow.ToString("o"),
             });
             Post(new JObject { ["type"] = "error", ["message"] = message });
+        }
+
+        /// <summary>"Notify me" option: a Windows notification — unless the option is off, or the user is
+        /// looking at Visual Studio and asked to be notified only when it is in the background. Any thread.</summary>
+        private void NotifyToast(string tag, ToastText text)
+        {
+            var options = _package.GetOptions();
+            if (_disposed || !options.ToastNotifications)
+                return;
+            if (options.ToastOnlyWhenInactive && WindowsToastNotifier.IsVisualStudioForeground())
+                return;
+            string title;
+            lock (_history)
+                title = _history.Current.Title;
+            // workspace first: with several Visual Studio instances open, it says which one is meant
+            _toasts.Show(tag, text, ToastContent.Attribution(_toastWorkspace, title));
         }
 
         /// <summary>Transient, dismissible banner at the top of the chat for incidental action

@@ -236,6 +236,23 @@ namespace CodeAstrogator
             return null;
         }
 
+        /// <summary>A click on one of our Windows notifications: brings Visual Studio to the front (restoring it
+        /// if minimized) and shows the chat. Any thread.</summary>
+        internal void ActivateChatWindow()
+        {
+            JoinableTaskFactory.RunAsync(async () =>
+            {
+                await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+                var main = System.Windows.Application.Current?.MainWindow;
+                if (main != null)
+                {
+                    WindowsToastNotifier.BringToFront(new System.Windows.Interop.WindowInteropHelper(main).Handle);
+                    main.Activate();
+                }
+                await ShowToolWindowAsync(typeof(ClaudeChatWindow), 0, create: true, DisposalToken);
+            }).Task.Forget();
+        }
+
         /// <summary>Current settings snapshot (kept fresh by settings writes).</summary>
         internal AstrogatorOptions GetOptions() => _options;
 
@@ -341,6 +358,8 @@ namespace CodeAstrogator
             to.PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(from.PromptTimeoutMinutes);
             to.RestoreLastSession = from.RestoreLastSession;
             to.PromptSuggestions = from.PromptSuggestions;
+            to.ToastNotifications = from.ToastNotifications;
+            to.ToastOnlyWhenInactive = from.ToastOnlyWhenInactive;
             to.AutoAddActiveFile = from.AutoAddActiveFile;
             to.ActiveFileOnByDefault = from.ActiveFileOnByDefault;
             to.IncludeSelectedLines = from.IncludeSelectedLines;

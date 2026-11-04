@@ -109,7 +109,8 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
   `GitCheckpointService` (shadow-repo file checkpoints per turn + rewind, see "File checkpoints / rewind").
 - `Bridge/WebViewBridge.cs` — complete §3 message contract host-side, thread marshaling.
 - `Services/` — `ThemeService` (VS colors → CSS vars), `SessionHistoryStore`
-  (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file).
+  (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file),
+  `WindowsToastNotifier` (Windows notifications, see "Windows notifications (toasts)"; texts in `Core/ToastContent`).
 - `ToolWindows/` — `ClaudeChatWindow(Control)` (WebView2, virtual host `codeastrogator.local`).
 - `Options/AstrogatorOptions.cs` — in-memory snapshot of the Unified Settings (CLI path, model,
   Effort, Theme, Verbosity, Restore last session, AutoAddActiveFile, IncludeSelectedLines,
@@ -345,6 +346,8 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 4. Remote Control expansion (optional): worktree spawn mode (`--spawn worktree`),
    show remote sessions in the history already **during** the run.
    (Context window model-dependent instead of fixed 200k: done 2026-10-28, see `context.usage`.)
+5. **Multiple sessions as tabs** (up to 3 in one WebView, target 1.3.0) — draft plan in
+   `docs/multi-session-tabs-plan.md` (2026-11-04), not started.
 
 Done (2026-06-03): `session.rename` + limits `resets_at` tooltips; theme fix
 (inline vars), copy context menu, Ctrl+V file/image paste, dynamic slash menu +
@@ -681,6 +684,39 @@ compact_boundary evaluation) — details in the respective sections below.
     rendering the latest (the last result = the real total). The refs are reset when a new turn
     starts (`applyStatus`, idle/error → working, not a mid-turn permission round-trip) and when the
     transcript is cleared, so a completed turn's footer stays put.
+
+## Stop button & prompt queue (2026-11-04)
+- **Pure web-side** (`app.js` "Prompt queue", `index.html` `.send-slot`, `app.css`) — no new host↔web message:
+  a queued prompt reaches the host as an ordinary `prompt.send` once the turn is over.
+- **Stop lives in the working indicator** (the rocket line at the bottom of the transcript): a small
+  "■ Stop" pill (`.wi-stop` → `requestStop`) right after the one-liner — user decision 2026-11-04 (a first
+  version floated it above the send button). The indicator now shows for the **whole turn**, i.e. also on
+  **"Awaiting approval"** (`showWorkingIndicator(waiting)`: class `.waiting`, rocket rests, no dots, text
+  "Waiting for your answer"; `refreshWorkingPhrase` leaves that text alone; back to a random phrase on
+  `working`). Before, the combined send/stop button showed a disabled Send there — no way to stop while a
+  prompt was open. Scrolled far up, the stop is out of view (the jump-to-bottom pill brings it back).
+- **Send button, three faces** (`updateSendEnabled`): **Send** (idle) · **Queue** (`.queue`, a turn runs;
+  enabled when there is text or an attachment) · **✕** (`.unqueue`, a prompt is queued). Enter does what the
+  button does (`submitComposer`).
+- **Queued** (`state.queued`, `setQueued`): the textarea is `readOnly` and dimmed, attachment ✕ hidden, hint
+  "Queued · sends when Claude is done" replaces "Shift+Enter for a new line". One slot only — the queued text
+  *is* the composer. **✕ or Esc** takes it back (editable again). Anything else that changes the composer
+  (`addAttachment` — file picker, paste, drag-and-drop, `attach.added` —, `composer.append` from the editor's
+  context menu, a slash command from the menu clearing a "/…" input) **un-queues** it (`unqueueForEdit`): the
+  prompt is no longer the one the user armed; they queue it again.
+- **Turn end** (`applyStatus`: working/waiting-permission → anything else → `sendQueuedPrompt(state)`):
+  - normal end (`ready`) → `setTimeout(sendPrompt, 0)` — after the rest of the status update — i.e. exactly
+    like pressing Send (bubble, `prompt.send`, composer cleared).
+  - **Stop** (the host answers a stop with plain `ready`, so the web side remembers the click:
+    `stopRequested`, reset when a new turn starts) or **`error`** → **not sent**; it stays in the input,
+    un-queued, with an 8 s notify ("… your queued prompt was not sent. It is still in the input.").
+  - `waiting-permission` ↔ `working` round-trips are not an end.
+- **Verified (2026-11-04, browser):** mock adapter — queue during a turn, approve the open cards, the queued
+  prompt is sent as the next turn; Enter queues, Esc un-queues; Stop keeps it + notify. Fake-host page
+  (`chrome.webview` stub) — `status:error` keeps it + notify; queued through `waiting-permission` → exactly one
+  `prompt.send` at `ready`; `attach.added` / `composer.append` un-queue. Layout at 800 and 380 px. Re-checked
+  with the stop in the indicator: shown on working + waiting ("Waiting for your answer"), always the last
+  transcript node, its click keeps the queued prompt + notify, a normal end still auto-sends.
 
 ## `+` menu & @-mentions (2026-06-03)
 - *Add file…* → file picker (`attach.files` → `attach.added` chips).
@@ -1369,6 +1405,13 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     Sonnet 5 into the older generations. CLI 2.1.294 knows it (probe renders the label `Haiku 5.5`); an older
     CLI echoes the ID raw ⇒ hidden, Haiku 4.5 stays on top. The WebUI's built-in fallback list keeps Haiku 4.5
     (models every shipped CLI runs).
+  - **2026-11-04 — check, no change.** No new model: the current lineup per the docs (models overview +
+    model-deprecations, platform.claude.com) is Fable 5.1 · Opus 5.5 · Sonnet 5.5 · Haiku 5.5 = our top rows, and
+    CLI 2.1.312's binary contains no model ID beyond the catalog (only older ones + Mythos). All 12 entries are
+    **Active**. **Watch Haiku 4.5:** its "not sooner than" retirement date (2026-10-15) has passed — still Active,
+    not deprecated; drop it from the catalog once it is (≥ 60 days' notice). Left out on purpose: Sonnet 4.5
+    (deprecated, retires 2026-11-30), Opus 4.5 (active, retirement not sooner than 2026-11-24), Mythos 5/5.1
+    (Project Glasswing only).
   - **Where the remote catalog comes from:** `noticeBranch` in `WebUI/config.js` is still `"master"`, but the
     repo only has `main` + `develope`. `raw.githubusercontent.com` serves `master` as the alias of the
     renamed default branch (`…/master/models.json` → 200, same content as `main`), so the fetch works — but
@@ -2254,6 +2297,71 @@ card** ("Accept all" / "Open in editor" / "Reject all") instead of the inline di
   stack + auto-close are testable in isolation.
 - **When adding a new error:** if it's the result of a user UI action (not a turn), prefer `PostNotify`;
   reserve `PostError` for turn/stream failures that should live in the transcript.
+
+## Windows notifications (toasts) (2026-11-04)
+- **What:** Windows toast (on by default, can be switched off) when a turn ends and whenever Claude waits for the user. Settings window →
+  Behavior: **"Show a Windows notification …"** (`AstrogatorOptions.ToastNotifications`, default **on** since
+  2026-11-04 — user decision; with the second option it only fires while VS is in the background) +
+  indented **"Only while Visual Studio is not the active window"** (`ToastOnlyWhenInactive`, default **on**;
+  greyed out while the first is off). Host-only — no WebUI / contract change.
+- **Triggers (all in `WebViewBridge`, via `NotifyToast(tag, text)`):**
+  - **Prompt waiting** — `HandlePermissionRequestedAsync`, right after the card is posted (so not for prompts
+    that are auto-approved: patterns, Auto-accept commands, end-of-turn review baselines). Tag = the request id
+    (tool_use_id). AskUserQuestion → "Claude has a question" + first question (+N more); ExitPlanMode → "Claude's
+    plan is ready for review" + plan start; everything else → "Claude needs your permission" + `Tool: command`
+    / `Tool: file name` / `server: tool` for MCP. **`ResolvePending` removes the toast** (answered, expired,
+    denied at turn end) — every way a prompt settles goes through it.
+  - **Turn end** — `OnTurnCompleted`, **not** for `exit.WasCancelled` (the user pressed Stop and is right
+    there). Body = the main `result` text (`_turnResultText`, captured at the top-level `TurnResultEvent`,
+    Markdown stripped, ≤ 200 chars) or "Your turn."; with an error "Claude stopped with an error" + message.
+    CLI follow-up turns (background tasks) end the same way and notify too. Tag `"turn"` → a new turn-end
+    toast replaces the previous one; `RunPrompt` removes it (the user is back).
+  - Attribution line (small, grey) = **workspace folder name · chat title** (`ToastContent.Attribution`; the
+    title is left out while "Untitled"). The workspace is the turn's `cwd`, kept in `_toastWorkspace` by
+    `RunPrompt` — `GetSolutionDirectory()` throws off the UI thread, and the turn-end toast comes from the
+    stream thread.
+  - **Several VS instances (2026-11-04, user ran two projects whose turns ended almost together):** tags are
+    per **AppUserModelID**, which every instance shares — with a bare `"turn"` the second instance's toast
+    replaced the first one's, and the next prompt in one instance removed the other's toast. Every tag is
+    therefore scoped to the process: `ToastContent.ScopedTag` = `p<pid>-<tag>`, cut to Windows' 64 characters
+    from the front of the id (prefix and the unique end of a tool_use_id survive). A click reaches the
+    instance that showed the toast (its `Activated` handler), so it brings the right VS to the front.
+- **Text/XML:** `Core/ToastContent` (UI-free, `ToastContentTests`): ToastGeneric XML, everything escaped,
+  control characters dropped (invalid in XML → `LoadXml` fails), never cuts a surrogate pair. Commands are
+  **not** Markdown-cleaned (`**/*.cs` stays).
+- **Showing: `Services/WindowsToastNotifier`** — WinRT `Windows.UI.Notifications` through **reflection**
+  (`Type.GetType("…, ContentType=WindowsRuntime")`, like Windows PowerShell does), so no
+  `Microsoft.Windows.SDK.Contracts` package and no extra DLL in the VSIX.
+  - **AppUserModelID without a Start-menu shortcut:** `HKCU\Software\Classes\AppUserModelId\CodeAstrogator.Chat`
+    with `DisplayName` = "Code Astrogator" and `IconUri` = `<extension dir>\Resources\icon-90.png` (fallback
+    `WebUI\logo.png`) — the mechanism the Windows Community Toolkit uses for unpackaged apps. Rewritten on the
+    first toast of each VS session (the extension dir changes with every update). The key stays behind after an
+    uninstall (harmless; it only names the app in Windows' notification settings).
+  - **Click:** `Activated` is a WinRT event — **`EventInfo.AddEventHandler` throws** "dynamically adding or
+    removing event handlers is not supported for WinRT events", so the projected `add_Activated` is invoked
+    directly (returns an `EventRegistrationToken`, verified 2026-11-04). The handler calls
+    `CodeAstrogatorPackage.ActivateChatWindow` → restore if minimized (`ShowWindow SW_RESTORE`, keeps
+    maximized) + `SetForegroundWindow` + `MainWindow.Activate()` + show the chat tool window. The live toast
+    objects are kept (by tag) so their handler stays alive while they sit in the Action Center.
+  - **Threading (fixed 2026-11-04 before release, user report "RPC_E_WRONG_THREAD 0x8001010E"):** `Show` is
+    called from the **UI thread (STA)** for prompts and from the **CLI stream thread (MTA)** at turn end. The
+    first version cached the `ToastNotifier` — created in the STA when a prompt toast came first, the turn-end
+    toast then called it from the MTA and failed. Now **every WinRT call runs in one serial queue on thread-pool
+    (MTA) threads** (`Enqueue` = `ContinueWith` chain, `TaskScheduler.Default`), a notifier is created per toast,
+    and `_live` is only touched inside the queue (a `Remove` also stays behind the `Show` of the same tag).
+    Re-checked with a C# harness: `Show` from an STA thread, then from an MTA thread, then `Remove` → no error
+    (the old DLL failed the same sequence with `CO_E_OBJNOTCONNECTED`). **Rule: never hold a WinRT object across
+    threads here — keep all of it inside the queue.**
+  - **Foreground test:** `GetForegroundWindow` → owning process == devenv (main window, floating tool windows
+    and dialogs all count as "looking at VS").
+  - Failures are reported **once** per chat window as a `PostNotify` warning ("Windows notification could not
+    be shown: …"); Windows' own switches (Focus Assist / notifications off for the app) are silent.
+- **Verified (2026-11-04, Win10 19045):** registry-AUMID toast shown from Windows PowerShell 5.1 (same .NET
+  Framework WinRT projection as devenv) with `ToastNotifier.Setting = Enabled`; the built `WindowsToastNotifier`
+  driven through reflection: `Show` without error, `add_Activated` registers, `Remove` clears it.
+  ✓ **Verified in VS 2026 (2026-11-04, 1.2.0 installed):** the toast appears during real use, and a **click
+  brings Visual Studio to the front** (so the in-process `Activated` event does fire for a registry-AUMID
+  toast without a COM activator, and `SetForegroundWindow` is granted).
 
 ## AskUserQuestion (interactive follow-up questions) — solved 2026-06-05 (real in-turn card via the permission hook)
 - **Key finding (CLI 2.1.165, throwaway probes):** `AskUserQuestion` **routes through the

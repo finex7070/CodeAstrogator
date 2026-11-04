@@ -69,6 +69,8 @@ namespace CodeAstrogator.Services
                     GetInt(nameof(AstrogatorOptions.PromptTimeoutMinutes), d.PromptTimeoutMinutes)),
                 RestoreLastSession = GetBool(nameof(AstrogatorOptions.RestoreLastSession), d.RestoreLastSession),
                 PromptSuggestions = GetBool(nameof(AstrogatorOptions.PromptSuggestions), d.PromptSuggestions),
+                ToastNotifications = GetBool(nameof(AstrogatorOptions.ToastNotifications), d.ToastNotifications),
+                ToastOnlyWhenInactive = GetBool(nameof(AstrogatorOptions.ToastOnlyWhenInactive), d.ToastOnlyWhenInactive),
                 AutoAddActiveFile = GetBool(nameof(AstrogatorOptions.AutoAddActiveFile), d.AutoAddActiveFile),
                 IncludeSelectedLines = GetBool(nameof(AstrogatorOptions.IncludeSelectedLines), d.IncludeSelectedLines),
                 ActiveFileOnByDefault = GetBool(nameof(AstrogatorOptions.ActiveFileOnByDefault), d.ActiveFileOnByDefault),
@@ -133,6 +135,8 @@ namespace CodeAstrogator.Services
                 AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes));
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.RestoreLastSession), o.RestoreLastSession);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.PromptSuggestions), o.PromptSuggestions);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ToastNotifications), o.ToastNotifications);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ToastOnlyWhenInactive), o.ToastOnlyWhenInactive);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.AutoAddActiveFile), o.AutoAddActiveFile);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.IncludeSelectedLines), o.IncludeSelectedLines);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ActiveFileOnByDefault), o.ActiveFileOnByDefault);
