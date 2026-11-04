@@ -78,6 +78,8 @@ namespace CodeAstrogator.ToolWindows
         private readonly Button _removeFont;
         private readonly CheckBox _restore;
         private readonly CheckBox _promptSuggestions;
+        private readonly CheckBox _toasts;
+        private readonly CheckBox _toastsInactiveOnly;
         private readonly CheckBox _autoAdd;
         private readonly CheckBox _includeLines;
         private readonly CheckBox _activeFileDefault;
@@ -166,6 +168,10 @@ namespace CodeAstrogator.ToolWindows
                 + "and in the inline editor review (instead of green and red)", new Thickness(0, 8, 0, 0));
             _restore = MakeCheck("Restore the last session when the chat window opens", new Thickness(0, 8, 0, 0));
             _promptSuggestions = MakeCheck("Suggest the next prompt after each turn (shown as grey text in the empty input; Tab takes it over). Costs one extra, mostly cached request per turn", new Thickness(0, 8, 0, 0));
+            _toasts = MakeCheck("Show a Windows notification when Claude finishes a turn or needs you (a permission prompt, a question, a plan to approve). Clicking it brings Visual Studio to the front", new Thickness(0, 8, 0, 0));
+            _toastsInactiveOnly = MakeCheck("Only while Visual Studio is not the active window", new Thickness(20, 6, 0, 0));
+            _toasts.Checked += (_, __) => _toastsInactiveOnly.IsEnabled = true;
+            _toasts.Unchecked += (_, __) => _toastsInactiveOnly.IsEnabled = false;
             _autoAdd = MakeCheck("Reference the active editor file in each prompt", new Thickness(0, 8, 0, 0));
             _includeLines = MakeCheck("Include the selected line range in the file reference", new Thickness(20, 6, 0, 0));
             _activeFileDefault = MakeCheck("Reference it by default in new chats (otherwise a new chat starts with the reference off; toggle it on via the chip)", new Thickness(20, 6, 0, 0));
@@ -229,7 +235,7 @@ namespace CodeAstrogator.ToolWindows
 
             var middle = new StackPanel();
             middle.Children.Add(Section("Behavior",
-                _restore, _promptSuggestions, _autoAdd, _includeLines, _activeFileDefault));
+                _restore, _promptSuggestions, _toasts, _toastsInactiveOnly, _autoAdd, _includeLines, _activeFileDefault));
             middle.Children.Add(Section("History & storage",
                 Labeled(
                     "Automatically delete chat history older than (by last activity; \"Never\" keeps it forever):",
@@ -378,6 +384,9 @@ namespace CodeAstrogator.ToolWindows
             _codeScale.SelectedItem = ScaleLabel(AstrogatorOptions.ClampFontScale(o.CodeFontScale));
             _restore.IsChecked = o.RestoreLastSession;
             _promptSuggestions.IsChecked = o.PromptSuggestions;
+            _toasts.IsChecked = o.ToastNotifications;
+            _toastsInactiveOnly.IsChecked = o.ToastOnlyWhenInactive;
+            _toastsInactiveOnly.IsEnabled = o.ToastNotifications;
             _autoAdd.IsChecked = o.AutoAddActiveFile;
             _includeLines.IsChecked = o.IncludeSelectedLines;
             _includeLines.IsEnabled = o.AutoAddActiveFile;
@@ -476,6 +485,8 @@ namespace CodeAstrogator.ToolWindows
                 VerbosityString = _current.VerbosityString,
                 RestoreLastSession = _restore.IsChecked == true,
                 PromptSuggestions = _promptSuggestions.IsChecked == true,
+                ToastNotifications = _toasts.IsChecked == true,
+                ToastOnlyWhenInactive = _toastsInactiveOnly.IsChecked == true,
                 AutoAddActiveFile = _autoAdd.IsChecked == true,
                 IncludeSelectedLines = _includeLines.IsChecked == true,
                 ActiveFileOnByDefault = _activeFileDefault.IsChecked == true,
@@ -538,7 +549,7 @@ namespace CodeAstrogator.ToolWindows
             foreach (var combo in new[] { _userColor, _bubbleIntensity, _uiFont, _uiScale, _codeFont, _codeScale,
                          _historyRetention, _pastedRetention, _checkpointRetention, _checkpointFilterMode })
                 combo.SelectionChanged += (_, __) => ScheduleApply();
-            foreach (var check in new[] { _colorBlindDiffs, _restore, _promptSuggestions, _autoAdd, _includeLines,
+            foreach (var check in new[] { _colorBlindDiffs, _restore, _promptSuggestions, _toasts, _toastsInactiveOnly, _autoAdd, _includeLines,
                          _activeFileDefault, _noticeFetch, _updateCheck, _autoUpdate, _modelCatalogFetch, _checkpoints })
             {
                 check.Checked += (_, __) => ScheduleApply();

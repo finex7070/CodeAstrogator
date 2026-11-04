@@ -4,6 +4,15 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.2.0] – 2026-11-04
+
+### Added
+- **Windows notifications when Claude is done or needs you.** A Windows notification now appears when a turn finishes (with the start of Claude's answer, or the error if it failed) and whenever Claude is waiting for you: a permission prompt (with the command or file), a question, or a plan to approve. By default this only happens while Visual Studio is in the background, so you can switch to something else during a long turn without missing the moment you're needed. Each notification names the project and the chat, so with several Visual Studio windows open you know which one needs you, and clicking it brings that Visual Studio and its chat to the front. Once you answer a prompt, its notification disappears from the Action Center as well. Stopping a turn yourself doesn't notify you, and neither do prompts that are approved automatically. You can turn the notifications off, or have them appear even while Visual Studio is active, in **Advanced options → Behavior**.
+- **Write your next prompt while Claude is still working.** Press Enter or the send button during a turn and the prompt is queued: it is sent by itself as soon as the turn is done. While it waits, the input is locked and the send button turns into an **✕**. Click it or press Esc to take the prompt back and keep editing. If you stop the turn or it ends with an error, the queued prompt is not sent and stays in the input.
+
+### Changed
+- **The stop button moved next to the "working" line.** While a turn runs, **Stop** sits right after the rocket's one-liner at the bottom of the conversation, so the send button stays free for queuing the next prompt. The line now stays while Claude waits for your approval or answer ("Waiting for your answer"), so you can stop the turn there too. Before, there was no way to do that.
+
 ## [1.1.0] – 2026-10-29
 
 ### Added

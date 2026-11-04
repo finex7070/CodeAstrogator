@@ -44,6 +44,7 @@
     activeFile: { name: null, path: null, optionEnabled: true, enabled: true, lines: null }, // active editor tab reference
     messages: [],            // rendered message records
     attachments: [],         // {id, name}
+    queued: false,           // the composer's prompt is queued: sent by itself when the running turn ends
     activeAssistant: null,   // {id, textNode, accText, el}
     pendingPermissions: new Set(), // requestIds of open permission/question cards (parallel tool use)
     tasks: [],               // task tracker: [{id, subject, activeForm, status}] from Task* tool calls
@@ -121,6 +122,8 @@
   const agentsRunningEl = $("agents-running");
   const bgTasksEl = $("bg-tasks");
   const sendBtn = $("btn-send");
+  const queueHint = $("queue-hint");
+  let stopRequested = false; // the user pressed Stop in this turn → a queued prompt is NOT sent at its end
   const activeFileChip = $("active-file");
   const activeFileName = $("active-file-name");
   const activeFileLines = $("active-file-lines");
@@ -1346,6 +1349,7 @@
       curTurnDivider = null;
       curTurnFooter = null;
       setPromptSuggestion(""); // a suggestion predicts the prompt for the turn that just ended
+      stopRequested = false;
     }
     // Turn no longer active (ended / errored / interrupted) → clear the running-agents list; a stray
     // agent whose result was missed can't outlive the turn.
@@ -1353,19 +1357,12 @@
     statusbar.setAttribute("data-state", s);
     statusText.textContent = text || STATUS_TEXT[s] || s;
     statusText.title = detail || "";
-    // send <-> stop
-    if (s === "working") {
-      sendBtn.classList.add("stop");
-      sendBtn.disabled = false;
-      sendBtn.title = "Stop";
-      showWorkingIndicator();
-    } else {
-      sendBtn.classList.remove("stop");
-      sendBtn.title = "Send";
-      updateSendEnabled();
-      hideWorkingIndicator();
-    }
+    if (s === "working" || s === "waiting-permission") showWorkingIndicator(s === "waiting-permission");
+    else hideWorkingIndicator();
+    updateSendEnabled(); // send ↔ queue ↔ un-queue
     updateTurnLocks();
+    const wasActive = prev === "working" || prev === "waiting-permission";
+    if (wasActive && !isTurnActive()) sendQueuedPrompt(s);
     // permission expiry: status moved away while one or more cards are still open
     // (host abandoned them — e.g. turn ended/errored). Expire every still-pending card.
     // Cards the user just answered are already removed from the set, so they're untouched.
@@ -1396,20 +1393,39 @@
     workingPhraseIdx = i;
     return WORKING_PHRASES[i];
   }
-  function showWorkingIndicator() {
-    if (workingEl && workingEl.parentNode) return; // already flying
-    workingEl = el("div", "working-indicator");
-    workingEl.appendChild(el("span", "rocket", "🚀"));
-    workingEl.appendChild(el("span", "wi-text", randomWorkingPhrase()));
-    workingEl.appendChild(el("span", "wi-dots"));
-    clearEmptyState();
-    const atBottom = isNearBottom();
-    transcriptInner.appendChild(workingEl);
-    if (atBottom) scrollToBottom();
+  // Shown for the whole turn — also while it waits for an approval/answer (`waiting`: the rocket rests, the
+  // line says so). Its stop button is the turn's stop: the send button stays free for queuing the next prompt.
+  function showWorkingIndicator(waiting) {
+    if (!workingEl || !workingEl.parentNode) {
+      workingEl = el("div", "working-indicator");
+      workingEl.appendChild(el("span", "rocket", "🚀"));
+      workingEl.appendChild(el("span", "wi-text", randomWorkingPhrase()));
+      workingEl.appendChild(el("span", "wi-dots"));
+      const stop = el("button", "wi-stop");
+      stop.type = "button";
+      stop.appendChild(svg('<rect x="6" y="6" width="12" height="12" rx="2"/>', { width: 10, height: 10, fill: "currentColor", stroke: "none" }));
+      stop.appendChild(el("span", null, "Stop"));
+      stop.addEventListener("click", requestStop);
+      workingEl.appendChild(stop);
+      clearEmptyState();
+      const atBottom = isNearBottom();
+      transcriptInner.appendChild(workingEl);
+      if (atBottom) scrollToBottom();
+    }
+    const wasWaiting = workingEl.classList.contains("waiting");
+    workingEl.classList.toggle("waiting", !!waiting);
+    const t = workingEl.querySelector(".wi-text");
+    if (waiting) t.textContent = "Waiting for your answer";
+    else if (wasWaiting) t.textContent = randomWorkingPhrase(); // back to work
+    updateStopTitle();
+  }
+  function updateStopTitle() {
+    const b = workingEl && workingEl.querySelector(".wi-stop");
+    if (b) b.title = state.queued ? "Stop the turn — the queued prompt is not sent and stays in the input" : "Stop the turn";
   }
   // swap the rocket's one-liner whenever new content lands in the transcript
   function refreshWorkingPhrase() {
-    if (!workingEl) return;
+    if (!workingEl || workingEl.classList.contains("waiting")) return;
     const t = workingEl.querySelector(".wi-text");
     if (t) t.textContent = randomWorkingPhrase();
   }
@@ -3970,12 +3986,17 @@
     // a turn is running while it works or waits for a permission decision (the CLI process is alive)
     return state.status === "working" || state.status === "waiting-permission";
   }
+  function hasPromptContent() {
+    // text OR an attachment — a screenshot alone is a valid prompt
+    return input.value.trim().length > 0 || state.attachments.length > 0;
+  }
   function canSend() {
     // A pending post-turn edit review no longer blocks the next prompt: the host keeps collecting the
     // changes of the following turns into the same list (cumulative against the first baseline).
-    // text OR an attachment — a screenshot alone is a valid prompt
-    return (input.value.trim().length > 0 || state.attachments.length > 0)
-      && !state.remoteActive && !isTurnActive();
+    return hasPromptContent() && !state.remoteActive && !isTurnActive();
+  }
+  function canQueue() {
+    return hasPromptContent() && !state.remoteActive && isTurnActive() && !state.queued;
   }
   // A pending post-turn edit review still blocks what would drop it (new chat, start remote control).
   function isBlocked() {
@@ -3993,9 +4014,65 @@
     if (historyPanelEl && openOverlay && openOverlay.el === historyPanelEl)
       post("session.listRequest", {});
   }
+  // The send button has three faces: Send (idle), Queue (a turn runs — the prompt waits for its end) and
+  // ✕ (a prompt is queued — click to take it back). Stop lives in the working indicator in the transcript.
   function updateSendEnabled() {
-    if (state.status === "working") { sendBtn.disabled = false; return; }
-    sendBtn.disabled = !canSend();
+    const active = isTurnActive();
+    sendBtn.classList.toggle("queue", active && !state.queued);
+    sendBtn.classList.toggle("unqueue", state.queued);
+    let title;
+    if (state.queued) {
+      sendBtn.disabled = false;
+      title = "Cancel the queued prompt — it stays in the input (Esc)";
+    } else if (active) {
+      sendBtn.disabled = !canQueue();
+      title = "Queue — sends as soon as Claude is done (Enter)";
+    } else {
+      sendBtn.disabled = !canSend();
+      title = "Send";
+    }
+    sendBtn.title = title;
+    sendBtn.setAttribute("aria-label", title);
+    updateStopTitle();
+    queueHint.hidden = !state.queued;
+  }
+
+  // ── Prompt queue: one prompt written during a turn, sent by itself when the turn ends ──
+  function setQueued(on) {
+    state.queued = !!on;
+    input.readOnly = state.queued; // the queued text is what will be sent — ✕ / Esc to edit it again
+    composer.classList.toggle("queued", state.queued);
+    updateSendEnabled();
+  }
+  function queuePrompt() {
+    if (!canQueue()) return;
+    closeSlashAutocomplete();
+    closeAtAutocomplete();
+    setQueued(true);
+  }
+  // Something else changes the composer (an attachment, text from the editor's context menu): the queued
+  // prompt is no longer the one the user armed — un-queue it, they queue again when it's ready.
+  function unqueueForEdit() {
+    if (state.queued) setQueued(false);
+  }
+  // The running turn ended (status left working/waiting-permission). A normal end sends the queued prompt;
+  // after Stop or an error it stays in the input — sending on would rarely be what the user wants then.
+  function sendQueuedPrompt(endState) {
+    const stopped = stopRequested;
+    stopRequested = false;
+    if (!state.queued) return;
+    setQueued(false);
+    if (stopped || endState === "error") {
+      showNotify({
+        level: stopped ? "info" : "warning",
+        message: (stopped ? "Stopped" : "The turn ended with an error")
+          + " — your queued prompt was not sent. It is still in the input.",
+        autoClose: 8000,
+      });
+      return;
+    }
+    // after the rest of this status update (finalized cards, locks) — then exactly like pressing Send
+    setTimeout(sendPrompt, 0);
   }
 
   function sendPrompt() {
@@ -4023,10 +4100,24 @@
     updateSendEnabled();
   }
 
+  // Enter / the send button: send, or queue while a turn runs
+  function submitComposer() {
+    if (state.queued) return;
+    if (isTurnActive()) queuePrompt();
+    else sendPrompt();
+  }
+
   sendBtn.addEventListener("click", () => {
-    if (state.status === "working") { post("turn.stop", {}); return; }
-    sendPrompt();
+    if (state.queued) { setQueued(false); input.focus(); return; }
+    submitComposer();
   });
+
+  // the working indicator's stop button
+  function requestStop() {
+    if (!isTurnActive()) return;
+    stopRequested = true;
+    post("turn.stop", {});
+  }
 
   input.addEventListener("input", () => {
     autoGrow();
@@ -4043,6 +4134,10 @@
       e.preventDefault();
       return;
     }
+    if (e.key === "Escape" && state.queued) {
+      setQueued(false); // take the queued prompt back — editable again
+      return;
+    }
     if (e.key === "Escape" && promptSuggestion && input.value === "") {
       setPromptSuggestion("");
       post("prompt.suggestionDismissed", {}); // the host forgets it too (else it returns after a restart)
@@ -4050,7 +4145,7 @@
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendPrompt();
+      submitComposer();
     }
   });
 
@@ -4144,6 +4239,7 @@
   // menu) to the composer, on its own line, then focus the composer with the caret at the end.
   function appendToComposer(text) {
     if (!text) return;
+    unqueueForEdit();
     const cur = input.value;
     const sep = cur.length && !cur.endsWith("\n") ? "\n" : "";
     input.value = cur + sep + text;
@@ -4166,6 +4262,7 @@
   // Attachments
   // -------------------------------------------------------------------------
   function addAttachment(name, path) {
+    unqueueForEdit();
     state.attachments.push({
       id: "att-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
       name,
@@ -5058,7 +5155,7 @@
 
   function runSlash(command) {
     post("slash.run", { command });
-    if (input.value.trim().startsWith("/")) { input.value = ""; autoGrow(); updateSendEnabled(); }
+    if (input.value.trim().startsWith("/")) { unqueueForEdit(); input.value = ""; autoGrow(); updateSendEnabled(); }
   }
 
   // -------------------------------------------------------------------------

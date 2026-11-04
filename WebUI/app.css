@@ -1576,10 +1576,27 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); }
 .send-btn:disabled { background: var(--text-faint); }
-.send-btn .ic-stop { display: none; }
-.send-btn.stop .ic-send { display: none; }
-.send-btn.stop .ic-stop { display: block; }
-.send-btn.stop { background: var(--accent); }
+/* three faces: send (idle) · queue (a turn runs) · ✕ (a prompt is queued — takes it back) */
+.send-btn .ic-queue,
+.send-btn .ic-unqueue { display: none; }
+.send-btn.queue .ic-send,
+.send-btn.unqueue .ic-send { display: none; }
+.send-btn.queue .ic-queue { display: block; }
+.send-btn.unqueue .ic-unqueue { display: block; }
+.send-btn.unqueue { background: var(--bg-elevated); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+.send-btn.unqueue:hover:not(:disabled) { background: var(--bg-elevated); color: var(--error); box-shadow: inset 0 0 0 1px var(--error); }
+
+/* queued: the text is what will be sent — read-only and dimmed until ✕ / Esc takes it back */
+.composer.queued .input { color: var(--text-dim); cursor: default; }
+.composer.queued .chip-x { display: none; }
+.queue-hint {
+  font-size: calc(11px * var(--fs));
+  color: var(--accent);
+  white-space: nowrap;
+  user-select: none;
+}
+.queue-hint[hidden] { display: none; }
+.composer.queued .newline-hint { display: none; }
 
 /* ===========================================================================
    Statusbar (~28px, darker)
@@ -2093,6 +2110,27 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
   75%  { content: "··"; }
   100% { content: "·"; }
 }
+/* the turn's stop button, right after the one-liner */
+.working-indicator .wi-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+  padding: 2px 9px 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: calc(11px * var(--fs));
+  line-height: 1.4;
+  cursor: pointer;
+}
+.working-indicator .wi-stop:hover { color: var(--error); border-color: var(--error); }
+.working-indicator .wi-stop:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* waiting for an approval/answer: the rocket rests, no dots */
+.working-indicator.waiting .rocket { animation: none; }
+.working-indicator.waiting .wi-dots { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .working-indicator { animation: none; }
   .working-indicator .rocket { animation: none; }
