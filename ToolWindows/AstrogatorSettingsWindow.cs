@@ -482,6 +482,7 @@ namespace CodeAstrogator.ToolWindows
                 ClaudeExecutablePath = _exePath.Text?.Trim() ?? "",
                 AutoApprovePatterns = patterns,
                 ThemeModeString = _current.ThemeModeString, // set in the gear popover only
+                LastSeenVersion = _current.LastSeenVersion, // set by the "What's new" popup only
                 VerbosityString = _current.VerbosityString,
                 RestoreLastSession = _restore.IsChecked == true,
                 PromptSuggestions = _promptSuggestions.IsChecked == true,

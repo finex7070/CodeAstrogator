@@ -106,7 +106,10 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
   (in-process MCP server for `--permission-prompt-tool`, Phase 1, see "Permission hook"),
   `CliSessionReader` (CLI session discovery + transcript import, see "Remote Control";
   remote control itself now lives in `Services/RemoteTerminalLauncher` — interactive console, see "Remote Control"),
-  `GitCheckpointService` (shadow-repo file checkpoints per turn + rewind, see "File checkpoints / rewind").
+  `GitCheckpointService` (shadow-repo file checkpoints per turn + rewind, see "File checkpoints / rewind"),
+  `CliCommandRunner` + `ClaudePluginClient` + `ClaudeMcpClient` + `SkillCatalog` + `ClaudeSettingsFiles`
+  (plugins/skills/MCP management, see "Plugins, skills & MCP panel"), `ToastContent` (notification texts).
+- `Bridge/ManagementPanel.cs` — host side of the plugins/skills/MCP panel (`manage.*`).
 - `Bridge/WebViewBridge.cs` — complete §3 message contract host-side, thread marshaling.
 - `Services/` — `ThemeService` (VS colors → CSS vars), `SessionHistoryStore`
   (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file),
@@ -346,7 +349,9 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
 4. Remote Control expansion (optional): worktree spawn mode (`--spawn worktree`),
    show remote sessions in the history already **during** the run.
    (Context window model-dependent instead of fixed 200k: done 2026-10-28, see `context.usage`.)
-5. **Multiple sessions as tabs** (up to 3 in one WebView, target 1.3.0) — draft plan in
+5. ~~**Plugin & skill management**~~ — **done in 1.3.0** (panel: installed / discover / skills / marketplaces, all through
+   `claude plugin …`, plus MCP servers via `claude mcp …`) — **next**; plan in `docs/plugins-skills-plan.md` (2026-11-06).
+6. **Multiple sessions as tabs** (up to 3 in one WebView) — after the plugin panel; draft plan in
    `docs/multi-session-tabs-plan.md` (2026-11-04), not started.
 
 Done (2026-06-03): `session.rename` + limits `resets_at` tooltips; theme fix
@@ -356,6 +361,17 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **`manage.*` — "Plugins, skills & MCP" panel (2026-11-10, read-only so far; see `docs/plugins-skills-plan.md`).**
+  web→host `manage.load { tab }` (`installed` | `discover` | `skills` | `mcp` | `marketplaces`) and
+  `manage.details { id }`; host→web `manage.plugins { installed }`, `manage.available { plugins, installedIds }`,
+  `manage.skills { skills, bundledDisabled, bundledScope, loadedKnown, hasWorkspace }`, `manage.mcp { servers }`
+  (env/header **names** only), `manage.marketplaces { list }`, `manage.details { id, details|null }`,
+  `manage.error { tab, message }`. Served by `Bridge/ManagementPanel` (unknown message types fall through the
+  bridge's switch to it). **Actions:** web→host `manage.action { requestId, action, … }` with `action` =
+  `plugin.install|enable|disable|update|uninstall`, `marketplace.add|update|remove`, `skill.state|bundled|create|delete`,
+  `mcp.addStdio|addRemote|remove|approve`; host→web `manage.actionResult { requestId, action, ok, message,
+  confirm?: { command, sha256 }, reload: [tabs], openPath? }` — `confirm` = the marketplace command a person must
+  see before it runs (re-sent with `acceptSha256`). Actions are serialized host-side.
 - **`context.usage` (host → web, 2026-10-28)** — `{ usage }`: the CLI's context breakdown after a turn
   (see "Context breakdown" under CLI integration). `usage` = `{ totalTokens, maxTokens, percentage,
   autoCompactThreshold, autoCompactEnabled, model, categories: [{ name, tokens, kind }], memoryFiles,
@@ -684,6 +700,54 @@ compact_boundary evaluation) — details in the respective sections below.
     rendering the latest (the last result = the real total). The refs are reset when a new turn
     starts (`applyStatus`, idle/error → working, not a mid-turn permission round-trip) and when the
     transcript is cleared, so a completed turn's footer stays put.
+
+## "What's new" popup (1.3.0, 2026-11-10)
+- **What:** the first time the panel runs on a newer version, a modal shows the CHANGELOG.md sections since the
+  last version the user saw (newest first, at most 5), "Full changelog ↗" (GitHub) + "Got it".
+- **Source = the shipped file, no network:** `CHANGELOG.md` is a VSIX content item next to the assembly;
+  `Core/ChangelogReader` parses `## [x.y.z] – date` sections (en dash or hyphen; `---`/other `## ` end a section)
+  and picks `lastSeen < v <= installed` (`System.Version`, numeric).
+- **State:** `AstrogatorOptions.LastSeenVersion` (WritableSettingsStore; the settings window carries it over
+  unchanged). Host `SendWhatsNew()` runs at the **end of `ready`** — after `session.init`, which may open the
+  first-run consent popup: the page then queues the popup until the consent's Save. Rules: installed ≤ last seen →
+  nothing; **no** recorded version + no consent decided yet = **fresh install** → only record it; no recorded
+  version but consent decided = upgrade from ≤ 1.2.1 → the current version's section; nothing to show → record.
+- **Contract:** host→web `whatsnew.show { version, entries: [{ version, date, markdown }] }`; web→host
+  `whatsnew.seen { version }` — sent **when shown** (shown = seen; it never repeats, even if VS closes with it open).
+- **Rendering:** `renderChangelog` in app.js — the chat's `renderMarkdown` has no `###` headings and flattens
+  nested lists, so the popup has its own small renderer for CHANGELOG's subset (headings, `- ` / `  - ` items,
+  indented continuation paragraphs; inline formatting through `renderInline`, which escapes).
+
+## Plugins, skills & MCP panel (1.3.0, 2026-11-10)
+Design rationale, the verified CLI facts and the phase log: **`docs/plugins-skills-plan.md`**. Current state:
+- **Entry:** gear popover → "Plugins, skills & MCP…" → `.manage-sheet` over the chat (own element in
+  `#overlay-layer`, *not* `openModalEl`: confirmation/form dialogs open above it; Esc closes a dialog first, the
+  sheet on the next Esc). Tabs Installed · Discover · Skills · MCP servers · Marketplaces, each loaded on first view.
+- **Layers:** `Core/CliCommandRunner` (hidden process, stdout/stderr **apart**, stdin, tree-kill) →
+  `Core/ClaudePluginClient` (`claude plugin … --json`; result = last stdout line) · `Core/ClaudeMcpClient` (config
+  from `~/.claude.json` / `.mcp.json`, status from `claude mcp list` text) · `Core/SkillCatalog` + `Core/ClaudeSettingsFiles`
+  (no CLI command for skills) → `Bridge/ManagementPanel` (`manage.*`, actions serialized) → WebUI.
+- **The only settings keys the extension writes itself:** `skillOverrides`, `disableBundledSkills` (skills) and
+  `enabledMcpjsonServers` / `disabledMcpjsonServers` (project MCP approval, local settings). Read right before
+  writing; an unreadable (invalid JSON) file is never overwritten. Everything else goes through the CLI.
+- **Pitfalls (all measured against CLI 2.1.319 — re-test on CLI updates):**
+  - `--json` failures print the human line on **stderr after** the JSON line → never merge the streams for parsing.
+  - "Already enabled/disabled" = `outcome:"failed"` + `alreadyInGoalState:true`, exit 0 → treat as success.
+  - Through a .NET pipe `mcp list` prints the **console fallback symbols** (`√ Connected`) → status by word.
+  - `plugin list` has scope **`synced`** (claude.ai) → read-only like `managed`.
+  - `plugin details` and `mcp list/get` are **text only**; `mcp get` prints header values in clear text (we never
+    call it; the panel shows names only).
+  - **`claude -p` turns load project `.mcp.json` servers without asking** (docs) → in VS only *Reject* changes
+    anything; *Approve* matters for the interactive CLI.
+  - `claude mcp login` needs an interactive terminal (paste of the redirect URL) → only a hint in the panel.
+  - Project/local scope commands act on the **working directory** → always pass the workspace as cwd.
+  - **`claude -p /cost` is NOT free** (went to the model, ~$0.19, 2026-11-10) — don't use it to probe `system/init`.
+  - **Sheet layout:** head, tab strip and footer are `flex: 0 0 auto`, only `.manage-body` scrolls (`flex: 1 1 0;
+    min-height: 0`). The tab strip's `overflow-x: auto` makes its flex minimum height 0 — with the real Discover
+    catalog the list squeezed the tabs away entirely (user report, fixed before release; the 5-row mock never
+    overflowed — test the sheet in a short window).
+- **Testing without touching the user's setup:** set `CLAUDE_CONFIG_DIR` to a temp folder (marketplaces, plugins,
+  `.claude.json` and settings all move there) and use a temp workspace; that is how phases 1 and 4 were verified.
 
 ## Stop button & prompt queue (2026-11-04)
 - **Pure web-side** (`app.js` "Prompt queue", `index.html` `.send-slot`, `app.css`) — no new host↔web message:
@@ -1415,6 +1479,11 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     not deprecated; drop it from the catalog once it is (≥ 60 days' notice). Left out on purpose: Sonnet 4.5
     (deprecated, retires 2026-11-30), Opus 4.5 (active, retirement not sooner than 2026-11-24), Mythos 5/5.1
     (Project Glasswing only).
+  - **2026-11-10 — Claude Fable 5.2** (`claude-fable-5-2`, retirement not sooner than 2027-11-09) added as the
+    newest fable; Fable 5.1 (now legacy, still active) moved behind Opus 5 into the older generations, right before
+    Fable 5. `claude-mythos-5-2` exists too — Project Glasswing only, not in the catalog. CLI 2.1.319 does **not**
+    know the ID yet (no `claude-fable-5-2` in its binary) ⇒ hidden by the probe, Fable 5.1 stays on top until a CLI
+    update. Everything else unchanged (all other entries still Active).
   - **Where the remote catalog comes from:** `noticeBranch` in `WebUI/config.js` is still `"master"`, but the
     repo only has `main` + `develope`. `raw.githubusercontent.com` serves `master` as the alias of the
     renamed default branch (`…/master/models.json` → 200, same content as `main`), so the fetch works — but

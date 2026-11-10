@@ -24,6 +24,10 @@ namespace CodeAstrogator.Core
         /// environment — bare names without the leading slash. Interactive-TUI-only
         /// commands (/help, /remote-control, …) are not in this list.</summary>
         public IReadOnlyList<string> SlashCommands { get; set; } = new string[0];
+
+        /// <summary>Names of the skills the session loaded (<c>system/init</c> → <c>skills</c>); the plugin
+        /// panel marks which skills on disk are really in use.</summary>
+        public IReadOnlyList<string> Skills { get; set; } = new string[0];
     }
 
     /// <summary>A new assistant message starts streaming (maps to assistant.start).</summary>

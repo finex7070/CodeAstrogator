@@ -85,6 +85,16 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void Init_CarriesSkillNames()
+        {
+            // CLI 2.1.319: "skills" is a plain string array; older CLIs have no field at all
+            var init = Assert.IsType<SessionInitEvent>(Assert.Single(new NdjsonParser().ParseLine(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"skills\":[\"release-notes\",\"commit-commands:commit\",\"\"]}")));
+            Assert.Equal(new[] { "release-notes", "commit-commands:commit" }, init.Skills);
+            Assert.Empty(ParseFixture("turn-success.ndjson").OfType<SessionInitEvent>().Single().Skills);
+        }
+
+        [Fact]
         public void Init_WithoutSlashCommands_YieldsEmptyList()
         {
             var init = ParseFixture("turn-success.ndjson").OfType<SessionInitEvent>().Single();

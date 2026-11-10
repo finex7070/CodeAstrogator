@@ -4,6 +4,22 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.3.0] – 2026-11-10
+
+### Added
+- **Manage plugins, skills and MCP servers without a terminal.** The gear menu has a new entry, **Plugins, skills & MCP…**, that opens a panel with five tabs:
+  - **Installed** lists your plugins with where they are switched on (for you, for this project, or only on this computer). Switch each one on or off, update it or remove it. Click one to see what it brings along (skills, agents, hooks, MCP servers) and how many tokens it adds to every session.
+  - **Discover** shows everything the marketplaces you have added offer, with a search box and the number of installs. Install a plugin for yourself, for the project or only on this computer. If a marketplace wants to run a command during the install, you see that command first and decide.
+  - **Skills** shows your own skills, the project's, those from plugins and the built-in ones. Set each one to on, name only, only via the `/` menu, or off, switch all built-in skills off at once, create a new skill (it opens in the editor) or delete one of your own. You also see which skills your last prompt actually loaded.
+  - **MCP servers** checks every server and shows whether it is connected, failed (with the reason), waiting for approval or needs a sign-in. Add a local server (a command) or a remote one (a URL), remove servers, and approve or reject the servers a project brings along. Secret values such as API keys are never shown, only their names.
+  - **Marketplaces** lists the marketplaces you have added; add, update and remove them.
+
+  Changes apply from your next prompt. Everything runs through the official Claude CLI, and the panel warns you before something affects the whole team (project scope) or runs code from a marketplace.
+- **See what's new after an update.** The first time the panel opens on a new version, a window shows the changelog of every version since the one you used before, like this entry. It comes from the extension itself, so it works offline. A fresh install skips it.
+
+### Changed
+- **Claude Fable 5.2 in the model picker.** It becomes the Fable entry as soon as your Claude Code CLI supports it (update the CLI if it doesn't show yet); Fable 5.1 moves to "More models".
+
 ## [1.2.1] – 2026-11-04
 
 ### Fixed

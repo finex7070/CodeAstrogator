@@ -146,6 +146,11 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   einen so geschriebenen Prompt aufnimmt — ein `result` davor gehört zum Folge-Turn, s. NOTES „Background tasks
   outlive the turn").
   Beim CLI-Update gegentesten.
+- **Plugins/Skills/MCP-Panel (1.3.0):** alles über `claude plugin … --json` bzw. `claude mcp …` (Text); selbst
+  geschrieben werden nur `skillOverrides`/`disableBundledSkills` und `enabled-`/`disabledMcpjsonServers` (s. NOTES
+  „Plugins, skills & MCP panel“). Ausgaben undokumentiert/Text → beim CLI-Update gegentesten. Testen **nur** mit
+  `CLAUDE_CONFIG_DIR` auf einem Temp-Ordner, nie gegen Jans echte Konfiguration. `claude -p /cost` ist **nicht**
+  kostenlos (geht ans Modell).
 - Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
   `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
   des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.

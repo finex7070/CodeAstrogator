@@ -36,8 +36,8 @@ decide what stays, and undo it when it goes wrong. That is what Code Astrogator 
 - **Continue on your phone.** Start Remote Control, scan the QR code, and continue the same chat from
   claude.ai or the Claude app. The panel updates live.
 - **Your setup, unchanged.** Runs the official Claude Code CLI with your subscription or API key. Your
-  CLAUDE.md, MCP servers, skills and permissions apply as usual. The extension never touches your
-  credentials.
+  CLAUDE.md, MCP servers, skills and permissions apply as usual, and plugins, skills and MCP servers can be
+  managed right in the panel. The extension never touches your credentials.
 
 ### Compared to Claude Code in a terminal
 
@@ -105,6 +105,16 @@ happens remotely shows up live in the panel.
   <img src="https://raw.githubusercontent.com/finex7070/CodeAstrogator/main/Screenshots/remote-control.png" alt="Remote Control bar with QR code and link above the live conversation" width="370" />
 </p>
 
+### Plugins, skills and MCP servers
+
+Gear → **Plugins, skills & MCP…**: install and switch plugins (and see the context each one costs), decide what
+each skill may do, and add, check or reject MCP servers, all through the official CLI.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/finex7070/CodeAstrogator/main/Screenshots/plugins-panel.png" alt="Plugins tab with an installed plugin's skills, context cost and Update/Remove buttons" width="370" />
+  <img src="https://raw.githubusercontent.com/finex7070/CodeAstrogator/main/Screenshots/mcp-servers.png" alt="MCP servers tab with connection status, Approve/Reject buttons and a failed server's reason" width="370" />
+</p>
+
 ### Model, effort and permission mode
 
 <p align="center">
@@ -165,6 +175,14 @@ happens remotely shows up live in the panel.
 - **Usage meters**: session and weekly limits with reset times and a plan badge.
 - **Turn footer**: duration, tokens and the cost of that turn.
 
+**Plugins, skills & MCP servers**
+- **One panel for what Claude Code loads** (gear → *Plugins, skills & MCP…*): **plugins** from your marketplaces
+  (install for you, the project or only this computer; switch on/off, update, remove; see what each brings and the
+  tokens it adds to every session), **skills** (on, name only, only via `/`, or off; create and delete your own),
+  **MCP servers** (live status with the failure reason; add local or remote servers; approve or reject a project's
+  servers) and **marketplaces**. API keys and other secret values are never shown. Everything runs through the
+  official CLI and applies from the next prompt.
+
 **Everything else**
 - **Model · Mode popover**: model (newest of each family first, older ones under "More models"),
   effort (Low … Max), ultracode and permission mode; your choices persist. New Claude models appear without
@@ -173,6 +191,10 @@ happens remotely shows up live in the panel.
   paste (a screenshot alone is a valid prompt; several attachments sit side by side), web browsing, the
   active editor file with the selected lines, and editor right-click → "Add file / selection to prompt".
 - **Session history** per workspace; conversations resume across VS restarts.
+- **Windows notifications** when a turn finishes or Claude needs you (an approval, a question, a plan) while
+  Visual Studio is in the background; a click brings that Visual Studio window and its chat back.
+- **Queue the next prompt** while Claude still works: it is sent as soon as the turn ends (✕ or Esc takes it
+  back into the input).
 - **Theming**: Dark / Light / Auto (follows VS), an accent color, syntax themes for code (Visual Studio, GitHub, Monokai, Solarized), the color of your own messages and how strongly messages are tinted, color-blind friendly diffs (blue/orange), three verbosity levels, and the font and size for the UI and for code separately (Cascadia Code, Roboto, Arial, Times New Roman, or your own font files).
 - **Automatic updates** (opt-in) from the GitHub releases, plus announcement banners.
 

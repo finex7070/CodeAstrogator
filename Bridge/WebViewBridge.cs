@@ -60,6 +60,7 @@ namespace CodeAstrogator.Bridge
         private const string TurnToastTag = "turn";
         private string? _turnResultText; // the main result's text, for the turn-end toast (stream thread)
         private string? _toastWorkspace; // the running turn's cwd (set in RunPrompt — GetSolutionDirectory is UI-thread only)
+        private readonly ManagementPanel _manage; // "Plugins, skills & MCP" panel (manage.* messages)
         // ── file checkpoints (rewind) ────────────────────────────────────────────
         // A snapshot of the work-tree is taken before each prompt and at the end of each turn, so
         // "what changed during Claude's turn" is a tree-to-tree diff (covers bash/scripts, not just
@@ -165,6 +166,7 @@ namespace CodeAstrogator.Bridge
             };
             try { _permission.Start(); } catch { /* leave unavailable */ }
             _session.PermissionBridge = _permission;
+            _manage = new ManagementPanel(_package, Post);
             _toasts = new WindowsToastNotifier(_package.ActivateChatWindow,
                 error => PostNotify("Windows notification could not be shown: " + error, "warning"));
             // Inline edit-review (opt-in): opens edited files with a red/green diff + per-hunk
@@ -286,6 +288,7 @@ namespace CodeAstrogator.Bridge
                     SendSlashCommands(); // re-send the CLI-reported list after a WebView reload
                     SendModelCatalog();  // which models the installed CLI accepts (async probe)
                     SendUpdateState();   // staged update → banner; just-applied update → note
+                    SendWhatsNew();      // after session.init: an open consent popup goes first, the page queues this behind it
                     if (_backgroundTaskList.Count > 0) // WebView reloaded while background tasks run
                         Post(new JObject { ["type"] = "background.tasks", ["tasks"] = _backgroundTaskList.DeepClone() });
                     RunAutoUpdateCheck(force: false);
@@ -505,6 +508,13 @@ namespace CodeAstrogator.Bridge
                     break;
                 case "editor.openFile":
                     HandleOpenFile(msg.Value<string>("path") ?? "");
+                    break;
+                case "whatsnew.seen":
+                    _package.GetOptions().LastSeenVersion = msg.Value<string>("version") ?? GetInstalledVersion();
+                    _package.SaveOptions();
+                    break;
+                default:
+                    _manage.Handle(msg); // "Plugins, skills & MCP" panel (manage.*)
                     break;
             }
         }
@@ -3099,6 +3109,7 @@ namespace CodeAstrogator.Bridge
                         _slashCommands = new JArray(init.SlashCommands);
                         SendSlashCommands();
                     }
+                    _manage.SetLoadedSkills(init.Skills);
                     if (!_sessionStartAnnounced) // decision #9
                     {
                         _sessionStartAnnounced = true;
@@ -4493,6 +4504,60 @@ namespace CodeAstrogator.Bridge
                 ["updateEnabled"] = options.UpdateCheckEnabled,
                 ["updateDecided"] = options.UpdateCheckDecided,
                 ["appVersion"] = GetInstalledVersion(),
+            });
+        }
+
+        /// <summary>
+        /// "What's new": the first time the panel runs on a newer version, the page shows the CHANGELOG.md sections
+        /// since the last version the user saw (the file ships in the VSIX — no network). A fresh install only
+        /// records the version (its first run brings the consent popup anyway); an existing install without a
+        /// recorded version (upgraded from ≤ 1.2.1) sees the current version's notes. The page answers
+        /// <c>whatsnew.seen</c> when the popup is closed; until then it comes back on the next start.
+        /// </summary>
+        private void SendWhatsNew()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var options = _package.GetOptions();
+            var current = GetInstalledVersion();
+            var last = string.IsNullOrWhiteSpace(options.LastSeenVersion) ? null : options.LastSeenVersion;
+            if (!ChangelogReader.IsNewer(current, last))
+                return;
+            if (last == null && !(options.NoticeFetchDecided || options.UpdateCheckDecided || options.CheckpointsDecided
+                                  || options.ModelCatalogFetchDecided || options.AutoUpdateDecided))
+            {
+                options.LastSeenVersion = current; // fresh install: nothing "new" to tell yet
+                _package.SaveOptions();
+                return;
+            }
+            IReadOnlyList<ChangelogEntry> entries;
+            try
+            {
+                var dir = System.IO.Path.GetDirectoryName(typeof(WebViewBridge).Assembly.Location) ?? "";
+                var file = System.IO.Path.Combine(dir, "CHANGELOG.md");
+                entries = System.IO.File.Exists(file)
+                    ? ChangelogReader.Since(ChangelogReader.Parse(System.IO.File.ReadAllText(file)), last, current)
+                    : Array.Empty<ChangelogEntry>();
+            }
+            catch
+            {
+                entries = Array.Empty<ChangelogEntry>();
+            }
+            if (entries.Count == 0)
+            {
+                options.LastSeenVersion = current; // nothing to show for this version
+                _package.SaveOptions();
+                return;
+            }
+            Post(new JObject
+            {
+                ["type"] = "whatsnew.show",
+                ["version"] = current,
+                ["entries"] = new JArray(entries.Select(e => new JObject
+                {
+                    ["version"] = e.Version,
+                    ["date"] = e.Date,
+                    ["markdown"] = e.Markdown,
+                })),
             });
         }
 

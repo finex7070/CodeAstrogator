@@ -67,6 +67,7 @@ namespace CodeAstrogator.Services
                 AutoUpdateDecided = GetBool(nameof(AstrogatorOptions.AutoUpdateDecided), d.AutoUpdateDecided),
                 PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(
                     GetInt(nameof(AstrogatorOptions.PromptTimeoutMinutes), d.PromptTimeoutMinutes)),
+                LastSeenVersion = GetString(nameof(AstrogatorOptions.LastSeenVersion), d.LastSeenVersion),
                 RestoreLastSession = GetBool(nameof(AstrogatorOptions.RestoreLastSession), d.RestoreLastSession),
                 PromptSuggestions = GetBool(nameof(AstrogatorOptions.PromptSuggestions), d.PromptSuggestions),
                 ToastNotifications = GetBool(nameof(AstrogatorOptions.ToastNotifications), d.ToastNotifications),
@@ -133,6 +134,7 @@ namespace CodeAstrogator.Services
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.UpdateCheckDecided), o.UpdateCheckDecided);
             _store.SetInt32(Collection, nameof(AstrogatorOptions.PromptTimeoutMinutes),
                 AstrogatorOptions.ClampPromptTimeoutMinutes(o.PromptTimeoutMinutes));
+            _store.SetString(Collection, nameof(AstrogatorOptions.LastSeenVersion), o.LastSeenVersion ?? "");
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.RestoreLastSession), o.RestoreLastSession);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.PromptSuggestions), o.PromptSuggestions);
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ToastNotifications), o.ToastNotifications);
