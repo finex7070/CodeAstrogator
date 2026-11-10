@@ -356,6 +356,7 @@ namespace CodeAstrogator
             to.AutoUpdateEnabled = from.AutoUpdateEnabled;
             to.AutoUpdateDecided = from.AutoUpdateDecided;
             to.PromptTimeoutMinutes = AstrogatorOptions.ClampPromptTimeoutMinutes(from.PromptTimeoutMinutes);
+            to.LastSeenVersion = from.LastSeenVersion ?? "";
             to.RestoreLastSession = from.RestoreLastSession;
             to.PromptSuggestions = from.PromptSuggestions;
             to.ToastNotifications = from.ToastNotifications;

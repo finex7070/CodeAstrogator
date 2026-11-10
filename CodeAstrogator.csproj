@@ -57,6 +57,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
+    <!-- Read by the "What's new" popup on the first start of a new version (offline, no GitHub request). -->
+    <Content Include="CHANGELOG.md">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
   </ItemGroup>
   <ItemGroup>
     <!-- Extension logo (Resources\codeastrogator.png is the 256px full-body master; icon-90/preview-200

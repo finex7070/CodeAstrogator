@@ -589,6 +589,7 @@
       if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
       if (noticeEnabled) loadNotice();
       if (updateEnabled) loadUpdate();
+      showPendingWhatsNew(); // a "What's new" that arrived while this popup was open
     });
     actions.appendChild(save);
     modal.appendChild(actions);
@@ -596,6 +597,88 @@
     backdrop.appendChild(modal);
     overlayLayer.appendChild(backdrop);
     save.focus();
+  }
+
+  // ── "What's new" — the first start on a new version (host: whatsnew.show, sections of the shipped CHANGELOG.md) ──
+  let pendingWhatsNew = null;
+
+  function onWhatsNew(m) {
+    if (!m || !(m.entries || []).length) return;
+    pendingWhatsNew = m;
+    // the first-run consent popup goes first; its Save shows this right after
+    if (overlayLayer && overlayLayer.querySelector('[aria-label="Getting started"]')) return;
+    showPendingWhatsNew();
+  }
+
+  function showPendingWhatsNew() {
+    const m = pendingWhatsNew;
+    if (!m || !overlayLayer) return;
+    pendingWhatsNew = null;
+    closeAllOverlays();
+    const backdrop = el("div", "modal-backdrop");
+    const modal = el("div", "modal whatsnew");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-label", "What's new");
+    modal.appendChild(el("div", "modal-title", "What's new in Code Astrogator " + (m.version || "")));
+    const body = el("div", "whatsnew-body md");
+    m.entries.forEach((e) => {
+      body.appendChild(el("div", "whatsnew-version", e.version + (e.date ? " · " + e.date : "")));
+      body.appendChild(renderChangelog(e.markdown || ""));
+    });
+    modal.appendChild(body);
+    const actions = el("div", "modal-actions");
+    const full = el("button", "modal-btn", "Full changelog ↗");
+    full.addEventListener("click", () => window.open("https://github.com/finex7070/CodeAstrogator/blob/main/CHANGELOG.md", "_blank", "noopener"));
+    const close = el("button", "modal-btn primary", "Got it");
+    close.addEventListener("click", closeModal);
+    actions.appendChild(full);
+    actions.appendChild(close);
+    modal.appendChild(actions);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("mousedown", (ev) => { if (ev.target === backdrop) closeModal(); });
+    overlayLayer.appendChild(backdrop);
+    openModalEl = backdrop;
+    close.focus();
+    post("whatsnew.seen", { version: m.version }); // shown = seen; it does not come back on the next start
+  }
+
+  /** CHANGELOG.md's subset — "### " headings, "- " items with "  - " sub-items, indented continuation lines,
+      paragraphs — which the chat renderer flattens. Inline formatting via renderInline (escapes the text). */
+  function renderChangelog(md) {
+    const frag = document.createDocumentFragment();
+    let list = null, sub = null, lastItem = null, para = null;
+    const html = (node, text) => { node.innerHTML = (node.innerHTML ? node.innerHTML + " " : "") + renderInline(text); };
+    const endBlocks = () => { list = null; sub = null; lastItem = null; para = null; };
+    String(md || "").split(/\r?\n/).forEach((line) => {
+      const h = /^###\s+(.*)$/.exec(line);
+      const item = /^(\s*)[-*]\s+(.*)$/.exec(line);
+      if (h) { endBlocks(); frag.appendChild(el("h3", null, h[1])); return; }
+      if (!line.trim()) { para = null; return; }
+      if (item) {
+        para = null;
+        const li = document.createElement("li");
+        html(li, item[2]);
+        if (item[1].length >= 2 && lastItem) {
+          if (!sub) { sub = document.createElement("ul"); lastItem.appendChild(sub); }
+          sub.appendChild(li);
+        } else {
+          if (!list) { list = document.createElement("ul"); frag.appendChild(list); }
+          sub = null;
+          list.appendChild(li);
+          lastItem = li;
+        }
+        return;
+      }
+      if (/^\s{2,}\S/.test(line) && lastItem && list) {
+        // an indented line after the items: continues the item, or a new paragraph inside it after a blank
+        if (para === null && sub) { para = document.createElement("p"); lastItem.appendChild(para); html(para, line.trim()); return; }
+        html(sub ? sub.lastChild : lastItem, line.trim());
+        return;
+      }
+      if (!para) { endBlocks(); para = document.createElement("p"); frag.appendChild(para); }
+      html(para, line.trim());
+    });
+    return frag;
   }
 
   // A labelled checkbox row for the consent popup; returns { row, input }.
@@ -705,6 +788,16 @@
       case "rewind.note": return appendNode(buildRewindNote(m.text || "", m.files || []));
       case "error": return errorMessage(m.message);
       case "notify": return showNotify(m);
+      case "whatsnew.show": return onWhatsNew(m);
+      case "manage.plugins":
+      case "manage.available":
+      case "manage.skills":
+      case "manage.mcp":
+      case "manage.marketplaces":
+      case "manage.details":
+      case "manage.error":
+      case "manage.actionResult":
+        return onManageMessage(m);
     }
   }
 
@@ -4153,7 +4246,10 @@
   // focus" shortcut, but Ctrl+Esc is reserved by Windows for the Start menu, so it was removed.)
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      // a popover/modal above the plugins panel closes first; the next Esc closes the panel
+      const hadOverlay = !!openOverlay || !!openModalEl;
       closeAllOverlays();
+      if (!hadOverlay) closeManagePanel();
     }
   });
 
@@ -4876,6 +4972,787 @@
   });
 
   // -------------------------------------------------------------------------
+  // "Plugins, skills & MCP" panel — a sheet over the chat (docs/plugins-skills-plan.md, phase 3: read-only).
+  // Data comes from the host (manage.load → manage.plugins/available/skills/mcp/marketplaces); every tab is
+  // loaded on first view and on ↻. Esc / ✕ closes it.
+  // -------------------------------------------------------------------------
+  const MANAGE_TABS = [
+    ["installed", "Installed"],
+    ["discover", "Discover"],
+    ["skills", "Skills"],
+    ["mcp", "MCP servers"],
+    ["marketplaces", "Marketplaces"],
+  ];
+  const DISCOVER_PAGE = 60;
+  let manageEl = null;
+  const manage = {
+    tab: "installed",
+    data: {},        // tab → payload of its manage.* answer
+    loading: {},     // tab → true while a load runs
+    errors: {},      // tab → message
+    details: {},     // plugin id → details | "loading" | null (none)
+    expanded: new Set(),
+    search: "",
+    market: "",
+    limit: DISCOVER_PAGE,
+  };
+
+  function openManagePanel(tab) {
+    closeAllOverlays();
+    closeManagePanel();
+    manage.tab = tab || manage.tab;
+    manage.data = {}; manage.errors = {}; manage.details = {}; manage.expanded = new Set();
+    manage.limit = DISCOVER_PAGE;
+    const sheet = el("div", "manage-sheet");
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-label", "Plugins, skills & MCP");
+    overlayLayer.appendChild(sheet);
+    manageEl = sheet;
+    renderManage();
+    loadManageTab(manage.tab);
+  }
+
+  function closeManagePanel() {
+    if (manageEl) { manageEl.remove(); manageEl = null; }
+  }
+
+  function loadManageTab(tab, force) {
+    if (!force && (manage.data[tab] || manage.loading[tab])) return;
+    manage.loading[tab] = true;
+    delete manage.errors[tab];
+    post("manage.load", { tab });
+    renderManage();
+  }
+
+  // ── actions (phase 4): one request per click, the row shows "busy" until manage.actionResult ──
+  let manageReq = 0;
+  const manageBusy = {};    // row key → true while its action runs
+  const managePending = {}; // requestId → { action, payload, key, label }
+
+  function manageAction(action, payload, key, label) {
+    const requestId = "m" + (++manageReq);
+    managePending[requestId] = { action, payload, key, label };
+    if (key) manageBusy[key] = true;
+    post("manage.action", Object.assign({ requestId, action }, payload));
+    renderManage();
+  }
+
+  function onManageActionResult(m) {
+    const p = managePending[m.requestId] || {};
+    delete managePending[m.requestId];
+    if (p.key) delete manageBusy[p.key];
+    if (m.confirm && m.confirm.sha256) {
+      // the marketplace wants to run a command for this plugin — a person has to see it first
+      openConfirmModal({
+        title: "Run this command?",
+        message: "The marketplace runs this command to " + (p.action === "plugin.update" ? "update" : "install")
+          + " the plugin. It runs on this computer with your rights:\n\n" + (m.confirm.command || "(the CLI did not show the command)")
+          + "\n\nOnly continue if you trust this marketplace.",
+        confirmLabel: "Run and continue",
+        danger: true,
+        onConfirm: () => manageAction(p.action, Object.assign({}, p.payload, { acceptSha256: m.confirm.sha256 }), p.key, p.label),
+      });
+    } else if (!m.ok) {
+      showNotify({ level: "error", message: (p.label ? p.label + ": " : "") + (m.message || "The Claude CLI reported an error.") });
+    } else if (m.message && p.action !== "skill.state" && p.action !== "skill.bundled") {
+      // the CLI prints progress too ("Cloning…", a headers block) — the line that says what happened is enough
+      const lines = String(m.message).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const line = lines.find((l) => /^(Successfully|Added|Removed|Updated|Created|Deleted)\b/.test(l)) || lines[lines.length - 1];
+      showNotify({ level: "info", message: line, autoClose: 5000 });
+    }
+    if (m.openPath) post("editor.openFile", { path: m.openPath });
+    (m.reload || []).forEach((tab) => {
+      if (tab === "installed") manage.details = {};
+      delete manage.data[tab];
+      if (manageEl && manage.tab === tab) loadManageTab(tab, true);
+    });
+    if (manageEl) renderManage();
+  }
+
+  /** A small form in a modal: fields = [{ key, label, type: text|textarea|select|password, options, value,
+      placeholder, hint }]. onSubmit(values) returns an error text (shown, the modal stays) or nothing. */
+  function openFormModal(opts) {
+    closeAllOverlays();
+    const backdrop = el("div", "modal-backdrop");
+    const modal = el("div", "modal manage-form");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-label", opts.title);
+    modal.appendChild(el("div", "modal-title", opts.title));
+    if (opts.intro) modal.appendChild(el("div", "modal-body", opts.intro));
+    const inputs = {};
+    const shown = {};
+    (opts.fields || []).forEach((f) => {
+      const wrap = el("label", "manage-field");
+      wrap.appendChild(el("span", "manage-field-label", f.label));
+      let input;
+      if (f.type === "select") {
+        input = document.createElement("select");
+        f.options.forEach(([v, l]) => {
+          const o = document.createElement("option");
+          o.value = v; o.textContent = l;
+          if (v === f.value) o.selected = true;
+          input.appendChild(o);
+        });
+      } else if (f.type === "textarea") {
+        input = document.createElement("textarea");
+        input.rows = f.rows || 3;
+      } else {
+        input = document.createElement("input");
+        input.type = f.type === "password" ? "password" : "text";
+      }
+      input.className = "modal-input";
+      if (f.type !== "select") input.value = f.value || "";
+      if (f.placeholder) input.placeholder = f.placeholder;
+      input.spellcheck = false;
+      wrap.appendChild(input);
+      if (f.hint) wrap.appendChild(el("span", "manage-field-hint", f.hint));
+      inputs[f.key] = input;
+      shown[f.key] = wrap;
+      modal.appendChild(wrap);
+    });
+    const error = el("div", "manage-form-error");
+    error.hidden = true;
+    if (opts.warning) modal.appendChild(el("div", "manage-warning", opts.warning));
+    modal.appendChild(error);
+    const actions = el("div", "modal-actions");
+    const cancel = el("button", "modal-btn", "Cancel");
+    const ok = el("button", "modal-btn primary", opts.confirmLabel || "OK");
+    const values = () => Object.fromEntries(Object.keys(inputs).map((k) => [k, inputs[k].value]));
+    const submit = () => {
+      const err = opts.onSubmit ? opts.onSubmit(values()) : null;
+      if (err) { error.textContent = err; error.hidden = false; return; }
+      closeModal();
+    };
+    cancel.addEventListener("click", closeModal);
+    ok.addEventListener("click", submit);
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    modal.appendChild(actions);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeModal(); });
+    modal.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeModal(); }
+      if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); submit(); }
+    });
+    // fields that only apply to some choices (e.g. command vs. URL)
+    const refresh = () => (opts.fields || []).forEach((f) => { if (f.showIf) shown[f.key].hidden = !f.showIf(values()); });
+    Object.values(inputs).forEach((i) => i.addEventListener("change", refresh));
+    refresh();
+    overlayLayer.appendChild(backdrop);
+    openModalEl = backdrop;
+    const first = modal.querySelector("input, textarea, select");
+    if (first) first.focus();
+  }
+
+  /** "a b 'c d' \"e f\"" → ["a", "b", "c d", "e f"] — how the user writes a command line. */
+  function splitArgs(text) {
+    const out = [];
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let m;
+    while ((m = re.exec(text || ""))) out.push(m[1] != null ? m[1] : m[2] != null ? m[2] : m[3]);
+    return out;
+  }
+
+  /** "KEY=value" lines (env) or "Name: value" lines (headers) → object; null + the bad line on an error. */
+  function parsePairs(text, sep) {
+    const result = {};
+    for (const raw of (text || "").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line) continue;
+      const i = line.indexOf(sep);
+      if (i <= 0) return { error: line };
+      result[line.slice(0, i).trim()] = line.slice(i + sep.length).trim();
+    }
+    return { result };
+  }
+
+  const SCOPE_CHOICES = [
+    ["user", "All my projects (user)"],
+    ["project", "This project, shared with the team (project)"],
+    ["local", "This project, only on this computer (local)"],
+  ];
+  const PROJECT_SCOPE_WARNING = "\"project\" writes into the workspace's .claude/settings.json, which is usually committed — everyone who works on the repository gets it.";
+
+  function onManageMessage(m) {
+    const tabOf = { "manage.plugins": "installed", "manage.available": "discover", "manage.skills": "skills",
+      "manage.mcp": "mcp", "manage.marketplaces": "marketplaces" };
+    if (m.type === "manage.actionResult") return onManageActionResult(m);
+    if (m.type === "manage.details") {
+      manage.details[m.id] = m.details || null;
+    } else if (m.type === "manage.error") {
+      manage.loading[m.tab] = false;
+      manage.errors[m.tab] = m.message || "Something went wrong.";
+    } else if (tabOf[m.type]) {
+      manage.loading[tabOf[m.type]] = false;
+      manage.data[tabOf[m.type]] = m;
+    }
+    if (manageEl) renderManage();
+  }
+
+  function renderManage() {
+    if (!manageEl) return;
+    const keepScroll = manageEl.querySelector(".manage-body");
+    const scrollTop = keepScroll ? keepScroll.scrollTop : 0;
+    const searchFocused = document.activeElement && document.activeElement.classList.contains("manage-search");
+    manageEl.innerHTML = "";
+
+    const head = el("div", "manage-head");
+    head.appendChild(el("div", "manage-title", "Plugins, skills & MCP"));
+    const reload = el("button", "icon-btn small manage-reload");
+    reload.title = "Reload this list";
+    reload.setAttribute("aria-label", "Reload");
+    reload.appendChild(svg('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>', { width: 15, height: 15 }));
+    reload.addEventListener("click", () => {
+      if (manage.tab === "installed") manage.details = {};
+      loadManageTab(manage.tab, true);
+    });
+    head.appendChild(reload);
+    const close = el("button", "icon-btn small");
+    close.title = "Close (Esc)";
+    close.setAttribute("aria-label", "Close");
+    close.appendChild(svg('<path d="M6 6l12 12M18 6L6 18"/>', { width: 15, height: 15, "stroke-width": 2 }));
+    close.addEventListener("click", closeManagePanel);
+    head.appendChild(close);
+    manageEl.appendChild(head);
+
+    const tabs = el("div", "manage-tabs");
+    tabs.setAttribute("role", "tablist");
+    MANAGE_TABS.forEach(([id, label]) => {
+      const b = el("button", "manage-tab" + (manage.tab === id ? " active" : ""), label);
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", manage.tab === id ? "true" : "false");
+      b.addEventListener("click", () => {
+        manage.tab = id;
+        renderManage();
+        loadManageTab(id);
+      });
+      tabs.appendChild(b);
+    });
+    manageEl.appendChild(tabs);
+
+    const body = el("div", "manage-body");
+    const tab = manage.tab;
+    if (manage.errors[tab]) {
+      body.appendChild(el("div", "manage-error", manage.errors[tab]));
+    } else if (!manage.data[tab]) {
+      body.appendChild(el("div", "manage-empty",
+        tab === "mcp" ? "Checking MCP servers… (each one is started briefly)"
+          : tab === "discover" ? "Loading the marketplace catalog…" : "Loading…"));
+    } else {
+      ({ installed: renderManageInstalled, discover: renderManageDiscover, skills: renderManageSkills,
+         mcp: renderManageMcp, marketplaces: renderManageMarketplaces })[tab](body, manage.data[tab]);
+    }
+    manageEl.appendChild(body);
+    manageEl.appendChild(el("div", "manage-foot",
+      "Changes apply from the next prompt. Everything here runs through the official Claude CLI."));
+    body.scrollTop = scrollTop;
+    if (searchFocused) {
+      const s = manageEl.querySelector(".manage-search");
+      if (s) { s.focus(); s.selectionStart = s.selectionEnd = s.value.length; }
+    }
+  }
+
+  function manageBadge(text, kind, title) {
+    const b = el("span", "manage-badge" + (kind ? " " + kind : ""), text);
+    if (title) b.title = title;
+    return b;
+  }
+
+  const SCOPE_HINTS = {
+    user: "Your settings — every project",
+    project: "This project's .claude/settings.json — usually committed and shared with the team",
+    local: "This project, only on this machine (.claude/settings.local.json)",
+    managed: "Set by your organization",
+    synced: "Synced from claude.ai — managed there",
+  };
+
+  function renderManageInstalled(body, data) {
+    const list = data.installed || [];
+    if (!list.length) { body.appendChild(el("div", "manage-empty", "No plugins installed. Find some under Discover.")); return; }
+    list.forEach((p) => {
+      const row = el("div", "manage-row" + (p.enabled ? "" : " off"));
+      const top = el("div", "manage-row-top manage-clickable");
+      const chev = el("span", "manage-chev" + (manage.expanded.has(p.id) ? " open" : ""), "›");
+      top.appendChild(chev);
+      top.appendChild(el("span", "manage-name", p.name));
+      if (p.version) top.appendChild(manageBadge(String(p.version).length > 12 ? String(p.version).slice(0, 7) : p.version, "muted", p.version));
+      top.appendChild(el("span", "manage-sub", p.marketplace));
+      const right = el("span", "manage-right");
+      right.appendChild(manageBadge(p.scope, "scope", SCOPE_HINTS[p.scope] || ""));
+      const key = "plugin:" + p.id;
+      if (manageBusy[key]) right.appendChild(manageBadge("Working…", "muted"));
+      else if (pluginManaged(p)) right.appendChild(manageBadge(p.enabled ? "On" : "Off", p.enabled ? "on" : "offb", SCOPE_HINTS[p.scope]));
+      else right.appendChild(manageSwitch(p.enabled, (p.enabled ? "Switch off" : "Switch on") + " (" + p.scope + " settings)", () =>
+        manageAction(p.enabled ? "plugin.disable" : "plugin.enable", { id: p.id, scope: p.scope }, key, p.name)));
+      top.appendChild(right);
+      top.addEventListener("click", () => {
+        if (manage.expanded.has(p.id)) manage.expanded.delete(p.id);
+        else {
+          manage.expanded.add(p.id);
+          if (!(p.id in manage.details)) { manage.details[p.id] = "loading"; post("manage.details", { id: p.id }); }
+        }
+        renderManage();
+      });
+      row.appendChild(top);
+      (p.errors || []).forEach((e) => row.appendChild(el("div", "manage-row-error", e)));
+      if (manage.expanded.has(p.id)) row.appendChild(buildPluginDetails(p, manage.details[p.id]));
+      body.appendChild(row);
+    });
+  }
+
+  function buildPluginDetails(p, d) {
+    const box = el("div", "manage-details");
+    if (d === "loading") { box.appendChild(el("div", "manage-dim", "Loading details…")); return box; }
+    if (!d) { box.appendChild(el("div", "manage-dim", "No details available.")); return box; }
+    if (d.description) box.appendChild(el("div", "manage-desc", d.description));
+    if (d.alwaysOnTokens != null) {
+      const cost = el("div", "manage-cost");
+      cost.appendChild(el("span", "manage-cost-num", "~" + formatTokensShort(d.alwaysOnTokens)));
+      cost.appendChild(el("span", "manage-dim", " tokens added to every session"));
+      box.appendChild(cost);
+    }
+    const inv = d.inventory || {};
+    Object.keys(inv).forEach((kind) => {
+      const names = inv[kind] || [];
+      if (!names.length) return;
+      const line = el("div", "manage-inv");
+      line.appendChild(el("span", "manage-inv-kind", kind + " (" + names.length + ")"));
+      line.appendChild(el("span", "manage-inv-items", names.join(", ")));
+      box.appendChild(line);
+    });
+    const meta = [];
+    if (p.installedAt) meta.push("installed " + relativeTime(p.installedAt));
+    if (p.lastUpdated && p.lastUpdated !== p.installedAt) meta.push("updated " + relativeTime(p.lastUpdated));
+    if (p.projectPath) meta.push(p.projectPath);
+    if (meta.length) box.appendChild(el("div", "manage-dim", meta.join(" · ")));
+    if (!Object.keys(inv).length && d.raw) box.appendChild(el("pre", "manage-raw", d.raw)); // parsing found nothing — show the CLI's text
+    if (!pluginManaged(p)) box.appendChild(pluginActions(p));
+    return box;
+  }
+
+  /** Synced (claude.ai) and managed (organization) plugins are shown, not changed here. */
+  function pluginManaged(p) {
+    return p.scope === "synced" || p.scope === "managed";
+  }
+
+  function pluginActions(p) {
+    const bar = el("div", "manage-actions");
+    const key = "plugin:" + p.id;
+    const update = el("button", "modal-btn", "Update");
+    update.disabled = !!manageBusy[key];
+    update.addEventListener("click", (e) => {
+      e.stopPropagation();
+      manageAction("plugin.update", { id: p.id, scope: p.scope }, key, p.name);
+    });
+    const remove = el("button", "modal-btn danger", "Remove…");
+    remove.disabled = !!manageBusy[key];
+    remove.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openFormModal({
+        title: "Remove " + p.name,
+        intro: "Uninstalls the plugin from the " + p.scope + " settings. Its skills, hooks and MCP servers are gone from the next prompt on.",
+        fields: [{ key: "data", label: "Saved data of the plugin", type: "select", value: "delete",
+          options: [["delete", "Delete it"], ["keep", "Keep it (for a reinstall)"]] }],
+        confirmLabel: "Remove",
+        onSubmit: (v) => { manageAction("plugin.uninstall", { id: p.id, scope: p.scope, keepData: v.data === "keep" }, key, p.name); },
+      });
+    });
+    bar.appendChild(update);
+    bar.appendChild(remove);
+    return bar;
+  }
+
+  /** An on/off switch; the click runs `onToggle`. */
+  function manageSwitch(on, title, onToggle) {
+    const b = el("button", "manage-switch" + (on ? " on" : ""));
+    b.setAttribute("role", "switch");
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.title = title;
+    b.appendChild(el("span", "manage-switch-knob"));
+    b.addEventListener("click", (e) => { e.stopPropagation(); onToggle(); });
+    return b;
+  }
+
+  function renderManageDiscover(body, data) {
+    const all = data.plugins || [];
+    const installed = new Set(data.installedIds || []);
+    const bar = el("div", "manage-filter");
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "manage-search";
+    search.placeholder = "Search " + all.length.toLocaleString() + " plugins…";
+    search.value = manage.search;
+    search.addEventListener("input", () => { manage.search = search.value; manage.limit = DISCOVER_PAGE; renderManage(); });
+    bar.appendChild(search);
+    const markets = Array.from(new Set(all.map((p) => p.marketplace).filter(Boolean))).sort();
+    const sel = document.createElement("select");
+    sel.className = "manage-select";
+    [["", "All marketplaces"]].concat(markets.map((m) => [m, m])).forEach(([v, l]) => {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = l;
+      if (v === manage.market) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", () => { manage.market = sel.value; manage.limit = DISCOVER_PAGE; renderManage(); });
+    bar.appendChild(sel);
+    body.appendChild(bar);
+
+    const q = manage.search.trim().toLowerCase();
+    const hits = all
+      .filter((p) => !manage.market || p.marketplace === manage.market)
+      .filter((p) => !q || (p.name || "").toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q))
+      .sort((a, b) => (b.installCount || 0) - (a.installCount || 0));
+    if (!hits.length) { body.appendChild(el("div", "manage-empty", "Nothing matches.")); return; }
+    hits.slice(0, manage.limit).forEach((p) => {
+      const row = el("div", "manage-row");
+      const top = el("div", "manage-row-top");
+      top.appendChild(el("span", "manage-name", p.name));
+      top.appendChild(el("span", "manage-sub", p.marketplace));
+      const right = el("span", "manage-right");
+      if (p.installCount) right.appendChild(manageBadge(formatCount(p.installCount) + " installs", "muted"));
+      const key = "install:" + p.id;
+      if (installed.has(p.id)) right.appendChild(manageBadge("Installed", "on"));
+      else if (manageBusy[key]) right.appendChild(manageBadge("Installing…", "muted"));
+      else {
+        const inst = el("button", "modal-btn manage-small", "Install…");
+        inst.addEventListener("click", () => openInstallDialog(p, key));
+        right.appendChild(inst);
+      }
+      top.appendChild(right);
+      row.appendChild(top);
+      if (p.description) row.appendChild(el("div", "manage-desc clamp", p.description));
+      body.appendChild(row);
+    });
+    if (hits.length > manage.limit) {
+      const more = el("button", "modal-btn manage-more", "Show more (" + (hits.length - manage.limit).toLocaleString() + " left)");
+      more.addEventListener("click", () => { manage.limit += DISCOVER_PAGE; renderManage(); });
+      body.appendChild(more);
+    }
+  }
+
+  function openInstallDialog(p, key) {
+    openFormModal({
+      title: "Install " + p.name,
+      intro: p.description || "",
+      fields: [{ key: "scope", label: "Switch it on for", type: "select", value: "user", options: SCOPE_CHOICES,
+        hint: "Project and local need an open solution or folder." }],
+      warning: "Plugins run code on this computer — hooks, MCP servers and scripts, with your rights. Only install plugins you trust. "
+        + PROJECT_SCOPE_WARNING,
+      confirmLabel: "Install",
+      onSubmit: (v) => { manageAction("plugin.install", { id: p.id, scope: v.scope }, key, p.name); },
+    });
+  }
+
+  function formatCount(n) {
+    if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
+    if (n >= 1000) return Math.round(n / 1000) + "k";
+    return String(n);
+  }
+
+  const SKILL_GROUPS = [
+    ["personal", "Your skills", "~/.claude/skills"],
+    ["project", "This project", ".claude/skills in the workspace or a parent folder"],
+    ["plugin", "From plugins", "Switched on and off with their plugin"],
+    ["synced", "Synced from claude.ai", "~/.claude/skills/synced"],
+    ["bundled", "Built into Claude Code", ""],
+  ];
+  const SKILL_STATES = {
+    "on": ["On", "on", "Claude sees the name and description and may use it; it's in the / menu"],
+    "name-only": ["Name only", "muted", "Claude sees only the name; it's in the / menu"],
+    "user-invocable-only": ["Only via /", "muted", "Hidden from Claude — you can still run it from the / menu"],
+    "off": ["Off", "offb", "Hidden from Claude and from the / menu"],
+  };
+
+  function renderManageSkills(body, data) {
+    const skills = data.skills || [];
+    // where visibility changes are saved: like the CLI's own /skills menu, this project only on this
+    // computer by default; "user" = every project
+    if (!data.hasWorkspace) manage.skillScope = "user";
+    const scope = manage.skillScope || "local";
+    const bar = el("div", "manage-filter");
+    const scopeSel = document.createElement("select");
+    scopeSel.className = "manage-select";
+    scopeSel.title = "Where on/off changes of a skill are saved";
+    [["local", "Save for this project, on this computer"], ["user", "Save for all my projects"]]
+      .filter(([v]) => data.hasWorkspace || v === "user")
+      .forEach(([v, l]) => {
+        const o = document.createElement("option");
+        o.value = v; o.textContent = l;
+        if (v === scope) o.selected = true;
+        scopeSel.appendChild(o);
+      });
+    scopeSel.addEventListener("change", () => { manage.skillScope = scopeSel.value; });
+    bar.appendChild(scopeSel);
+    const create = el("button", "modal-btn manage-small", "New skill…");
+    create.addEventListener("click", () => openNewSkillDialog(data.hasWorkspace));
+    bar.appendChild(create);
+    body.appendChild(bar);
+
+    const bundled = el("div", "manage-row-top manage-note");
+    bundled.appendChild(el("span", null, "Skills built into Claude Code"
+      + (data.bundledScope ? " (" + data.bundledScope + " settings)" : "")));
+    const bRight = el("span", "manage-right");
+    if (manageBusy["skills:bundled"]) bRight.appendChild(manageBadge("Saving…", "muted"));
+    else bRight.appendChild(manageSwitch(!data.bundledDisabled,
+      data.bundledDisabled ? "Switch the built-in skills back on" : "Switch off every built-in skill at once",
+      () => manageAction("skill.bundled", { disabled: !data.bundledDisabled, scope }, "skills:bundled", "Built-in skills")));
+    bundled.appendChild(bRight);
+    body.appendChild(bundled);
+    if (!data.loadedKnown)
+      body.appendChild(el("div", "manage-note", "Send a prompt in this window to see which skills the session actually loaded."));
+    SKILL_GROUPS.forEach(([source, title, hint]) => {
+      const group = skills.filter((s) => s.source === source);
+      if (!group.length) return;
+      const h = el("div", "manage-group", title);
+      if (hint) h.title = hint;
+      body.appendChild(h);
+      group.forEach((s) => {
+        const row = el("div", "manage-row" + (s.state === "off" ? " off" : ""));
+        const top = el("div", "manage-row-top");
+        top.appendChild(el("span", "manage-name", s.name));
+        const right = el("span", "manage-right");
+        if (s.loaded === false && data.loadedKnown) right.appendChild(manageBadge("not loaded", "muted",
+          "The last session did not load it (a new skill loads with the next prompt; nested ones when Claude works in their folder)"));
+        const key = "skill:" + s.name;
+        if (manageBusy[key]) right.appendChild(manageBadge("Saving…", "muted"));
+        else if (s.canOverride) right.appendChild(skillStateSelect(s, scope, key));
+        if (s.file) {
+          const open = el("button", "icon-btn small manage-open");
+          open.title = "Open SKILL.md in the editor";
+          open.setAttribute("aria-label", "Open SKILL.md");
+          open.appendChild(svg('<path d="M14 3h7v7"/><path d="M10 14L21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>', { width: 13, height: 13 }));
+          open.addEventListener("click", () => post("editor.openFile", { path: s.file }));
+          right.appendChild(open);
+        }
+        if (s.canEdit && s.file) {
+          const del = el("button", "icon-btn small manage-open");
+          del.title = "Delete this skill";
+          del.setAttribute("aria-label", "Delete skill");
+          del.appendChild(iconTrash());
+          del.addEventListener("click", () => openConfirmModal({
+            title: "Delete skill",
+            message: "Delete “" + s.name + "”? Its folder is removed:\n" + s.file.replace(/[\\/]SKILL\.md$/i, ""),
+            confirmLabel: "Delete",
+            danger: true,
+            onConfirm: () => manageAction("skill.delete", { file: s.file }, key, s.name),
+          }));
+          right.appendChild(del);
+        }
+        top.appendChild(right);
+        row.appendChild(top);
+        if (s.description) row.appendChild(el("div", "manage-desc clamp", s.description));
+        body.appendChild(row);
+      });
+    });
+    if (!skills.length) body.appendChild(el("div", "manage-empty", "No skills found."));
+  }
+
+  function skillStateSelect(s, scope, key) {
+    const sel = document.createElement("select");
+    sel.className = "manage-select manage-state";
+    Object.keys(SKILL_STATES).forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = SKILL_STATES[v][0];
+      o.title = SKILL_STATES[v][2];
+      if (v === s.state) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.title = (SKILL_STATES[s.state] || SKILL_STATES.on)[2] + (s.stateScope ? " — set in " + s.stateScope + " settings" : "");
+    sel.addEventListener("change", () => manageAction("skill.state", { name: s.name, value: sel.value, scope }, key, s.name));
+    return sel;
+  }
+
+  function openNewSkillDialog(hasWorkspace) {
+    openFormModal({
+      title: "New skill",
+      intro: "Creates a folder with a SKILL.md and opens it in the editor. Claude can use it from the next prompt.",
+      fields: [
+        { key: "name", label: "Name", placeholder: "release-notes", hint: "Lowercase letters, digits and hyphens." },
+        { key: "description", label: "When should Claude use it?", type: "textarea", rows: 2,
+          placeholder: "Writes release notes from the changelog and merged pull requests." },
+        { key: "where", label: "For", type: "select", value: "personal",
+          options: [["personal", "Me, in every project (~/.claude/skills)"]].concat(hasWorkspace
+            ? [["project", "This project, shared via the repository (.claude/skills)"]] : []) },
+      ],
+      confirmLabel: "Create",
+      onSubmit: (v) => {
+        const name = (v.name || "").trim();
+        if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) return "Use lowercase letters, digits and hyphens (at most 64), starting with a letter or digit.";
+        manageAction("skill.create", { name, description: (v.description || "").trim(), where: v.where }, "skills:new", name);
+      },
+    });
+  }
+
+  const MCP_STATUS = {
+    connected: ["Connected", "ok"],
+    failed: ["Failed", "bad"],
+    pending: ["Waiting for approval", "warn"],
+    "needs-auth": ["Needs sign-in", "warn"],
+    unknown: ["Not checked", "idle"],
+  };
+
+  function renderManageMcp(body, data) {
+    const servers = data.servers || [];
+    const bar = el("div", "manage-filter");
+    bar.appendChild(el("span", "manage-dim manage-grow",
+      "Prompts from Visual Studio load project servers without asking — reject one to keep it out."));
+    const add = el("button", "modal-btn manage-small", "Add server…");
+    add.addEventListener("click", openAddMcpDialog);
+    bar.appendChild(add);
+    body.appendChild(bar);
+    if (!servers.length) { body.appendChild(el("div", "manage-empty", "No MCP servers configured.")); return; }
+    servers.forEach((s) => {
+      const row = el("div", "manage-row");
+      const top = el("div", "manage-row-top");
+      const st = MCP_STATUS[s.status] || MCP_STATUS.unknown;
+      const dot = el("span", "manage-dot " + st[1]);
+      dot.title = st[0];
+      top.appendChild(dot);
+      top.appendChild(el("span", "manage-name", s.name));
+      if (s.transport) top.appendChild(manageBadge(s.transport, "muted"));
+      const right = el("span", "manage-right");
+      right.appendChild(manageBadge(s.scope, "scope", s.readOnly
+        ? (s.scope === "plugin" ? "Comes from a plugin — managed with the plugin" : s.scope === "claude.ai" ? "A claude.ai connector — managed on claude.ai" : "Managed outside this panel")
+        : (SCOPE_HINTS[s.scope] || "")));
+      right.appendChild(manageBadge(st[0], st[1] === "ok" ? "on" : st[1] === "idle" ? "muted" : st[1]));
+      top.appendChild(right);
+      row.appendChild(top);
+      const target = s.url || [s.command].concat(s.args || []).filter((x) => x != null && x !== "").join(" ") || s.target;
+      if (target) row.appendChild(el("div", "manage-mono", target));
+      const secrets = [];
+      if ((s.envNames || []).length) secrets.push("env: " + s.envNames.join(", "));
+      if ((s.headerNames || []).length) secrets.push("headers: " + s.headerNames.join(", "));
+      if (secrets.length) row.appendChild(el("div", "manage-dim", secrets.join(" · ") + " (values hidden)"));
+      if (s.detail) row.appendChild(el("div", "manage-row-error", s.detail));
+      if (s.status === "needs-auth")
+        row.appendChild(el("div", "manage-dim", "Sign in from a terminal: claude mcp login " + s.name));
+      if (!s.readOnly) row.appendChild(mcpActions(s));
+      body.appendChild(row);
+    });
+  }
+
+  function mcpActions(s) {
+    const bar = el("div", "manage-actions");
+    const key = "mcp:" + s.scope + ":" + s.name;
+    if (manageBusy[key]) { bar.appendChild(manageBadge("Working…", "muted")); return bar; }
+    if (s.scope === "project") {
+      // the CLI's own approval: .claude/settings.local.json, enabled-/disabledMcpjsonServers
+      const approve = el("button", "modal-btn manage-small", "Approve");
+      approve.title = "Allow it in the interactive CLI too (saved for this project on this computer)";
+      approve.addEventListener("click", () => manageAction("mcp.approve", { name: s.name, approve: true }, key, s.name));
+      const reject = el("button", "modal-btn manage-small", "Reject");
+      reject.title = "Keep it out — no session on this computer loads it";
+      reject.addEventListener("click", () => manageAction("mcp.approve", { name: s.name, approve: false }, key, s.name));
+      bar.appendChild(approve);
+      bar.appendChild(reject);
+    }
+    const remove = el("button", "modal-btn danger manage-small", "Remove…");
+    remove.addEventListener("click", () => openConfirmModal({
+      title: "Remove MCP server",
+      message: "Remove “" + s.name + "” from the " + s.scope + " configuration?"
+        + (s.scope === "project" ? "\n\nThis edits the workspace's .mcp.json — shared with everyone who uses the repository." : ""),
+      confirmLabel: "Remove",
+      danger: true,
+      onConfirm: () => manageAction("mcp.remove", { name: s.name, scope: s.scope }, key, s.name),
+    }));
+    bar.appendChild(remove);
+    return bar;
+  }
+
+  function openAddMcpDialog() {
+    const remote = (v) => v.transport !== "stdio";
+    openFormModal({
+      title: "Add MCP server",
+      fields: [
+        { key: "name", label: "Name", placeholder: "shop-db" },
+        { key: "transport", label: "Type", type: "select", value: "stdio",
+          options: [["stdio", "Local command (stdio)"], ["http", "Remote URL (HTTP)"], ["sse", "Remote URL (SSE)"]] },
+        { key: "command", label: "Command and arguments", placeholder: "npx -y @sample/shop-db-mcp --read-only",
+          hint: "Quote an argument that contains spaces.", showIf: (v) => !remote(v) },
+        { key: "env", label: "Environment variables (one KEY=value per line, optional)", type: "textarea", rows: 2,
+          placeholder: "SHOP_DB_URL=postgres://…", showIf: (v) => !remote(v) },
+        { key: "url", label: "URL", placeholder: "https://api.sampleshop.example/mcp", showIf: remote },
+        { key: "headers", label: "Headers (one Name: value per line, optional)", type: "textarea", rows: 2,
+          placeholder: "Authorization: Bearer …", showIf: remote },
+        { key: "scope", label: "Available in", type: "select", value: "local", options: SCOPE_CHOICES },
+      ],
+      warning: "Local servers run with your rights on this computer. Values such as API keys are stored as plain text in the CLI's "
+        + "configuration — for \"project\" in the workspace's .mcp.json, which is usually committed and shared with everyone on the repository.",
+      confirmLabel: "Add",
+      onSubmit: (v) => {
+        const name = (v.name || "").trim();
+        if (!/^[A-Za-z0-9_.-]+$/.test(name)) return "Give the server a name (letters, digits, - _ .).";
+        if (remote(v)) {
+          if (!/^https?:\/\//i.test((v.url || "").trim())) return "Enter the server's http(s) URL.";
+          const h = parsePairs(v.headers, ":");
+          if (h.error) return "Not a \"Name: value\" header: " + h.error;
+          manageAction("mcp.addRemote", { name, transport: v.transport, url: v.url.trim(), headers: h.result, scope: v.scope }, "mcp:add", name);
+        } else {
+          const parts = splitArgs(v.command);
+          if (!parts.length) return "Enter the command that starts the server.";
+          const e = parsePairs(v.env, "=");
+          if (e.error) return "Not a KEY=value line: " + e.error;
+          manageAction("mcp.addStdio", { name, command: parts[0], args: parts.slice(1), env: e.result, scope: v.scope }, "mcp:add", name);
+        }
+      },
+    });
+  }
+
+  function renderManageMarketplaces(body, data) {
+    const list = data.list || [];
+    const bar = el("div", "manage-filter");
+    bar.appendChild(el("span", "manage-dim manage-grow", "A marketplace is a catalog of plugins — what Discover lists."));
+    const add = el("button", "modal-btn manage-small", "Add marketplace…");
+    add.addEventListener("click", () => openFormModal({
+      title: "Add marketplace",
+      fields: [
+        { key: "source", label: "Source", placeholder: "owner/repo, a git or https URL, or a local folder",
+          hint: "GitHub: owner/repo (optionally #branch). Local: a folder with .claude-plugin/marketplace.json." },
+        { key: "scope", label: "Available in", type: "select", value: "user", options: SCOPE_CHOICES },
+      ],
+      warning: "Plugins from a marketplace can run code on this computer. Only add marketplaces you trust.",
+      confirmLabel: "Add",
+      onSubmit: (v) => {
+        const source = (v.source || "").trim();
+        if (!source) return "Enter where the marketplace lives.";
+        manageAction("marketplace.add", { source, scope: v.scope }, "market:add", source);
+      },
+    }));
+    bar.appendChild(add);
+    body.appendChild(bar);
+    if (manageBusy["market:add"]) body.appendChild(el("div", "manage-note", "Adding the marketplace… (it is cloned or read now)"));
+    if (!list.length) { body.appendChild(el("div", "manage-empty", "No marketplaces configured.")); return; }
+    list.forEach((m) => {
+      const row = el("div", "manage-row");
+      const top = el("div", "manage-row-top");
+      top.appendChild(el("span", "manage-name", m.name));
+      const right = el("span", "manage-right");
+      if (m.source) right.appendChild(manageBadge(m.source, "muted"));
+      const key = "market:" + m.name;
+      if (manageBusy[key]) right.appendChild(manageBadge("Working…", "muted"));
+      else {
+        const upd = el("button", "modal-btn manage-small", "Update");
+        upd.title = "Fetch the marketplace's latest catalog";
+        upd.addEventListener("click", () => manageAction("marketplace.update", { name: m.name }, key, m.name));
+        const rm = el("button", "modal-btn danger manage-small", "Remove…");
+        rm.addEventListener("click", () => openConfirmModal({
+          title: "Remove marketplace",
+          message: "Remove “" + m.name + "”? Its plugins no longer show under Discover. Plugins you installed from it stay installed.",
+          confirmLabel: "Remove",
+          danger: true,
+          onConfirm: () => manageAction("marketplace.remove", { name: m.name }, key, m.name),
+        }));
+        right.appendChild(upd);
+        right.appendChild(rm);
+      }
+      top.appendChild(right);
+      row.appendChild(top);
+      if (m.origin) row.appendChild(el("div", "manage-mono", m.origin));
+      body.appendChild(row);
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // Header buttons
   // -------------------------------------------------------------------------
   $("btn-history").addEventListener("click", function () {
@@ -5104,6 +5981,9 @@
 
     // Footer: opens the host-side settings window (all options) via options.open
     pop.appendChild(el("div", "appearance-divider"));
+    const manageBtn = el("button", "menu-item appearance-options-link", "Plugins, skills & MCP…");
+    manageBtn.addEventListener("click", () => openManagePanel());
+    pop.appendChild(manageBtn);
     const optBtn = el("button", "menu-item appearance-options-link", "Advanced options…");
     optBtn.addEventListener("click", () => { closeAllOverlays(); post("options.open", {}); });
     pop.appendChild(optBtn);
@@ -5674,6 +6554,82 @@
       "```\n\n" +
       "That should get you started.";
 
+    // "Plugins, skills & MCP" panel — fictional data (SampleShop), shaped like the host's answers
+    function mockManageLoad(tab) {
+      const now = Date.now();
+      const iso = (days) => new Date(now - days * 86400000).toISOString();
+      switch (tab) {
+        case "installed":
+          return sendIn("manage.plugins", { installed: [
+            { id: "commit-commands@claude-plugins-official", name: "commit-commands", marketplace: "claude-plugins-official", version: "1.0.1",
+              scope: "user", enabled: true, installedAt: iso(12), lastUpdated: iso(2), errors: [] },
+            { id: "shop-conventions@sampleshop-tools", name: "shop-conventions", marketplace: "sampleshop-tools", version: "0.4.0",
+              scope: "project", enabled: true, projectEnabled: true, projectPath: "C:\\src\\SampleShop", installedAt: iso(30), errors: [] },
+            { id: "legacy-linter@sampleshop-tools", name: "legacy-linter", marketplace: "sampleshop-tools", version: "2f9c1e07ab33",
+              scope: "user", enabled: false, installedAt: iso(90), errors: ["skills/check/SKILL.md: missing description"] },
+            { id: "team-notes@synced", name: "team-notes", marketplace: "synced", version: "1.2.0", scope: "synced", enabled: true, errors: [] },
+          ] }, 400);
+        case "discover":
+          return sendIn("manage.available", {
+            plugins: [
+              { id: "code-review@claude-plugins-official", name: "code-review", marketplace: "claude-plugins-official", installCount: 477558,
+                description: "Automated code review for pull requests with several specialised agents." },
+              { id: "feature-dev@claude-plugins-official", name: "feature-dev", marketplace: "claude-plugins-official", installCount: 269187,
+                description: "A guided feature workflow: explore the code, design the change, implement and review it." },
+              { id: "commit-commands@claude-plugins-official", name: "commit-commands", marketplace: "claude-plugins-official", installCount: 178476,
+                description: "Commands for git commit workflows including commit, push, and PR creation." },
+              { id: "shop-conventions@sampleshop-tools", name: "shop-conventions", marketplace: "sampleshop-tools", installCount: 42,
+                description: "SampleShop's naming rules, folder layout and review checklist as skills." },
+              { id: "invoice-pdf@sampleshop-tools", name: "invoice-pdf", marketplace: "sampleshop-tools",
+                description: "Generates and checks SampleShop invoice PDFs." },
+            ],
+            installedIds: ["commit-commands@claude-plugins-official", "shop-conventions@sampleshop-tools"],
+          }, 700);
+        case "skills":
+          return sendIn("manage.skills", {
+            skills: [
+              { name: "release-notes", source: "personal", description: "Writes release notes from the changelog and merged PRs.",
+                file: "C:\\Users\\dev\\.claude\\skills\\release-notes\\SKILL.md", state: "on", loaded: true, canOverride: true, canEdit: true },
+              { name: "old-deploy", source: "personal", description: "The deploy steps before the CI move.",
+                file: "C:\\Users\\dev\\.claude\\skills\\old-deploy\\SKILL.md", state: "off", stateScope: "local", loaded: false, canOverride: true, canEdit: true },
+              { name: "cart-totals", source: "project", description: "How SampleShop computes cart totals, taxes and discounts.",
+                file: "C:\\src\\SampleShop\\.claude\\skills\\cart-totals\\SKILL.md", state: "user-invocable-only", stateScope: "local", loaded: true, canOverride: true, canEdit: true },
+              { name: "commit-commands:commit", source: "plugin", pluginId: "commit-commands@claude-plugins-official", description: "Create a git commit.",
+                file: "C:\\Users\\dev\\.claude\\plugins\\cache\\claude-plugins-official\\commit-commands\\1.0.1\\skills\\commit\\SKILL.md", state: "on", loaded: true, canOverride: false, canEdit: false },
+              { name: "doctor", source: "bundled", state: "on", loaded: true, canOverride: true, canEdit: false },
+            ],
+            bundledDisabled: false, bundledScope: null, loadedKnown: true, hasWorkspace: true,
+          }, 400);
+        case "mcp":
+          return sendIn("manage.mcp", { servers: [
+            { name: "shop-db", scope: "local", transport: "stdio", command: "node", args: ["tools/shop-db-mcp.js", "--read-only"],
+              envNames: ["SHOP_DB_URL"], headerNames: [], status: "connected", readOnly: false },
+            { name: "shop-api", scope: "project", transport: "http", url: "https://api.sampleshop.example/mcp", args: [],
+              envNames: [], headerNames: ["Authorization"], status: "pending", readOnly: false },
+            { name: "inventory", scope: "user", transport: "stdio", command: "inventory-mcp", args: [], envNames: [], headerNames: [],
+              status: "failed", detail: "CONNECTION_CLOSED: Connection closed", readOnly: false },
+            { name: "plugin:shop-conventions:docs", scope: "plugin", transport: "stdio", target: "npx shop-docs-mcp@1.2.0", args: [],
+              envNames: [], headerNames: [], status: "connected", readOnly: true },
+          ] }, 1500);
+        case "marketplaces":
+          return sendIn("manage.marketplaces", { list: [
+            { name: "claude-plugins-official", source: "github", origin: "anthropics/claude-plugins-official" },
+            { name: "sampleshop-tools", source: "directory", origin: "C:\\src\\SampleShop\\tools\\marketplace" },
+          ] }, 300);
+      }
+    }
+
+    function mockPluginDetails(id) {
+      if (String(id).startsWith("legacy-linter")) return null;
+      return {
+        description: "Commands for git commit workflows including commit, push, and PR creation",
+        alwaysOnTokens: 71,
+        inventory: { "Skills": ["clean_gone", "commit", "commit-push-pr"], "Agents": [], "Hooks": [], "MCP servers": [] },
+        components: [{ name: "clean_gone", alwaysOn: "~50", onInvoke: "~430" }],
+        raw: "",
+      };
+    }
+
     function receive(msg) {
       // web -> host (mock handles)
       switch (msg.type) {
@@ -5687,6 +6643,21 @@
           return sendIn("system.note", { id: nid("n"), text: "Background tasks stopped" }, 220);
         case "session.new": return onNew();
         case "session.listRequest": return sendIn("session.list", { sessions: fakeSessions }, 120);
+        case "manage.load": return mockManageLoad(msg.tab);
+        case "manage.action": {
+          // invoice-pdf: its marketplace declares an install command — confirm it first, like the real CLI
+          if (msg.action === "plugin.install" && String(msg.id).startsWith("invoice-pdf") && !msg.acceptSha256)
+            return sendIn("manage.actionResult", { requestId: msg.requestId, action: msg.action, ok: false,
+              message: "confirm the command", confirm: { command: "npx @sampleshop/invoice-setup --install", sha256: "ab12cd34" } }, 500);
+          const reload = { "plugin.install": ["installed", "discover"], "plugin.enable": ["installed"], "plugin.disable": ["installed"],
+            "plugin.update": ["installed"], "plugin.uninstall": ["installed"], "skill.state": ["skills"], "skill.bundled": ["skills"],
+            "skill.create": ["skills"], "skill.delete": ["skills"], "mcp.addStdio": ["mcp"], "mcp.addRemote": ["mcp"],
+            "mcp.remove": ["mcp"], "mcp.approve": ["mcp"], "marketplace.add": ["marketplaces"], "marketplace.update": ["marketplaces"],
+            "marketplace.remove": ["marketplaces"] }[msg.action] || [];
+          return sendIn("manage.actionResult", { requestId: msg.requestId, action: msg.action, ok: true,
+            message: "(mock) " + msg.action + " done", reload }, 700);
+        }
+        case "manage.details": return sendIn("manage.details", { id: msg.id, details: mockPluginDetails(msg.id) }, 300);
         case "session.load": return onLoad(msg.sessionId);
         case "session.rename": return onRename(msg);
         case "session.delete": {

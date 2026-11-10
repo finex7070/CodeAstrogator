@@ -123,6 +123,9 @@ namespace CodeAstrogator.Core
                     Model = obj.Value<string>("model"),
                     Cwd = obj.Value<string>("cwd"),
                     SlashCommands = slashCommands,
+                    // names of the skills this session loaded (CLI 2.1.319: a plain string array)
+                    Skills = (obj["skills"] as JArray)?.Select(t => t.Type == JTokenType.String ? t.ToString() : t.Value<string>("name") ?? "")
+                        .Where(s => s.Length > 0).ToList() ?? new List<string>(),
                 });
             }
             else if (subtype == "api_retry" || subtype == "retry")

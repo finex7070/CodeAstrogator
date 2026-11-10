@@ -154,6 +154,10 @@ namespace CodeAstrogator.Options
             : minutes > MaxPromptTimeoutMinutes ? MaxPromptTimeoutMinutes
             : minutes;
 
+        /// <summary>The extension version whose "What's new" popup the user has seen (empty = never). Not shown in the
+        /// settings window; the popup sets it.</summary>
+        public string LastSeenVersion { get; set; } = "";
+
         public bool RestoreLastSession { get; set; } = true;
         /// <summary>After each turn, ask the CLI for a predicted next prompt and show it as ghost text
         /// in the empty composer (Tab takes it over). Costs one extra, mostly cached API call per turn.</summary>
