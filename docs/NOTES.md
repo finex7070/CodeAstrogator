@@ -1994,8 +1994,15 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   input over `EchoInputMaxChars` (20k chars) is **not** echoed back; `updatedInput` is left out. In 2.1.319 the
   allow schema has `updatedInput` **optional**. When it is missing or `{}`, the CLI runs the original input
   (permission-prompt-tool path, `kind:"launcher"`). Small inputs are still echoed so older CLIs keep working.
-  **Remaining risk:** an *edited* `updatedInput` (partial accept in the editor review) of a huge file can still
-  go over the limit. Re-test when the CLI updates.
+  Edited inputs must go back in full (partial accept in the editor review). So the tool also declares
+  **`_meta: {"anthropic/maxResultSizeChars": 500000}`** in `tools/list`, which raises the limit for this one tool;
+  other MCP servers keep theirs. The CLI caps the hint at 500k chars. Spike against 2.1.319: an edited
+  150k-char `updatedInput` for a small `Write` failed with exactly the error above without the hint, and was
+  written in full with it. This is better than raising `MAX_MCP_OUTPUT_TOKENS` for the whole CLI process,
+  which would also let other servers' large outputs into the context.
+  **Remaining risk:** an edited input over 500k chars still fails. Re-test both hints when the CLI updates.
+  The root cause is arguably a CLI bug: the permission tool's result never reaches the model, but it still goes
+  through the model-facing "save large output to a file" path.
 - Slow decision (10 s) tolerated; `timeout:600000` in the mcp config.
 - `TcpListener` chosen (no URL ACL needed); `HttpListener` avoided.
 

@@ -31,6 +31,9 @@ namespace CodeAstrogator.Tests
             var props = tools[0]!["inputSchema"]!["properties"]!;
             Assert.NotNull(props["tool_name"]);
             Assert.NotNull(props["input"]);
+            // raises the CLI's MCP output limit so a large edited updatedInput isn't saved to a file
+            Assert.Equal(McpPermissionBridge.MaxResultSizeChars,
+                tools[0]!["_meta"]!.Value<int>("anthropic/maxResultSizeChars"));
         }
 
         [Fact]

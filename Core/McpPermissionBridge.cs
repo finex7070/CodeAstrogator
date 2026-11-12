@@ -315,6 +315,11 @@ namespace CodeAstrogator.Core
                             },
                             ["required"] = new JArray { "tool_name", "input" },
                         },
+                        // Raises the CLI's MCP output limit for THIS tool only (default 25k tokens):
+                        // above it the CLI saves the result to a file and the prompt-tool check fails
+                        // ("invalid result"). Matters for an EDITED updatedInput of a big file (partial
+                        // accept). The CLI caps the value at 500k chars. Verified 2026-11-12, CLI 2.1.319.
+                        ["_meta"] = new JObject { ["anthropic/maxResultSizeChars"] = MaxResultSizeChars },
                     },
                 },
             },
@@ -326,6 +331,13 @@ namespace CodeAstrogator.Core
         /// output limit (25k tokens ≈ 100k chars; the CLI keeps anything under half of it as is).
         /// </summary>
         internal const int EchoInputMaxChars = 20_000;
+
+        /// <summary>
+        /// Declared as <c>_meta["anthropic/maxResultSizeChars"]</c> on the tool (see
+        /// <see cref="BuildToolsListResult"/>): the CLI keeps results up to this size inline instead
+        /// of saving them to a file. 500k chars is the CLI's own ceiling for this hint.
+        /// </summary>
+        internal const int MaxResultSizeChars = 500_000;
 
         /// <summary>
         /// Builds the tools/call result. On allow, updatedInput is the edited input or — when the
