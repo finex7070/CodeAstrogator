@@ -26,8 +26,9 @@ namespace CodeAstrogator.Core
     ///  - <c>notifications/*</c> → 202, no body. A <c>GET /mcp</c> (SSE) may be answered 405 safely.
     ///  - <c>tools/call</c> arguments = { <c>tool_name</c>, <c>input</c>, <c>tool_use_id</c>, _meta }.
     ///  - result = { content:[{type:"text", text:&lt;json&gt;}], isError:false } where json is
-    ///    {"behavior":"allow","updatedInput":&lt;input&gt;} (updatedInput MUST be the input object —
-    ///    a null updatedInput is treated as a DENIAL by the CLI!) or {"behavior":"deny","message":…}.
+    ///    {"behavior":"allow","updatedInput":&lt;input&gt;} (updatedInput MUST NOT be null — 2.1.162
+    ///    treated that as a DENIAL; large inputs omit it, see <see cref="BuildToolResult"/>) or
+    ///    {"behavior":"deny","message":…}.
     ///  - Custom <c>X-Auth</c> header is echoed on every request → used to reject foreign callers.
     /// </summary>
     public sealed class McpPermissionBridge : IPermissionBridge, IDisposable
@@ -314,26 +315,52 @@ namespace CodeAstrogator.Core
                             },
                             ["required"] = new JArray { "tool_name", "input" },
                         },
+                        // Raises the CLI's MCP output limit for THIS tool only (default 25k tokens):
+                        // above it the CLI saves the result to a file and the prompt-tool check fails
+                        // ("invalid result"). Matters for an EDITED updatedInput of a big file (partial
+                        // accept). The CLI caps the value at 500k chars. Verified 2026-11-12, CLI 2.1.319.
+                        ["_meta"] = new JObject { ["anthropic/maxResultSizeChars"] = MaxResultSizeChars },
                     },
                 },
             },
         };
 
         /// <summary>
+        /// Largest unedited input (serialized chars) still echoed back as <c>updatedInput</c>. Above
+        /// this the field is omitted — see <see cref="BuildToolResult"/>. Well below the CLI's MCP
+        /// output limit (25k tokens ≈ 100k chars; the CLI keeps anything under half of it as is).
+        /// </summary>
+        internal const int EchoInputMaxChars = 20_000;
+
+        /// <summary>
+        /// Declared as <c>_meta["anthropic/maxResultSizeChars"]</c> on the tool (see
+        /// <see cref="BuildToolsListResult"/>): the CLI keeps results up to this size inline instead
+        /// of saving them to a file. 500k chars is the CLI's own ceiling for this hint.
+        /// </summary>
+        internal const int MaxResultSizeChars = 500_000;
+
+        /// <summary>
         /// Builds the tools/call result. On allow, updatedInput is the edited input or — when the
-        /// UI did not edit it — the ORIGINAL input echoed back (a null updatedInput is treated as a
-        /// denial by the CLI). On deny, a message is returned.
+        /// UI did not edit it — the ORIGINAL input echoed back (CLI 2.1.162 treated a null
+        /// updatedInput as a denial), except for large inputs, where it is omitted (the echo would
+        /// exceed the CLI's MCP output limit; current CLIs then run the original input). On deny,
+        /// a message is returned.
         /// </summary>
         internal static JObject BuildToolResult(JToken? id, PermissionDecision decision, JObject originalInput)
         {
             JObject inner;
             if (string.Equals(decision.Behavior, "allow", StringComparison.OrdinalIgnoreCase))
             {
-                inner = new JObject
-                {
-                    ["behavior"] = "allow",
-                    ["updatedInput"] = decision.UpdatedInput ?? originalInput,
-                };
+                inner = new JObject { ["behavior"] = "allow" };
+                if (decision.UpdatedInput != null)
+                    inner["updatedInput"] = decision.UpdatedInput;
+                else if (originalInput.ToString(Formatting.None).Length <= EchoInputMaxChars)
+                    inner["updatedInput"] = originalInput;
+                // else: omit it. Echoing a big Write/Edit pushes this tool result past the CLI's MCP
+                // output limit (MAX_MCP_OUTPUT_TOKENS, 25k tokens) → the CLI saves it to a file and
+                // hands the prompt-tool check a string → "Permission prompt tool returned an invalid
+                // result. Expected a single text block…" (the write fails). CLI 2.1.319 treats a
+                // missing/empty updatedInput as "run the original input" (schema: optional).
             }
             else
             {

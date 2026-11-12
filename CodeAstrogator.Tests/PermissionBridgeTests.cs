@@ -31,6 +31,9 @@ namespace CodeAstrogator.Tests
             var props = tools[0]!["inputSchema"]!["properties"]!;
             Assert.NotNull(props["tool_name"]);
             Assert.NotNull(props["input"]);
+            // raises the CLI's MCP output limit so a large edited updatedInput isn't saved to a file
+            Assert.Equal(McpPermissionBridge.MaxResultSizeChars,
+                tools[0]!["_meta"]!.Value<int>("anthropic/maxResultSizeChars"));
         }
 
         [Fact]
@@ -46,6 +49,24 @@ namespace CodeAstrogator.Tests
             Assert.Equal("a.cs", inner["updatedInput"]!.Value<string>("file_path"));
             Assert.Equal("x", inner["updatedInput"]!.Value<string>("content"));
             Assert.False(r["result"]!.Value<bool>("isError"));
+        }
+
+        [Fact]
+        public void BuildToolResult_Allow_OmitsUpdatedInputForLargeUneditedInput()
+        {
+            // Echoing a big Write would exceed the CLI's MCP output limit (it then saves the result to
+            // a file and rejects it as "invalid result") → omit; the CLI runs the original input.
+            var input = new JObject
+            {
+                ["file_path"] = "big.cs",
+                ["content"] = new string('x', McpPermissionBridge.EchoInputMaxChars + 1),
+            };
+            var r = McpPermissionBridge.BuildToolResult(new JValue(5), new PermissionDecision { Behavior = "allow" }, input);
+
+            var inner = InnerDecision(r);
+            Assert.Equal("allow", inner.Value<string>("behavior"));
+            Assert.Null(inner["updatedInput"]);
+            Assert.True(r.ToString(Newtonsoft.Json.Formatting.None).Length < 1000);
         }
 
         [Fact]
