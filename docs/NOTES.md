@@ -1986,6 +1986,16 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   **`null` updatedInput is treated as deny by the CLI** (all tool calls fail). Echo of the
   original input (or an edited variant). deny = `{"behavior":"deny","message":…}`; envelope
   `{content:[{type:"text",text:<json>}],isError:false}`.
+- **Large inputs (2026-11-12, CLI 2.1.319):** the permission tool's result goes through the CLI's normal
+  MCP large-output handling. Above `MAX_MCP_OUTPUT_TOKENS` (default 25k tokens; can also be changed
+  remotely via a feature flag) the CLI saves the result to a file and passes a **string** on. The prompt-tool
+  check then fails with *"Permission prompt tool returned an invalid result. Expected a single text block…"*
+  and the tool call errors. This happened when echoing a ~1,500-line `Write`. Fix: an unedited
+  input over `EchoInputMaxChars` (20k chars) is **not** echoed back; `updatedInput` is left out. In 2.1.319 the
+  allow schema has `updatedInput` **optional**. When it is missing or `{}`, the CLI runs the original input
+  (permission-prompt-tool path, `kind:"launcher"`). Small inputs are still echoed so older CLIs keep working.
+  **Remaining risk:** an *edited* `updatedInput` (partial accept in the editor review) of a huge file can still
+  go over the limit. Re-test when the CLI updates.
 - Slow decision (10 s) tolerated; `timeout:600000` in the mcp config.
 - `TcpListener` chosen (no URL ACL needed); `HttpListener` avoided.
 

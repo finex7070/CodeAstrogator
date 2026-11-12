@@ -49,6 +49,24 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public void BuildToolResult_Allow_OmitsUpdatedInputForLargeUneditedInput()
+        {
+            // Echoing a big Write would exceed the CLI's MCP output limit (it then saves the result to
+            // a file and rejects it as "invalid result") → omit; the CLI runs the original input.
+            var input = new JObject
+            {
+                ["file_path"] = "big.cs",
+                ["content"] = new string('x', McpPermissionBridge.EchoInputMaxChars + 1),
+            };
+            var r = McpPermissionBridge.BuildToolResult(new JValue(5), new PermissionDecision { Behavior = "allow" }, input);
+
+            var inner = InnerDecision(r);
+            Assert.Equal("allow", inner.Value<string>("behavior"));
+            Assert.Null(inner["updatedInput"]);
+            Assert.True(r.ToString(Newtonsoft.Json.Formatting.None).Length < 1000);
+        }
+
+        [Fact]
         public void BuildToolResult_Allow_UsesUpdatedInputWhenProvided()
         {
             var input = new JObject { ["content"] = "old" };

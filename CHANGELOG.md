@@ -4,6 +4,11 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.3.1] – 2026-11-12
+
+### Fixed
+- **Approving a write to a very large file no longer fails.** When Claude wrote or edited a big file (around 1,500 lines), the approval came back to Claude Code as "Permission prompt tool returned an invalid result", so the write failed and Claude retried or split the file. The approval now stays small enough for Claude Code to accept, however large the file is.
+
 ## [1.3.0] – 2026-11-10
 
 ### Added
