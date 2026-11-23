@@ -362,31 +362,95 @@ button { font-family: inherit; }
 .notify-close:hover { background: var(--bg-elevated); color: var(--text); }
 .notify-close:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
-.title-wrap {
+/* ---- Chat tabs (header) — up to three; one tab looks like the old title (no ✕) ---- */
+.tab-strip {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 2px;
+  overflow: hidden;
 }
-.title {
+.chat-tab {
   flex: 0 1 auto;
+  min-width: 44px;
+  max-width: 150px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 8px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.chat-tab:hover { background: var(--bg-elevated); }
+.chat-tab.active {
+  flex: 0 0 auto;
+  min-width: 90px;
+  max-width: 60%;
+  color: var(--text);
+  background: var(--bg-elevated);
+}
+.chat-tab.single { background: none; padding-left: 0; }
+.chat-tab-title {
+  flex: 1 1 auto;
   min-width: 0;
   font-size: calc(13px * var(--fs));
-  font-weight: 600;
-  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* edit icon top-right of the title — revealed on header hover / keyboard focus */
-.rename-btn {
+.chat-tab.active .chat-tab-title { font-weight: 600; }
+.chat-tab-btn {
   flex: 0 0 auto;
-  opacity: 0;
-  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
 }
-.header:hover .rename-btn,
-.rename-btn:focus-visible { opacity: 1; }
+.chat-tab-btn:hover { background: var(--border); color: var(--text); }
+.chat-tab-btn:focus-visible { display: inline-flex; outline: 1px solid var(--accent); }
+/* rename only on the active tab, ✕ on hover / the active tab; a single tab has no ✕ */
+.chat-tab.active:hover .chat-tab-rename { display: inline-flex; }
+.chat-tab:hover .chat-tab-close,
+.chat-tab.active .chat-tab-close { display: inline-flex; }
+.chat-tab.single .chat-tab-close { display: none; }
+/* status marker: working (spinner) · needs you (orange) · finished, unseen (green) · error (red) · remote */
+.chat-tab-mark { flex: 0 0 auto; width: 0; height: 8px; border-radius: 50%; }
+.chat-tab-mark.working,
+.chat-tab-mark.attention,
+.chat-tab-mark.done,
+.chat-tab-mark.error,
+.chat-tab-mark.remote { width: 8px; }
+.chat-tab-mark.attention { background: var(--warn); box-shadow: 0 0 0 2px rgba(217,162,63,0.25); }
+.chat-tab-mark.done { background: var(--ok); }
+.chat-tab-mark.error { background: var(--error); }
+.chat-tab-mark.remote { background: var(--accent); }
+.chat-tab-mark.working {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--accent-faint);
+  border-top-color: var(--accent);
+  animation: chat-tab-spin 0.9s linear infinite;
+}
+@keyframes chat-tab-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chat-tab-mark.working { animation: none; border-color: var(--accent); } }
+.chat-tab-add { flex: 0 0 auto; }
+.chat-tab-add[hidden] { display: none; }
+/* narrow panel: background tabs shrink to marker + a few letters */
+@media (max-width: 360px) {
+  .chat-tab:not(.active) { min-width: 30px; max-width: 70px; padding-left: 6px; }
+  .chat-tab.active { max-width: 55%; }
+}
 .header-actions {
   flex: 0 0 auto;
   display: flex;
@@ -2775,3 +2839,90 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 #btn-remote.active { color: var(--accent); }
 /* attachment chips render dynamically — lock them via the root class */
 .remote-locked .attachments button { pointer-events: none; opacity: 0.6; }
+
+/* rewind dialog: other tabs share the workspace (multi-session tabs) */
+.cp-tabs-hint {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--warn);
+  font-size: calc(12px * var(--fs));
+  color: var(--text-dim);
+}
+/* history: a chat that is open in another tab */
+.hi-tab {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: calc(10.5px * var(--fs));
+  color: var(--accent);
+  background: var(--accent-faint);
+}
+
+/* ---- Sign-in dialog (auth.*) ---------------------------------------------- */
+.login-modal { width: min(440px, calc(100vw - 32px)); }
+.login-intro { margin-bottom: 12px; }
+.login-open { width: 100%; min-height: 32px; }
+.login-other {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.login-qr-wrap { flex: 0 0 auto; width: 120px; min-height: 120px; border-radius: 6px; background: var(--bg-elevated); }
+.login-qr { display: block; border-radius: 6px; }
+.login-other-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.login-other-title { font-weight: 600; font-size: calc(12.5px * var(--fs)); color: var(--text); }
+.login-other-hint { font-size: calc(12px * var(--fs)); color: var(--text-dim); line-height: 1.4; }
+.login-code-row { display: flex; gap: 6px; }
+.login-code-row .modal-input { flex: 1 1 auto; min-width: 0; margin: 0; }
+.login-code-btn { flex: 0 0 auto; white-space: nowrap; }
+.login-link-btn {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: calc(12px * var(--fs));
+  cursor: pointer;
+}
+.login-link-btn:hover { text-decoration: underline; }
+.login-link-btn[hidden] { display: none; }
+.login-status { margin-top: 12px; min-height: 1.4em; font-size: calc(12px * var(--fs)); color: var(--text-dim); }
+.login-status.error { color: var(--error); }
+.login-actions { justify-content: space-between; align-items: center; }
+@media (max-width: 380px) { .login-other { flex-direction: column; } }
+
+/* "Claude is not signed in" card (a turn failed: login missing / expired) */
+.auth-card {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+.auth-card-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.auth-card-text { font-size: calc(12.5px * var(--fs)); color: var(--text-dim); margin-bottom: 8px; line-height: 1.45; }
+.auth-card.done { border-color: var(--ok); }
+
+/* Account section at the top of the gear popover */
+.account-row { display: flex; align-items: center; gap: 10px; margin: 2px 0 8px; }
+.account-info { flex: 1 1 auto; min-width: 0; }
+.account-who { font-size: calc(12.5px * var(--fs)); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-details { font-size: calc(11px * var(--fs)); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-btn { flex: 0 0 auto; padding: 4px 10px; min-height: 26px; }
+
+/* message date + time (settings: "Always show date and time on messages"; otherwise only the bubble's hover tooltip) */
+.msg-time { display: none; }
+:root.show-timestamps .msg-user,
+:root.show-timestamps .msg-assistant { flex-wrap: wrap; }
+:root.show-timestamps .msg-time {
+  display: block;
+  flex: 0 0 100%;
+  margin: 2px 0 -2px 2px;
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-faint);
+  user-select: none;
+}

@@ -60,7 +60,8 @@ PR anlegen; nur auf ausdrücklichen Wunsch.
 
 ## Architektur in einem Satz je Schicht
 `WebUI/` (single-page, dependency-frei, §3-Nachrichten-Kontrakt) ↔ `Bridge/WebViewBridge.cs`
-(Kontrakt host-seitig, UI-Thread-Marshaling) → `Core/` (UI-frei + getestet: NdjsonParser,
+(Kontrakt host-seitig, UI-Thread-Marshaling, alles was die Chat-Tabs teilen) + **`Bridge/ChatSession.cs`**
+(ein Chat-Tab, bis zu 3; Nachrichten tragen `tab` — s. NOTES „Chat tabs") → `Core/` (UI-frei + getestet: NdjsonParser,
 ClaudeSessionService, ClaudeCliProcessHost, **ModelCatalog + ClaudeModelCatalog** (Modell-Liste),
 **McpPermissionBridge** (`IPermissionBridge`, in-process MCP-Server), UsageClient, FileLister,
 RemoteControlHost, CliSessionReader) — daneben `Services/`
@@ -136,6 +137,12 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   Registry-Eintrag `"state": "done"`), importiert der nächste Start den Verlauf aus der `.jsonl` und `rm`t den Eintrag.
   Ausgabeformate undokumentiert (s. NOTES „Remote Control") — beim CLI-Update gegentesten. **`claude remote-control --help` NICHT aufrufen** (ignoriert `--help`, startet
   einen Server). Ältere CLI ohne `--bg` → alter Konsolen-Weg (`RemoteTerminalLauncher`).
+  **Prompts aus dem Panel während Remote (2026-11-23):** die CLI hat dafür keinen Befehl → `claude attach <id>` in einem
+  **versteckten ConPTY** (`Core/PseudoConsole`, `Core/RemotePromptSender`): nur bei sichtbarem leerem Eingabefeld (nie in
+  einen Freigabe-/Frage-Dialog tippen) und `idle`, Bracketed Paste **nur mit `\n`** (ein `\r` schickt die Zeile sofort ab!),
+  Enter erst nach Sichtprüfung, dann nur den `attach`-Prozess beenden (nie den Baum — der Daemon hostet die Session).
+  TUI-Verhalten undokumentiert → beim CLI-Update gegentesten (nur mit Wegwerf-`--bg`-Session und lokalem `/context`, kein Modell-Call).
+  **Worktree-Sperre (CLI 2.1.33x):** `--bg`-Sessions dürfen im Haupt-Checkout standardmäßig nicht editieren (`worktree.bgIsolation`); die Remote-Session startet deshalb mit `--settings {"worktree":{"bgIsolation":"none"}}` (nur diese Session, keine Datei; `CLAUDE_BG_ISOLATION` reicht der Daemon NICHT durch).
 - **Prompt-Suggestions + stream-json-Input (2026-10-08, CLI 2.1.287):** Der Prompt geht als **stream-json-
   User-Message** über stdin (`--input-format stream-json`, `Core/StreamJsonInput`, stdin zu beim `result` — weiterhin
   ein Prozess pro Turn, NICHT der entfernte persistente Modus). Nur so liefert die CLI `prompt_suggestion`
@@ -151,6 +158,12 @@ RemoteControlHost, CliSessionReader) — daneben `Services/`
   „Plugins, skills & MCP panel“). Ausgaben undokumentiert/Text → beim CLI-Update gegentesten. Testen **nur** mit
   `CLAUDE_CONFIG_DIR` auf einem Temp-Ordner, nie gegen Jans echte Konfiguration. `claude -p /cost` ist **nicht**
   kostenlos (geht ans Modell).
+- **Login/Logout (2026-11-23, CLI 2.1.319):** nur über `claude auth status --json | login | logout`
+  (`Core/ClaudeAuth`, `Bridge/AuthController`). `claude auth login` übergibt die URL mit localhost-Callback an
+  **`BROWSER`** (wir setzen ein Capture-Skript → Button „Open sign-in page“), druckt eine zweite URL (Code-Seite →
+  QR + Code-Feld, Code geht per stdin rein). Verhalten undokumentiert → beim CLI-Update gegentesten. Testen **nur mit
+  `CLAUDE_CONFIG_DIR` auf einem Temp-Ordner** — nie Jans echte CLI ausloggen. Abgelaufener Login im Turn:
+  Assistant-Message mit `"error": "authentication_failed"` (s. NOTES „Sign-in“).
 - Geprüft gegen CLI **2.1.178** (Voll-Re-Verifikation 2026-06-17 — s. NOTES Kopf); `--effort`,
   `--permission-mode`-Werte, MCP-Permission-Protokoll + **-Timeout-Deliverer** (s. o.) und das Format
   des `/usage`-Report-Texts (Usage-Meter via `claude -p /usage --output-format json` — s.

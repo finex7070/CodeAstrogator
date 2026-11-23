@@ -111,15 +111,32 @@ namespace CodeAstrogator.Core
             return last;
         }
 
-        /// <summary>True when a background session is gone: no longer listed, or listed as stopped/exited/done
-        /// (an ended entry carries no pid; one whose host died with the PC shows as <c>"state": "done"</c>).</summary>
-        public static bool HasEnded(BackgroundSessionInfo? session)
+        /// <summary>True when a background session is gone: no longer listed, or listed as stopped/exited/failed, or
+        /// <c>"done"</c> <b>without a living process</b>. CLI 2.1.33x reports <c>"state": "done"</c> after every finished
+        /// turn while the session lives on (pid kept, <c>status: idle</c> — measured 2.1.330); a stopped one / one whose
+        /// host died with the PC shows <c>done</c> with no pid. Counting every <c>done</c> as the end imported and removed a
+        /// running remote session after each of its turns.</summary>
+        private static bool IsProcessAlive(int pid)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                return !process.HasExited;
+            }
+            catch
+            {
+                return false; // no such process (any more)
+            }
+        }
+
+        public static bool HasEnded(BackgroundSessionInfo? session, Func<int, bool>? isAlive = null)
         {
             if (session == null)
                 return true;
             var state = session.State ?? "";
+            if (state.Equals("done", StringComparison.OrdinalIgnoreCase))
+                return session.Pid == null || !(isAlive ?? IsProcessAlive)(session.Pid.Value);
             if (state.Equals("stopped", StringComparison.OrdinalIgnoreCase)
-                || state.Equals("done", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("exited", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("failed", StringComparison.OrdinalIgnoreCase)
                 || state.Equals("error", StringComparison.OrdinalIgnoreCase))

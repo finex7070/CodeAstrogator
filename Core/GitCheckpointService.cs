@@ -148,6 +148,27 @@ namespace CodeAstrogator.Core
 
         private static int _gitAvailable = -1; // -1 = not probed yet, 0 = no, 1 = yes
         private readonly SemaphoreSlim _initLock = new SemaphoreSlim(1, 1);
+
+        // One lock per shadow repo, shared by every instance in the process: all snapshots of a workspace stage
+        // through the same private index (ca-index), so two chat tabs snapshotting / rewinding / pruning at once
+        // would fail on ca-index.lock (or interleave). Covers snapshot, diff against the work-tree, restore,
+        // prune and gc. Not across processes — two VS instances on one workspace can still collide (pre-existing).
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> RepoLocks =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase);
+
+        private static async Task<IDisposable> LockRepoAsync(string repoDir)
+        {
+            var gate = RepoLocks.GetOrAdd(Path.GetFullPath(repoDir).TrimEnd('\\', '/'), _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync().ConfigureAwait(false);
+            return new RepoLockRelease(gate);
+        }
+
+        private sealed class RepoLockRelease : IDisposable
+        {
+            private SemaphoreSlim? _gate;
+            public RepoLockRelease(SemaphoreSlim gate) { _gate = gate; }
+            public void Dispose() => Interlocked.Exchange(ref _gate, null)?.Release();
+        }
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _initialized
             = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         /// <summary>
@@ -432,6 +453,12 @@ namespace CodeAstrogator.Core
         public async Task<CheckpointInfo?> SnapshotAsync(string solutionDir, string refName, string label,
             int timeoutMs = DefaultTimeoutMs)
         {
+            using (await LockRepoAsync(GetRepoDir(solutionDir)).ConfigureAwait(false))
+                return await SnapshotCoreAsync(solutionDir, refName, label, timeoutMs).ConfigureAwait(false);
+        }
+
+        private async Task<CheckpointInfo?> SnapshotCoreAsync(string solutionDir, string refName, string label, int timeoutMs)
+        {
             if (await EnsureInitializedAsync(solutionDir).ConfigureAwait(false) != null)
                 return null;
             var gitDir = GetGitDir(solutionDir);
@@ -626,8 +653,9 @@ namespace CodeAstrogator.Core
         {
             if (!IsGitAvailable() || !File.Exists(Path.Combine(GetGitDir(solutionDir), "HEAD")))
                 return;
-            await RunAsync(GetGitDir(solutionDir), null, new[] { "gc", "--auto", "--quiet" }, timeoutMs: 300_000)
-                .ConfigureAwait(false);
+            using (await LockRepoAsync(GetRepoDir(solutionDir)).ConfigureAwait(false))
+                await RunAsync(GetGitDir(solutionDir), null, new[] { "gc", "--auto", "--quiet" }, timeoutMs: 300_000)
+                    .ConfigureAwait(false);
         }
 
         /// <summary>True when the object still exists (a pruned checkpoint reports false).</summary>
@@ -691,6 +719,13 @@ namespace CodeAstrogator.Core
         /// the state of a git index). <paramref name="paths"/> null = the whole work-tree.
         /// </summary>
         public async Task<IReadOnlyList<CheckpointFileChange>> DiffAsync(
+            string solutionDir, string fromSha, string? toSha, IReadOnlyList<string>? paths)
+        {
+            using (await LockRepoAsync(GetRepoDir(solutionDir)).ConfigureAwait(false))
+                return await DiffCoreAsync(solutionDir, fromSha, toSha, paths).ConfigureAwait(false);
+        }
+
+        private async Task<IReadOnlyList<CheckpointFileChange>> DiffCoreAsync(
             string solutionDir, string fromSha, string? toSha, IReadOnlyList<string>? paths)
         {
             var changes = new Dictionary<string, CheckpointFileChange>(StringComparer.OrdinalIgnoreCase);
@@ -813,6 +848,13 @@ namespace CodeAstrogator.Core
         public async Task<RestoreResult> RestoreAsync(string solutionDir, string sha,
             IReadOnlyList<string>? paths, string safetyRefName)
         {
+            using (await LockRepoAsync(GetRepoDir(solutionDir)).ConfigureAwait(false))
+                return await RestoreCoreAsync(solutionDir, sha, paths, safetyRefName).ConfigureAwait(false);
+        }
+
+        private async Task<RestoreResult> RestoreCoreAsync(string solutionDir, string sha,
+            IReadOnlyList<string>? paths, string safetyRefName)
+        {
             var result = new RestoreResult();
             var initError = await EnsureInitializedAsync(solutionDir).ConfigureAwait(false);
             if (initError != null)
@@ -821,8 +863,8 @@ namespace CodeAstrogator.Core
                 return result;
             }
 
-            var safety = await SnapshotAsync(solutionDir, safetyRefName, "auto: before rewind to " + Short(sha))
-                .ConfigureAwait(false);
+            var safety = await SnapshotCoreAsync(solutionDir, safetyRefName, "auto: before rewind to " + Short(sha),
+                DefaultTimeoutMs).ConfigureAwait(false);
             if (safety == null)
             {
                 result.Error = "Could not snapshot the current state — nothing was changed.";
@@ -830,7 +872,7 @@ namespace CodeAstrogator.Core
             }
             result.SafetySha = safety.Sha;
 
-            var changes = await DiffAsync(solutionDir, sha, safety.Sha, paths).ConfigureAwait(false);
+            var changes = await DiffCoreAsync(solutionDir, sha, safety.Sha, paths).ConfigureAwait(false);
             // the safety snapshot IS the present work-tree
             changes = await DropFilterArtifactsAsync(solutionDir, sha, changes.ToList()).ConfigureAwait(false);
             if (changes.Count == 0)
@@ -934,6 +976,12 @@ namespace CodeAstrogator.Core
         {
             if (retentionDays <= 0 || !IsGitAvailable())
                 return 0;
+            using (await LockRepoAsync(repoDir).ConfigureAwait(false))
+                return await PruneRepoCoreAsync(repoDir, retentionDays).ConfigureAwait(false);
+        }
+
+        private static async Task<int> PruneRepoCoreAsync(string repoDir, int retentionDays)
+        {
             var gitDir = Path.Combine(repoDir, ".git");
             if (!File.Exists(Path.Combine(gitDir, "HEAD")))
                 return 0;

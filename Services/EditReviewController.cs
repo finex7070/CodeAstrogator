@@ -323,6 +323,20 @@ namespace CodeAstrogator.Services
             return path != null && _turnViews.ContainsKey(path);
         }
 
+        /// <summary>Cancels the open post-turn reviews of these paths (one chat tab's files — the controller is shared
+        /// by the tabs). Any thread.</summary>
+        public void CloseTurnReviews(IEnumerable<string> paths)
+        {
+            var list = new List<string>(paths);
+#pragma warning disable VSTHRD010
+            RunOnUi(() =>
+            {
+                foreach (var path in list)
+                    CancelPathCore(path);
+            });
+#pragma warning restore VSTHRD010
+        }
+
         /// <summary>Cancels every open post-turn review (Keep all / session change / turn abandon).</summary>
         public void CloseAllTurnReviews()
         {

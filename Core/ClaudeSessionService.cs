@@ -174,6 +174,12 @@ namespace CodeAstrogator.Core
         /// <summary>Raised when a turn ends; string carries an error description or null.</summary>
         public event Action<ClaudeTurnExit, string?>? TurnCompleted;
 
+        /// <summary>The turn has let go of the busy flag (raised right after <see cref="TurnCompleted"/> once
+        /// <see cref="IsBusy"/> is false). <see cref="TurnCompleted"/> fires while the flag is still up — its handler
+        /// tells the UI "ready", and a prompt the UI sends at once (a queued one) can arrive before the flag drops:
+        /// the bridge holds such a prompt and runs it from here. Any thread.</summary>
+        public event Action? TurnReleased;
+
         /// <summary>Forgets the session id so the next turn starts a fresh conversation.</summary>
         public void ResetSession()
         {
@@ -211,6 +217,9 @@ namespace CodeAstrogator.Core
 
         /// <summary>Kills whatever process is left (tool window closing).</summary>
         public void Shutdown() => _ = EndProcessAsync();
+
+        /// <summary>Like <see cref="Shutdown"/>, but completes when the lingering process has ended (no turn may run).</summary>
+        public Task ShutdownAsync() => EndProcessAsync();
 
         private static void Cancel(CliProcess? p)
         {
@@ -313,7 +322,10 @@ namespace CodeAstrogator.Core
             finally
             {
                 if (!handedBack)
+                {
                     Volatile.Write(ref _busy, 0);
+                    TurnReleased?.Invoke();
+                }
             }
         }
 
@@ -602,6 +614,7 @@ namespace CodeAstrogator.Core
             }
             TurnCompleted?.Invoke(new ClaudeTurnExit { ExitCode = 0 }, error);
             Volatile.Write(ref _busy, 0);
+            TurnReleased?.Invoke();
             done?.TrySetResult(null);
         }
 
@@ -636,6 +649,7 @@ namespace CodeAstrogator.Core
                 // nobody awaits the CLI's own follow-up turn — end it here
                 TurnCompleted?.Invoke(exit, failure != null ? failure.Message : ComposeError(exit));
                 Volatile.Write(ref _busy, 0);
+                TurnReleased?.Invoke();
             }
             else if (failure != null)
             {

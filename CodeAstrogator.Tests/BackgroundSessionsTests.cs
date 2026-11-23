@@ -16,6 +16,30 @@ namespace CodeAstrogator.Tests
             "  claude stop 8a6d7f9e      stop this session\n";
 
         [Fact]
+        public void DoneAfterATurn_WithALivingProcess_IsNotTheEnd()
+        {
+            // CLI 2.1.330: after every finished turn a background session reports "state": "done" and keeps running
+            var afterTurn = "[{\"pid\":12780,\"id\":\"43735238\",\"kind\":\"background\",\"sessionId\":\"s1\",\"status\":\"idle\",\"state\":\"done\"}]";
+            var info = ClaudeBackgroundSessions.ParseAgents(afterTurn).Single();
+            Assert.False(ClaudeBackgroundSessions.HasEnded(info, pid => true));
+            Assert.True(ClaudeBackgroundSessions.HasEnded(info, pid => false)); // the host process is gone
+            // stopped: "done" without a pid
+            var stopped = "[{\"id\":\"43735238\",\"kind\":\"background\",\"sessionId\":\"s1\",\"state\":\"done\"}]";
+            Assert.True(ClaudeBackgroundSessions.HasEnded(ClaudeBackgroundSessions.ParseAgents(stopped).Single(), pid => true));
+        }
+
+        [Fact]
+        public void RemoteStart_LiftsTheWorktreeGuard_ForThisSessionOnly()
+        {
+            // CLI 2.1.33x blocks Edit/Write of background sessions in the main checkout (worktree.bgIsolation) — the
+            // remote session gets "none" via --settings (forwarded by the daemon, measured 2.1.330)
+            var args = Services.BackgroundRemoteSession.BuildStartArguments("726d54a4-3afd", "Fix the cart totals");
+            Assert.Equal("--bg --resume 726d54a4-3afd --settings \"{\\\"worktree\\\":{\\\"bgIsolation\\\":\\\"none\\\"}}\" "
+                + "--remote-control \"Fix the cart totals\"", args);
+            Assert.StartsWith("--bg --settings ", Services.BackgroundRemoteSession.BuildStartArguments(null, null));
+        }
+
+        [Fact]
         public void StartOutput_YieldsTheShortId() =>
             Assert.Equal("8a6d7f9e", ClaudeBackgroundSessions.ParseStartedId(StartOutput));
 

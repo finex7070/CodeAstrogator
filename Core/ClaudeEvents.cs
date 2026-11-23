@@ -186,6 +186,12 @@ namespace CodeAstrogator.Core
         /// turn — the CLI tags subagent results with <c>parent_tool_use_id</c>. Such results are
         /// rendered as a subordinate agent footer, not as a (duplicate-looking) turn end.</summary>
         public string? ParentToolUseId { get; set; }
+
+        /// <summary>The turn failed because the CLI is not (or no longer) signed in: the CLI's synthetic
+        /// assistant message carries <c>"error": "authentication_failed"</c> ("Not logged in · Please run
+        /// /login", measured 2.1.319); a failed result whose text asks for <c>/login</c> counts too.
+        /// The panel then offers to sign in again (see <see cref="ClaudeAuth"/>).</summary>
+        public bool AuthFailed { get; set; }
     }
 
     /// <summary>

@@ -340,6 +340,7 @@ namespace CodeAstrogator
             to.SyntaxTheme = AstrogatorOptions.NormalizeSyntaxTheme(from.SyntaxTheme);
             to.UserMessageColor = from.UserMessageColor ?? "";
             to.ColorBlindDiffs = from.ColorBlindDiffs;
+            to.ShowMessageTimestamps = from.ShowMessageTimestamps;
             to.BubbleIntensity = AstrogatorOptions.NormalizeBubbleIntensity(from.BubbleIntensity);
             to.CustomFonts = (from.CustomFonts ?? new List<string>()).Where(f => !string.IsNullOrWhiteSpace(f))
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToList();

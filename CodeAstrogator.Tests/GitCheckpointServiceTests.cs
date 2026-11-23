@@ -79,6 +79,21 @@ namespace CodeAstrogator.Tests
         // ── tests ───────────────────────────────────────────────────────────
 
         [Fact]
+        public async Task ParallelSnapshots_OfOneWorkspace_AllSucceed()
+        {
+            // two chat tabs on one workspace snapshot at the same time — they share the private index (ca-index),
+            // so without the per-repo lock one of them fails on ca-index.lock
+            if (!HasGit) return;
+            Assert.NotNull(await SnapshotAsync("warmup")); // the first (initializing) snapshot
+            Write("src/Program.cs", "one\ntwo\nthree\nfour\n");
+            var other = new GitCheckpointService(); // another instance: the lock is per repo, not per instance
+            var all = await Task.WhenAll(Enumerable.Range(0, 6).Select(i => i % 2 == 0
+                ? SnapshotAsync("p" + i)
+                : other.SnapshotAsync(_root, Ref("p" + i), "test p" + i)));
+            Assert.All(all, Assert.NotNull);
+        }
+
+        [Fact]
         public async Task Restore_WritesTheOldContentBack()
         {
             if (!HasGit)
