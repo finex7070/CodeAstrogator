@@ -108,9 +108,12 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
   remote control itself now lives in `Services/RemoteTerminalLauncher` — interactive console, see "Remote Control"),
   `GitCheckpointService` (shadow-repo file checkpoints per turn + rewind, see "File checkpoints / rewind"),
   `CliCommandRunner` + `ClaudePluginClient` + `ClaudeMcpClient` + `SkillCatalog` + `ClaudeSettingsFiles`
-  (plugins/skills/MCP management, see "Plugins, skills & MCP panel"), `ToastContent` (notification texts).
+  (plugins/skills/MCP management, see "Plugins, skills & MCP panel"), `ToastContent` (notification texts),
+  `ClaudeAuth` + `ClaudeLoginProcess` (sign-in through `claude auth …`, see "Sign-in").
 - `Bridge/ManagementPanel.cs` — host side of the plugins/skills/MCP panel (`manage.*`).
-- `Bridge/WebViewBridge.cs` — complete §3 message contract host-side, thread marshaling.
+- `Bridge/AuthController.cs` — sign in / out, account state (`auth.*`).
+- `Bridge/WebViewBridge.cs` — the chat host: §3 message contract host-side, thread marshaling, everything the
+  chat tabs share; `Bridge/ChatSession.cs` — one chat tab (nested `WebViewBridge.ChatSession`, see "Chat tabs").
 - `Services/` — `ThemeService` (VS colors → CSS vars), `SessionHistoryStore`
   (JSON persistence), `ActiveDocumentTracker` (`IVsMonitorSelection` → active editor file),
   `WindowsToastNotifier` (Windows notifications, see "Windows notifications (toasts)"; texts in `Core/ToastContent`).
@@ -351,8 +354,9 @@ still holds**: measured at `tools/call` time, `old_string` was still on disk and
    (Context window model-dependent instead of fixed 200k: done 2026-10-28, see `context.usage`.)
 5. ~~**Plugin & skill management**~~ — **done in 1.3.0** (panel: installed / discover / skills / marketplaces, all through
    `claude plugin …`, plus MCP servers via `claude mcp …`) — **next**; plan in `docs/plugins-skills-plan.md` (2026-11-06).
-6. **Multiple sessions as tabs** (up to 3 in one WebView) — after the plugin panel; draft plan in
-   `docs/multi-session-tabs-plan.md` (2026-11-04), not started.
+6. ~~**Multiple sessions as tabs**~~ — **built for 1.4.0** (2026-11-18, see "Chat tabs"); plan in
+   `docs/multi-session-tabs-plan.md`. Still to be verified in real VS (only build, tests and the browser mock so far).
+   Follow-ups: per-tab model/effort/permission mode, keyboard shortcuts for tabs, lazy restore of background tabs.
 
 Done (2026-06-03): `session.rename` + limits `resets_at` tooltips; theme fix
 (inline vars), copy context menu, Ctrl+V file/image paste, dynamic slash menu +
@@ -361,6 +365,15 @@ host-side `/help`, **Remote Control** (button → QR/link → Stop → session i
 compact_boundary evaluation) — details in the respective sections below.
 
 ## Contract additions (Part B §3)
+- **Remote Control prompts & mirror (2026-11-23)** — host→web `remote.prompt { state, message? }`,
+  `remote.state.canPrompt`, `transcript.mirror { reset, from, messages }`; web→host `remote.cancelPrompt`
+  (`prompt.send` goes into the remote session while it runs). Details: "Remote Control" → "Prompting from the panel".
+- **Sign-in (2026-11-23)** — host→web `auth.state` (extended: email, org, plan, expiresAt, canLogout, reason),
+  `auth.login { state, … }`, `auth.required { message }`; web→host `auth.login|open|code|cancel|logout|refresh`.
+  Details: section "Sign-in".
+- **Chat tabs (1.4.0, 2026-11-18)** — every session message carries **`tab`** (both directions; `manage.*` excepted);
+  host→web `tabs.state { tabs: [{ id }], activeId, max }`, `session.title { title }`; web→host `tab.new`,
+  `tab.select { id }`, `tab.close { id }`. Details: section "Chat tabs".
 - **`manage.*` — "Plugins, skills & MCP" panel (2026-11-10, read-only so far; see `docs/plugins-skills-plan.md`).**
   web→host `manage.load { tab }` (`installed` | `discover` | `skills` | `mcp` | `marketplaces`) and
   `manage.details { id }`; host→web `manage.plugins { installed }`, `manage.available { plugins, installedIds }`,
@@ -701,6 +714,110 @@ compact_boundary evaluation) — details in the respective sections below.
     starts (`applyStatus`, idle/error → working, not a mid-turn permission round-trip) and when the
     transcript is cleared, so a completed turn's footer stays put.
 
+## Sign-in (2026-11-23)
+- **What:** sign in / out of the Claude Code CLI from the panel. Gear popover → **Account** (email · organization ·
+  plan, **Sign out** with a confirmation — it signs the CLI out on this PC, terminal included); signed out → the
+  empty tabs show **Sign in**; `/login` opens the sign-in dialog, `/logout` the confirmation (both handled by the
+  page, always in the `/` menu). A turn that fails because the login is missing or **expired** gets a card
+  "Claude is not signed in" with **Sign in again** in its tab, and the dialog opens right away (active tab).
+- **Only the official CLI** (`Core/ClaudeAuth`, `Bridge/AuthController`): `claude auth status --json` (state;
+  exit 1 + JSON when signed out), `claude auth login [--claudeai|--console]`, `claude auth logout`. No token is
+  read; the email/org/plan come from `auth status` (not secrets). Older CLIs without `auth status --json` fall back
+  to the file-based guess (`ClaudeExecutableLocator.ProbeAuthState`).
+- **How `claude auth login` behaves without a terminal (measured 2.1.319, temp `CLAUDE_CONFIG_DIR`):**
+  1. it hands a sign-in URL to **`BROWSER`** whose redirect is its **own localhost listener**
+     (`redirect_uri=http://localhost:<port>/callback`, listening on 127.0.0.1). `ClaudeLoginProcess` points
+     `BROWSER` at a throw-away `open-browser.cmd` (`>"<file>" echo %*`, in `%TEMP%\CodeAstrogator\login-<guid>`)
+     that only **records** the URL — the panel's **Open sign-in page** opens it in the default browser and the
+     sign-in completes by itself;
+  2. it prints `If the browser didn't open, visit: <url>` — redirect = Anthropic's code page
+     (`platform.claude.com/oauth/code/callback`), so it works on **any device**: shown as **QR code** + "Copy
+     link"; the page shows a code, the panel's code field writes it to stdin (`Paste code here if prompted >`);
+  3. exit 0 = signed in; exit 1 + `Login failed: …` on stderr (e.g. a wrong code: "That code wasn't accepted …").
+  Only https URLs on claude.com / claude.ai / anthropic.com are opened or shown (`ClaudeAuth.IsSignInUrl`). Should a
+  CLI stop calling `BROWSER`, the button falls back to the code-page URL (paste flow).
+- **Expired login detection:** the CLI answers a turn without a valid login with a synthetic assistant message
+  tagged **`"error": "authentication_failed"`** ("Not logged in · Please run /login") and a failed result with the
+  same text → `TurnResultEvent.AuthFailed` (parser; also when only the result text asks for `/login` or says "OAuth
+  token has expired"). The tab posts `auth.required`; the host re-checks `auth status`. An actually expired token
+  could not be reproduced — the tag/text match is the assumption to re-check when it happens.
+- **Rules:** one login at a time per window (a new one replaces the running one; Cancel / Esc / closing the window
+  kills it); sign-out is refused while a turn or a remote session runs; after sign in / out the plan label and the
+  usage meters are re-read. The dialog is its own element in `#overlay-layer` (a tab switch or popover does not close it).
+- **Contract:** host→web `auth.state { loggedIn, mode: oauth|apiKey|provider|none, method, provider, email, org, plan,
+  expiresAt, canLogout, noCli?, reason?: signedIn|signedOut|expired }`, `auth.login { state:
+  starting|waiting|verifying|error|done|cancelled, console, hasLink?, manualUrl?, message? }`, `auth.required
+  { message }` (per tab); web→host `auth.login { console }`, `auth.open`, `auth.code { code }`, `auth.cancel`,
+  `auth.logout`, `auth.refresh`. The old `/login` help text is gone.
+- **Testing:** browser mock (fictional account; a prompt containing "expired" simulates an expired login, a code
+  starting with "bad" a rejected one). Against the real CLI **only with `CLAUDE_CONFIG_DIR` on a temp folder** —
+  never sign Jan's real CLI out.
+
+## Chat tabs — several sessions in one panel (1.4.0, 2026-11-18)
+Design rationale and the phase plan: **`docs/multi-session-tabs-plan.md`**. Current state:
+- **What:** up to **3 chat tabs** in the header (they replace the title): title + status marker each, ✕ (with a
+  confirmation while the tab's turn runs or its end-of-turn review is pending), "+" while fewer than 3. Rename =
+  the pencil of the active tab or a double-click on its title (the old `#btn-rename` is gone). One tab looks like
+  the old title (no ✕). Markers: spinner = working · orange = needs you (permission / question / plan) · green =
+  finished while you were elsewhere (cleared when the tab is shown) · red = error · accent = Remote Control.
+- **Host split:** `Bridge/WebViewBridge.cs` = the **chat host** (one per tool window: WebView, `Post`, options,
+  usage meters, theme/fonts, model catalog, banners, `ManagementPanel`, workspace switching, active document,
+  attachments from outside the page, and the **shared** `SessionHistoryStore`, `GitCheckpointService`,
+  `EditReviewController`, `WindowsToastNotifier`); `Bridge/ChatSession.cs` = **one tab** (nested class
+  `WebViewBridge.ChatSession`: `ClaudeSessionService` + process host, its **own** `McpPermissionBridge` (own
+  port + config file), the chat record it shows, all turn state — permissions/questions, checkpoint turn state,
+  end-of-turn review, shell calls, background tasks, Remote Control, the active-file toggle, plan mode).
+  The nested class reaches the host's shared services through forwarding properties (`_history`, `_package`, …).
+- **Routing:** every host→web message of a tab carries **`tab`** (`ChatSession.Post`); every web→host message
+  carries the page's context tab (`post()` in app.js) and the host routes session messages by it
+  (`TabFor` → `ChatSession.HandleMessage`; unknown/absent → the active tab), the rest is shared. **Exception:**
+  `manage.*` uses `tab` for the plugins panel's own tabs — both sides skip those (`isPanelMessage`).
+  A closed tab posts nothing more (`_closed`), and the page drops messages of unknown tabs.
+- **Global vs. per tab:** model, effort, permission mode, Ultracode and the auto-accept/review toggles stay
+  **persisted options** (every tab re-mirrors them, `SyncAllTabsFromOptions`); **plan mode is per tab**
+  (`mode.set` carries the tab). The Model · Mode pill shows the active tab.
+- **History store:** no single `Current` any more — several records are **open** (one per tab); empty records are
+  never listed or saved; open ones come first and are never cut by the 50-session cap. **One chat, one tab:**
+  `session.load` of a chat open in another tab selects that tab (host, `TabShowing`); `session.delete` of such a
+  chat goes to the tab that holds it (refused while its turn runs, else that tab starts fresh). The history panel
+  marks those chats ("open") and switches to their tab on click — even while the active tab is busy.
+- **Restart:** the history file also stores `openTabs` (chat ids, tab order) and `activeTab`; with "Restore last
+  session" on, the next start (and a workspace switch) reopens them (`RestoreOpenTabs`, once per store, only
+  while the panel is untouched). Files from before tabs fall back to the old "most recent chat". **Deviation:**
+  background tabs are restored eagerly, not lazily (the transcripts are already in memory; measure if it matters).
+- **Workspace switch:** waits until **no** tab has a running turn or remote session; then all tabs but the first
+  close (their chats stay in the old workspace's history, saved with its open tabs) and the new workspace's saved
+  tabs are restored.
+- **WebView reload (`ready`):** `tabs.state` first, then every tab's `session.init` + transcript (+ review list),
+  background tasks and remote state.
+- **Checkpoints:** one service; all snapshots of a workspace stage through one private index (`ca-index`), so
+  snapshot / diff against the work-tree / restore / prune / gc take a **per-repo lock** (static, keyed by repo dir;
+  `RestoreAsync` runs the unlocked cores inside it). Not across processes (two VS instances — pre-existing). With
+  more than one tab the rewind dialog warns that rewinding files can also undo another tab's changes; a turn's
+  diff also contains what another tab changed meanwhile.
+- **Edit review:** inline — `EditReviewController.Open` already refuses a second review of a file under review
+  (the card stays in the chat). End of turn — a file in another tab's pending review is not reviewed again (note
+  in the chat); a tab only cancels **its own** in-editor reviews (`CloseTurnReviews(paths)`, not
+  `CloseAllTurnReviews`).
+- **Toasts:** tags are per tab (`t2-turn`, `t2-<request id>`, then process-scoped `p<pid>-…`); a click brings VS
+  up and selects that tab (`WindowsToastNotifier` now passes the clicked toast's tag).
+- **Remote Control:** one at a time (`RemoteRunsInOtherTab`; the header button is disabled on the other tabs);
+  the tab running it is locked, the others stay usable; its panel shows only on that tab; a tab running it cannot
+  be closed. On start every tab adopts a still-running background session **of its own chat**; importing the ones
+  that ended while VS was closed happens once (first tab).
+- **Same workspace:** a short hint (once per window) when a tab starts a turn while another one works.
+- **WebUI:** per-tab state lives on tab objects; `T` = the tab in context (the active one, or — while a host message
+  is handled — the message's tab, `inTab`). The per-conversation fields of `state` are **accessors onto `T`**
+  (`TAB_STATE_KEYS`), the former module variables are `T.x`. One transcript container per tab (`.transcript-inner`,
+  only the active one shown). Shared DOM (statusbar, composer, the bars above it, remote panel, strip) is drawn only
+  for the active tab (`isActiveTab()` guards) and redrawn on a switch (`renderTabChrome`); the composer's text and
+  caret are saved per tab, a background tab's queued prompt is sent from that saved text. The browser mock runs one
+  simulated session per tab (`createMock(tabId)`).
+- **Contract:** host→web `tabs.state { tabs: [{ id }], activeId, max }`, `session.title { title }` (the strip
+  follows the auto-title of a new chat); web→host `tab.new`, `tab.select { id }`, `tab.close { id }`.
+  **Deviation from the plan:** `tabs.state` carries no `title`/`state`/`unseen` — the page derives title and
+  markers from the tab's own session messages.
+
 ## "What's new" popup (1.3.0, 2026-11-10)
 - **What:** the first time the panel runs on a newer version, a modal shows the CHANGELOG.md sections since the
   last version the user saw (newest first, at most 5), "Full changelog ↗" (GitHub) + "Got it".
@@ -778,6 +895,16 @@ Design rationale, the verified CLI facts and the phase log: **`docs/plugins-skil
     `stopRequested`, reset when a new turn starts) or **`error`** → **not sent**; it stays in the input,
     un-queued, with an 8 s notify ("… your queued prompt was not sent. It is still in the input.").
   - `waiting-permission` ↔ `working` round-trips are not an end.
+  - In a **background tab** (1.4.0) the queued prompt is sent from that tab's saved composer text.
+- **Host race (fixed 2026-11-23, colleague report "queued prompts are not always sent"):** `ClaudeSessionService`
+  raises `TurnCompleted` while its busy flag is still up — the handler posts `status: ready`, the page sends the
+  queued prompt 0 ms later, and the flag only drops after the rest of the handler (toast, usage, checkpoint, save).
+  `HandlePromptSend` used to **drop** a prompt that arrived while busy — the page had already shown the bubble and
+  cleared the input, so the prompt was lost (sporadic: typing by hand is never that fast). Now the tab holds it
+  (`_deferredPrompt`) and runs it on the new **`TurnReleased`** event (raised right after the flag drops, in all
+  three release paths: `RunTurnAsync`'s `finally`, `HandBack`, `OnExit` of a follow-up turn). Should a CLI follow-up
+  turn take the flag in between, the prompt waits for that one to end. `TurnCompleted` itself stays before the
+  flag drops on purpose: its handler still clears the old turn's state, a new turn must not start under it.
 - **Verified (2026-11-04, browser):** mock adapter — queue during a turn, approve the open cards, the queued
   prompt is sent as the next turn; Enter queues, Esc un-queues; Stop keeps it + notify. Fake-host page
   (`chrome.webview` stub) — `status:error` keeps it + notify; queued through `waiting-permission` → exactly one
@@ -1062,6 +1189,12 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
   discarded and the turn is **automatically restarted fresh once**.
 
 ## Transcript display (decisions from 2026-06-03)
+- **Date + time on hover (2026-11-23):** every user / assistant / system bubble has a `title` tooltip with when it was
+  written (`formatMsgTime`, the OS locale's medium date + short time, e.g. "23.11.2026, 14:35"): stored and mirrored
+  messages use their `ts`, a live one the moment it is rendered.
+  **Always shown** with the settings-window option "Always show date and time on messages"
+  (`AstrogatorOptions.ShowMessageTimestamps` → `appearance.state.showTimestamps` → `:root.show-timestamps`): every
+  user / assistant row then shows a small `.msg-time` label above its bubble (rendered always, hidden by CSS otherwise).
 - **Full width (2026-09-24):** `.transcript-inner` used to cap itself at a centred 900 px column from a
   521 px container width up. Dropped — in a wide tool window messages and cards ended well short of the
   composer below, which spans the full panel. The transcript now always uses the full width.
@@ -1700,19 +1833,76 @@ the VS Code extension behave: `docs/git-checkpoints-plan.md`.
     "Open in terminal", "End remote session", chevron; a click on the head folds the body (`.min`, kept across
     status polls; the buttons don't fold). Body: QR (`qr.js`, `drawQr` on a 120 px canvas), link (opens in the
     browser), status text. Statusbar "Remote: Claude is working…" while busy. The console fallback uses the same
-    banner (no QR/link — the console shows them). Composer stays locked as before (two processes on one
-    conversation would race).
-  - **Prompting from VS during a remote session — investigated 2026-10-29 (CLI 2.1.312), not built (user
-    decision).** The CLI has **no way to send input to a running background session**: `agents` (only
-    `--json` listing + dispatch defaults), `attach` (interactive TUI only), `logs`, `stop`, `rm`, `respawn`;
-    `claude daemon --help` lists only lifecycle (`run`/`status`/`logs`/`uninstall`/`stop`). Options weighed:
-    (a) `claude attach` in a hidden ConPTY and typing the prompt as keystrokes — undocumented TUI, breaks on
-    any UI change or permission prompt → rejected; (b) a parallel `-p --resume` turn — two writers on one
-    transcript → rejected; (c) **take back per prompt**: only while the remote session is `idle` → `stop` +
-    `rm` → run the turn here → restart `--bg --resume <id> --remote-control` (same link, per the measurement
-    above; reconnect ~8-10 s; open question whether the Claude app shows the VS turn after the restart — the
-    model has it, the new session loads the whole transcript). (c) is the viable one if this comes up again.
-  - **Tests:** `BackgroundSessionsTests` (start output, logs → link, agents running/stopped, garbage). E2E by hand
+    banner (no QR/link — the console shows them). With the background variant the composer stays usable — prompts
+    are typed into the remote session (see "Prompting from the panel" below); the console variant keeps it locked
+    (two processes on one conversation would race).
+  - **Prompting from the panel during a remote session (built 2026-11-23, CLI 2.1.319; background variant only).**
+    The CLI still has **no command to send input to a running background session** (2.1.319: `agents`, `attach`,
+    `logs`, `respawn`, `stop`, `rm`; a parallel `-p --resume` turn would be a second writer → still rejected). So the
+    panel does what a person would do — option (a) of the 2026-10-29 analysis, now with guards that make it safe:
+    `Core/RemotePromptSender` runs **`claude attach <id>` in a hidden pseudo console** (`Core/PseudoConsole`, ConPTY;
+    `STARTF_USESTDHANDLES` with null handles — else the child writes into the parent's redirected handles, measured),
+    waits until the TUI has drawn (`❯` + 800 ms quiet, ~2–3 s), **pastes** the prompt (bracketed paste), checks it
+    arrived, presses **Enter**, detaches (only the `attach` process is killed, never its tree — the CLI's daemon hosts
+    the session). Measured: the session keeps running (`idle`), the prompt lands in its transcript; E2E with the
+    built DLL against a throw-away `--bg` session (local `/context`, no model call): sent in 5.6 s.
+    - **Guards** (the TUI is not an API): only when the latest frame shows the **input box** — not a dialog
+      (`❯ 1. Yes`, "Do you want", "Enter to select", "Esc to cancel", …), where typed text / Enter would pick an
+      option; only while the session is **`idle`** (busy → the tab holds the prompt and sends it at the next idle poll,
+      "Waiting · goes to the remote session…", ✕/Esc takes it back = `remote.cancelPrompt`); **`\n` line breaks only** —
+      a `\r` inside the paste submits the line (measured, it started a turn); escape/C0/C1 control characters removed;
+      a leading `!` (bash mode) or `#` (memory mode) gets a space in front; Enter only after the pasted text is seen in
+      the box (first words, or `[Pasted text …]`), else the box is cleared again (Ctrl+U per line, measured) and the send
+      fails. Leftover text in the box is cleared first. Files go as @-references (no inline images).
+    - **UI:** with `remote.state.canPrompt` the composer, `+` and the active-file chip stay usable (placeholder "Message
+      the remote session…"); history / new chat / slash / Model · Mode stay locked (they act on the local session). The
+      prompt stays in the input (read-only, "Sending to the remote session…") until `remote.prompt { state: sent }`,
+      then the live mirror shows it. Errors → notify, the text stays.
+    - **Contract:** host→web `remote.prompt { state: sending|queued|sent|error|cancelled, message? }`,
+      `remote.state.canPrompt`; web→host `prompt.send` (routed to the remote session while it runs),
+      `remote.cancelPrompt`.
+  - **Starting during a turn (2026-11-23):** two processes must not work on one conversation, so "Remote control"
+    clicked while the tab's turn runs **arms** the start: `remote.state { state: "pending" }` → a banner "starts as soon
+    as Claude has finished this turn" with **Cancel** (`remote.stop`), nothing locked, the turn goes on. The tab starts
+    it from `OnTurnReleased` (busy flag down; a CLI follow-up turn keeps it pending); it wins over a prompt held at that
+    moment. A pending start counts as "runs in another tab"; a WebView reload re-announces it.
+    A pending **end-of-turn review** no longer blocks the start (it did, so an armed start failed on the list its
+    turn had just built): starting remote control keeps the changes as they are, like "Keep all" (note in the chat).
+  - **`--resume` of a running session makes a copy (fix 2026-11-23, CLI 2.1.33x):** if the session is still running,
+    `--bg --resume <id>` starts a **copy under a new session id** (help: "…or starts a copy and says so when the session
+    is already running"). Right after a turn the panel's own `-p` process is still alive (prompt suggestion / background
+    tasks), so an armed remote start wrote into a new transcript (`43f5e671…` next to `726d54a4…`) while the mirror
+    watched the old one — no live mirror; the end import then found "2 sessions". Now `HandleRemoteStart` awaits
+    `ClaudeSessionService.ShutdownAsync()` before starting, and the monitor takes the session id from `agents --json`
+    whenever it differs (not only when unknown), so the mirror follows a copy too.
+  - **`state: "done"` is not the end (fix 2026-11-23, CLI 2.1.33x):** `agents --json` reports `"done"` after **every
+    finished turn** while the session lives on (pid kept, `status: idle`; measured 2.1.330), and `"done"` without a pid
+    after `stop`. `HasEnded` counted every `done` → the monitor imported and removed the running remote session after
+    each of its turns ("Remote session imported"). Now `done` ends it only without a pid or with a dead process.
+  - **Worktree guard of background sessions (2026-11-23, CLI 2.1.33x):** a `--bg` session may not Edit/Write in the main
+    checkout by default — `worktree.bgIsolation` = `"worktree"` (default) blocks it until the session calls
+    EnterWorktree; `"none"` lifts it. A remote session continues the user's own chat on their workspace, so
+    `BackgroundRemoteSession.BuildStartArguments` starts it with **`--settings {"worktree":{"bgIsolation":"none"}}`** —
+    this session only, no settings file touched. Measured 2.1.330: the daemon forwards `--settings` to the session
+    (`~/.claude/daemon/roster.json` → `dispatch.launch.args`) and a Write in the checkout then works; the env var
+    `CLAUDE_BG_ISOLATION` is read by the CLI but **not** forwarded by the daemon (`dispatch.env`), so it does not help;
+    `dispatch.isolation` shows `none` either way (it is about `--worktree`). A session adopted from before this fix
+    keeps the guard until it is restarted.
+  - **Panel prompts in imported transcripts (fix 2026-11-23):** a prompt the panel sent (stream-json input, since
+    2026-10-08, `entrypoint: sdk-cli`) is stored with **content blocks** (`[{type: text}, {type: image}]`), one typed in
+    the terminal / the app as a **string**. `CliSessionReader.ImportTranscript` only read strings, so every panel prompt
+    vanished from an imported or mirrored remote transcript (user report: the first prompt of a chat was missing after
+    "Remote session imported"). Now text blocks become the user message (`<…>` command echoes still skipped), and the
+    panel's "Attached files:" section turns back into attachment chips (`BuildUserMessage`).
+  - **Live mirror (reworked 2026-11-23):** a `FileSystemWatcher` on `<sessionId>.jsonl` (250 ms debounce) mirrors on every
+    write — not only at the 3 s status poll; write time **and size** decide "changed". Only changes go to the page:
+    `transcript.mirror { reset, from, messages }` — the first message that differs from what the page has and
+    everything after it (usually just the newest message, or a tool card whose result arrived); the first mirror
+    after a (re)load rebuilds (`reset`). The page keeps the DOM nodes per mirrored message (`T.mirrorNodes`) and only
+    redraws from `from` — no flicker, the scroll position stays unless you were at the bottom. Any `transcript.load` /
+    `session.init` ends that bookkeeping (host: `_remoteMirrorSent = null`).
+  - **Tests:** `RemotePromptSenderTests` (screen reading: idle box / dialogs / leftover text / paste seen;
+    sanitizing), `BackgroundSessionsTests` (start output, logs → link, agents running/stopped, garbage). E2E by hand
     against 2.1.294 with the built DLL: start 1.9 s, link after 8 s, `idle`, end clean, daemon gone, registry empty.
 - **The console variant (fallback, unchanged since 2026-06-21):**
 - **What it does (v0.5.1):** opens the **current chat** in an **interactive** Claude Code session with

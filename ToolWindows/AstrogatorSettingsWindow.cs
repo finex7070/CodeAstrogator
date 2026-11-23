@@ -45,6 +45,7 @@ namespace CodeAstrogator.ToolWindows
         private readonly ComboBox _userColor;      // preset name or a typed #hex
         private readonly ComboBox _bubbleIntensity;
         private readonly CheckBox _colorBlindDiffs;
+        private readonly CheckBox _messageTimestamps;
         private readonly ObservableCollection<string> _customFonts = new ObservableCollection<string>(); // file names
         private readonly ComboBox _uiFont;    // items: FontChoice
         private readonly ComboBox _uiScale;   // items: "0.7×" … "1.5×"
@@ -166,6 +167,8 @@ namespace CodeAstrogator.ToolWindows
             _bubbleIntensity = MakeCombo(BubbleLabels);
             _colorBlindDiffs = MakeCheck("Color-blind friendly diffs: blue for added and orange for removed lines, in the panel "
                 + "and in the inline editor review (instead of green and red)", new Thickness(0, 8, 0, 0));
+            _messageTimestamps = MakeCheck("Always show date and time on messages (otherwise only when you hover over one)",
+                new Thickness(0, 8, 0, 0));
             _restore = MakeCheck("Restore the last session when the chat window opens", new Thickness(0, 8, 0, 0));
             _promptSuggestions = MakeCheck("Suggest the next prompt after each turn (shown as grey text in the empty input; Tab takes it over). Costs one extra, mostly cached request per turn", new Thickness(0, 8, 0, 0));
             _toasts = MakeCheck("Show a Windows notification when Claude finishes a turn or needs you (a permission prompt, a question, a plan to approve). Clicking it brings Visual Studio to the front", new Thickness(0, 8, 0, 0));
@@ -222,7 +225,8 @@ namespace CodeAstrogator.ToolWindows
             left.Children.Add(Section("Appearance",
                 Labeled("Color of your messages (a preset, or type a hex color like #4f8cf0):", _userColor),
                 Labeled("Message bubble tint:", _bubbleIntensity),
-                _colorBlindDiffs));
+                _colorBlindDiffs,
+                _messageTimestamps));
             left.Children.Add(Section("Fonts",
                 FontRow("UI", _uiFont, _uiScale),
                 FontRow("Code", _codeFont, _codeScale),
@@ -371,6 +375,7 @@ namespace CodeAstrogator.ToolWindows
             var bubble = AstrogatorOptions.NormalizeBubbleIntensity(o.BubbleIntensity);
             _bubbleIntensity.SelectedItem = BubbleLabels[Array.IndexOf(AstrogatorOptions.BubbleIntensities, bubble)];
             _colorBlindDiffs.IsChecked = o.ColorBlindDiffs;
+            _messageTimestamps.IsChecked = o.ShowMessageTimestamps;
             _customFonts.Clear();
             foreach (var font in o.CustomFonts ?? new List<string>())
             {
@@ -523,6 +528,7 @@ namespace CodeAstrogator.ToolWindows
                 BubbleIntensity = AstrogatorOptions.BubbleIntensities[
                     Math.Max(0, Array.IndexOf(BubbleLabels, _bubbleIntensity.SelectedItem as string ?? "Normal"))],
                 ColorBlindDiffs = _colorBlindDiffs.IsChecked == true,
+                ShowMessageTimestamps = _messageTimestamps.IsChecked == true,
                 ChatFont = SelectedFontId(_uiFont),
                 ChatFontScale = SelectedScale(_uiScale),
                 CodeFont = SelectedFontId(_codeFont),
@@ -550,7 +556,7 @@ namespace CodeAstrogator.ToolWindows
             foreach (var combo in new[] { _userColor, _bubbleIntensity, _uiFont, _uiScale, _codeFont, _codeScale,
                          _historyRetention, _pastedRetention, _checkpointRetention, _checkpointFilterMode })
                 combo.SelectionChanged += (_, __) => ScheduleApply();
-            foreach (var check in new[] { _colorBlindDiffs, _restore, _promptSuggestions, _toasts, _toastsInactiveOnly, _autoAdd, _includeLines,
+            foreach (var check in new[] { _colorBlindDiffs, _messageTimestamps, _restore, _promptSuggestions, _toasts, _toastsInactiveOnly, _autoAdd, _includeLines,
                          _activeFileDefault, _noticeFetch, _updateCheck, _autoUpdate, _modelCatalogFetch, _checkpoints })
             {
                 check.Checked += (_, __) => ScheduleApply();

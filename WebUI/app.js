@@ -10,27 +10,17 @@
   // State (single in-memory object — §10)
   // -------------------------------------------------------------------------
   const state = {
-    sessionId: null,
-    title: "Untitled",
     model: "claude-opus-4-8",
     effort: "high", // host default (Tools → Options → Default effort)
-    planMode: false,
     ultracode: false,
     verbosity: "normal", // compact | normal | detailed
-    activeThinking: null,
     workspaceFiles: null, // [{path, isDir}] from files.list (lazy)
     filesRequested: false,
     permissionMode: "ask",
     autoAcceptCommands: false, // in acceptEdits mode, also auto-approve Bash/PowerShell/MCP
     reviewEditsInEditor: false, // review file edits inline in the code editor (per-hunk) instead of the chat diff card
     reviewEditsAtTurnEnd: false, // Auto-accept: collect all edits, review the changed files at the end of the turn
-    turnReview: { files: [] }, // pending post-turn changed-files review (blocks the next prompt until cleared)
-    runningAgents: [],       // Task subagents currently running: [{id, label}] → live spinner list
     cwd: "",
-    tokens: 0,
-    contextTokens: 0,        // context size after the last turn (input incl. cache + output)
-    contextWindow: 0,        // the model's context-window size (CLI-reported), 0 = unknown
-    contextUsage: null,      // the CLI's context breakdown after the last turn (context.usage), null = none yet
     limits: { sessionPct: 0, weeklyPct: 0, sessionFetchedAt: null, weeklyFetchedAt: null },
     plan: "",
     themeMode: "auto",
@@ -39,19 +29,9 @@
 
     loggedIn: true,
     authMode: "oauth",
-    status: "ready",
-    remoteActive: false,     // remote-control mode locks composer + transcript
     activeFile: { name: null, path: null, optionEnabled: true, enabled: true, lines: null }, // active editor tab reference
-    messages: [],            // rendered message records
-    attachments: [],         // {id, name}
-    queued: false,           // the composer's prompt is queued: sent by itself when the running turn ends
-    activeAssistant: null,   // {id, textNode, accText, el}
-    pendingPermissions: new Set(), // requestIds of open permission/question cards (parallel tool use)
-    tasks: [],               // task tracker: [{id, subject, activeForm, status}] from Task* tool calls
-    tasksDismissed: false,   // user closed the tasks banner (re-shown when a NEW task is created)
     // File checkpoints (rewind): {enabled, gitAvailable, decided, retentionDays} from session.init.
     checkpoints: { enabled: false, gitAvailable: false, decided: true, retentionDays: 30 },
-    expiredCheckpoints: new Set(), // shas the host reported as pruned → button greyed out
   };
 
   // Replaced in place by the host's `models.list` (§3), which is built from models.json (repo copy,
@@ -90,6 +70,8 @@
     "/review": "Review a pull request",
     "/security-review": "Security review of changes",
     "/help": "Show help",
+    "/login": "Sign in to Claude",
+    "/logout": "Sign out of Claude",
   };
   // Static fallback until the CLI reports its real list via `slash.commands`
   // (from the system/init event of the first turn). Mutated in place.
@@ -99,6 +81,8 @@
     { command: "/model", desc: SLASH_DESCRIPTIONS["/model"] },
     { command: "/init", desc: SLASH_DESCRIPTIONS["/init"] },
     { command: "/help", desc: SLASH_DESCRIPTIONS["/help"] },
+    { command: "/login", desc: SLASH_DESCRIPTIONS["/login"] },
+    { command: "/logout", desc: SLASH_DESCRIPTIONS["/logout"] },
   ];
 
   // -------------------------------------------------------------------------
@@ -106,16 +90,14 @@
   // -------------------------------------------------------------------------
   const $ = (id) => document.getElementById(id);
   const root = $("root");
-  const titleEl = $("title");
   const transcript = $("transcript");
-  const transcriptInner = $("transcript-inner");
+  const firstTranscriptInner = $("transcript-inner"); // becomes the first tab's container
   const jumpPill = $("jump-pill");
   const composer = $("composer");
   const input = $("input");
   const defaultPlaceholder = input.placeholder;
   const suggestionGhost = $("suggestion-ghost");
   const suggestionText = $("suggestion-text");
-  let promptSuggestion = ""; // CLI-predicted next prompt (prompt.suggestion), "" = none
   const attachmentsEl = $("attachments");
   const turnReviewEl = $("turn-review");
   const notifyStackEl = $("notify-stack");
@@ -123,7 +105,7 @@
   const bgTasksEl = $("bg-tasks");
   const sendBtn = $("btn-send");
   const queueHint = $("queue-hint");
-  let stopRequested = false; // the user pressed Stop in this turn → a queued prompt is NOT sent at its end
+  const QUEUE_HINT_TEXT = queueHint.textContent; // the local queue's hint (the remote prompt reuses the element)
   const activeFileChip = $("active-file");
   const activeFileName = $("active-file-name");
   const activeFileLines = $("active-file-lines");
@@ -153,6 +135,112 @@
   const remoteLink = $("remote-link");
   const btnRemoteCopy = $("btn-remote-copy");
   const btnRemoteTerminal = $("btn-remote-terminal");
+
+  // -------------------------------------------------------------------------
+  // Chat tabs (docs/multi-session-tabs-plan.md). Everything about one conversation lives on its tab
+  // object; `T` is the tab the code is working on: the ACTIVE tab, or — while a host message is handled —
+  // the tab that message belongs to (`m.tab`). The per-conversation fields of `state` are accessors onto
+  // T (see TAB_STATE_KEYS), so state.messages, state.status, … always mean "of the tab in context".
+  // Shared DOM (statusbar, composer, the bars above it, the title) shows the active tab only: code that
+  // renders it checks isActiveTab(), and the whole chrome is re-rendered on a switch (renderTabChrome).
+  // -------------------------------------------------------------------------
+  const tabs = [];       // in strip order
+  let activeTab = null;  // the tab on screen
+  let T = null;          // the tab in context (see above)
+  let jumpPillRo = null; // observes every tab's transcript container (set up with the jump pill)
+
+  function createTab(id, inner) {
+    if (!inner) {
+      inner = document.createElement("div");
+      inner.className = "transcript-inner";
+      inner.hidden = true;
+      transcriptHost.appendChild(inner);
+    }
+    inner.dataset.tab = id;
+    const tab = {
+      id,
+      inner,                       // this tab's transcript container (only the active one is shown)
+      // ↓ the per-conversation part of `state` (accessors, TAB_STATE_KEYS)
+      sessionId: null,
+      title: "Untitled",
+      planMode: false,
+      activeThinking: null,
+      turnReview: { files: [] },   // pending post-turn changed-files review (blocks the next prompt until cleared)
+      runningAgents: [],           // Task subagents currently running: [{id, label}] → live spinner list
+      tokens: 0,
+      contextTokens: 0,            // context size after the last turn (input incl. cache + output)
+      contextWindow: 0,            // the model's context-window size (CLI-reported), 0 = unknown
+      contextUsage: null,          // the CLI's context breakdown after the last turn (context.usage), null = none yet
+      status: "ready",
+      remoteActive: false,         // remote-control mode locks composer + transcript
+      messages: [],                // rendered message records
+      attachments: [],             // {id, name}
+      queued: false,               // the composer's prompt is queued: sent by itself when the running turn ends
+      activeAssistant: null,       // {id, textNode, accText, el}
+      pendingPermissions: new Set(), // requestIds of open permission/question cards (parallel tool use)
+      tasks: [],                   // task tracker: [{id, subject, activeForm, status}] from Task* tool calls
+      tasksDismissed: false,       // user closed the tasks banner (re-shown when a NEW task is created)
+      expiredCheckpoints: new Set(), // shas the host reported as pruned → button greyed out
+      // ↓ formerly module-level variables
+      promptSuggestion: "",        // CLI-predicted next prompt (prompt.suggestion), "" = none
+      stopRequested: false,        // the user pressed Stop in this turn → a queued prompt is NOT sent at its end
+      // tool_use id → task, so a TaskCreate's result can reconcile the provisional id with the real one.
+      taskByCreateToolId: Object.create(null),
+      taskSeq: 0,
+      // A task list belongs to ONE turn: when a turn ends (turnResult), the next TaskCreate starts a
+      // fresh list (the previous, worked-through tasks are cleared) instead of appending — so each
+      // follow-up prompt shows its own list, not an ever-growing pile.
+      taskBatchClosed: false,
+      // A turn can emit several `result` events — the main turn total plus one per subagent (Task tool).
+      // Subagent results are normally tagged (→ agent footer), but the CLI's tagging is protocol-dependent,
+      // so to be safe we keep only ONE turn footer per turn: each turnResult removes the previous turn's
+      // footer/divider before rendering the latest (the last result = the real turn total). Reset at the
+      // start of the next turn so a completed turn's footer stays put.
+      curTurnDivider: null,
+      curTurnFooter: null,
+      // The footer a follow-up turn (background task reaction) folds into — see turnResult; reset with the transcript.
+      footerChain: null,
+      lastUserRow: null,           // most recently rendered user bubble — receives checkpoint.created
+      workingEl: null,             // the working indicator (rocket) while a turn runs
+      workingPhraseIdx: -1,
+      backgroundTasks: [],         // the background-task bar's rows (background.tasks)
+      // ↓ view state kept while the tab is in the background
+      atBottom: true,              // the transcript was scrolled to the bottom when the tab was left
+      scrollTop: 0,
+      composer: null,              // saved composer contents {text, selStart, selEnd} while not active
+    };
+    tabs.push(tab);
+    if (jumpPillRo) jumpPillRo.observe(inner);
+    return tab;
+  }
+
+  function tabById(id) {
+    for (let i = 0; i < tabs.length; i++) if (tabs[i].id === id) return tabs[i];
+    return null;
+  }
+
+  /** True when the tab in context is the one on screen — only then may shared DOM be touched. */
+  function isActiveTab() { return T === activeTab; }
+
+  /** Runs fn with `tab` as the context tab (restores the previous one afterwards). */
+  function inTab(tab, fn) {
+    const prev = T;
+    const prevWasActive = prev === activeTab; // fn may switch tabs (tabs.state) — then "active" moved on
+    T = tab;
+    try { return fn(); } finally { T = prevWasActive ? activeTab : prev; }
+  }
+
+  const TAB_STATE_KEYS = ["sessionId", "title", "planMode", "activeThinking", "turnReview", "runningAgents", "tokens",
+    "contextTokens", "contextWindow", "contextUsage", "status", "remoteActive", "messages", "attachments", "queued",
+    "activeAssistant", "pendingPermissions", "tasks", "tasksDismissed", "expiredCheckpoints"];
+  TAB_STATE_KEYS.forEach((k) => Object.defineProperty(state, k, {
+    get() { return T[k]; },
+    set(v) { T[k] = v; },
+    enumerable: true,
+  }));
+
+  // The first tab is the host's first tab ("t1") and uses the transcript container already in the page.
+  activeTab = T = createTab("t1", firstTranscriptInner);
 
   // Notice / announcement banner — content + on/off come from a remote JSON file fetched from
   // the project's GitHub (the "source of truth"), so announcements can be pushed without a VSIX
@@ -200,27 +288,11 @@
       tasksBanner.hidden = true;
     });
   }
-  // tool_use id → task, so a TaskCreate's result can reconcile the provisional id with the real one.
-  const taskByCreateToolId = Object.create(null);
-  let taskSeq = 0;
-  // A task list belongs to ONE turn: when a turn ends (turnResult), the next TaskCreate starts a
-  // fresh list (the previous, worked-through tasks are cleared) instead of appending — so each
-  // follow-up prompt shows its own list, not an ever-growing pile.
-  let taskBatchClosed = false;
-  // A turn can emit several `result` events — the main turn total plus one per subagent (Task tool).
-  // Subagent results are normally tagged (→ agent footer), but the CLI's tagging is protocol-dependent,
-  // so to be safe we keep only ONE turn footer per turn: each turnResult removes the previous turn's
-  // footer/divider before rendering the latest (the last result = the real turn total). Reset at the
-  // start of the next turn so a completed turn's footer stays put.
-  let curTurnDivider = null, curTurnFooter = null;
-  // The footer a follow-up turn (background task reaction) folds into — see turnResult; reset with the transcript.
-  let footerChain = null;
-
   function resetTasks() {
     state.tasks = [];
-    for (const k in taskByCreateToolId) delete taskByCreateToolId[k];
-    taskSeq = 0;
-    taskBatchClosed = false;
+    for (const k in T.taskByCreateToolId) delete T.taskByCreateToolId[k];
+    T.taskSeq = 0;
+    T.taskBatchClosed = false;
     state.tasksDismissed = false;
     renderTasksBanner();
   }
@@ -230,32 +302,32 @@
     else if (name === "TaskUpdate") taskOnUpdate(input || {});
   }
   function taskOnCreate(toolId, input) {
-    if (taskBatchClosed) {
+    if (T.taskBatchClosed) {
       // first TaskCreate of a new turn → replace the previous turn's (finished) list
       state.tasks = [];
-      for (const k in taskByCreateToolId) delete taskByCreateToolId[k];
-      taskBatchClosed = false;
+      for (const k in T.taskByCreateToolId) delete T.taskByCreateToolId[k];
+      T.taskBatchClosed = false;
     }
-    taskSeq++;
+    T.taskSeq++;
     // Provisional sequential id (matches the CLI's 1-based numbering); reconciled from the result
     // text ("Task #N created…") when that arrives, so deletions/resumes can't desync the mapping.
     const task = {
-      id: String(taskSeq),
+      id: String(T.taskSeq),
       subject: input.subject || input.activeForm || "Task",
       activeForm: input.activeForm || "",
       status: "pending",
     };
     state.tasks.push(task);
-    if (toolId != null) taskByCreateToolId[toolId] = task;
+    if (toolId != null) T.taskByCreateToolId[toolId] = task;
     state.tasksDismissed = false; // a new task batch re-shows the banner even if it was dismissed
     renderTasksBanner();
   }
   function reconcileTaskId(toolId, summary) {
-    const task = toolId != null ? taskByCreateToolId[toolId] : null;
+    const task = toolId != null ? T.taskByCreateToolId[toolId] : null;
     if (!task) return;
     const m = /#(\d+)/.exec(summary || "");
     if (m) task.id = m[1];
-    delete taskByCreateToolId[toolId];
+    delete T.taskByCreateToolId[toolId];
     renderTasksBanner();
   }
   function taskOnUpdate(input) {
@@ -280,7 +352,7 @@
     return status === "completed" ? "☑" : status === "in_progress" ? "◐" : "☐";
   }
   function renderTasksBanner() {
-    if (!tasksBanner) return;
+    if (!tasksBanner || !isActiveTab()) return;
     const tasks = state.tasks;
     if (!tasks.length || state.tasksDismissed) { tasksBanner.hidden = true; return; }
     const done = tasks.filter((t) => t.status === "completed").length;
@@ -709,6 +781,7 @@
 
   function post(type, payload) {
     const msg = Object.assign({ type }, payload || {});
+    if (msg.tab === undefined && T && !isPanelMessage(type)) msg.tab = T.id;
     if (hasHost) {
       window.chrome.webview.postMessage(msg);
     } else if (mock) {
@@ -733,12 +806,30 @@
   // host → web dispatcher (§3.1)
   // -------------------------------------------------------------------------
   function handle(m) {
+    // a session message belongs to its tab (the host announces new tabs with tabs.state first).
+    // manage.* messages use `tab` for the plugins panel's own tabs — never a chat tab.
+    const chatTab = isPanelMessage(m.type) ? null : m.tab;
+    const tab = chatTab ? tabById(chatTab) : activeTab;
+    if (!tab) return; // a late message of a tab that was closed meanwhile
+    return inTab(tab, () => handleInTab(m));
+  }
+
+  /** The plugins panel's messages carry `tab` = the panel tab ("installed", …), not a chat tab. */
+  function isPanelMessage(type) { return String(type || "").indexOf("manage.") === 0; }
+
+  function handleInTab(m) {
     switch (m.type) {
       case "theme": return applyTheme(m);
       case "auth.state": return applyAuth(m);
+      case "auth.login": return onAuthLogin(m);
+      case "auth.required": return onAuthRequired(m);
       case "session.init": return applySessionInit(m);
-      case "session.list": return renderHistoryList(m.sessions || []);
+      case "session.title": state.title = m.title || state.title; return updateTitle();
+      case "tabs.state": return applyTabsState(m);
+      case "session.list": return inTab(activeTab, () => renderHistoryList(m.sessions || [])); // the panel is the active tab's
       case "transcript.load": return loadTranscript(m);
+      case "transcript.mirror": return applyTranscriptMirror(m);
+      case "remote.prompt": return onRemotePrompt(m);
       case "status": return applyStatus(m.state, m.text, m.detail);
       case "font.state": return applyFontState(m);
       case "appearance.state": return applyAppearance(m);
@@ -814,9 +905,10 @@
       const command = String(n).charAt(0) === "/" ? String(n) : "/" + n;
       return { command, desc: SLASH_DESCRIPTIONS[command] || "" };
     });
-    if (!cmds.some((c) => c.command === "/help")) {
-      cmds.push({ command: "/help", desc: SLASH_DESCRIPTIONS["/help"] });
-    }
+    // answered by the panel itself (help text, sign-in dialog) — always offered
+    ["/help", "/login", "/logout"].forEach((command) => {
+      if (!cmds.some((c) => c.command === command)) cmds.push({ command, desc: SLASH_DESCRIPTIONS[command] });
+    });
     SLASH_COMMANDS.length = 0;
     Array.prototype.push.apply(SLASH_COMMANDS, cmds);
   }
@@ -907,7 +999,7 @@
       dark: { kw: "#859900", str: "#2aa198", num: "#d33682", com: "#586e75", fn: "#268bd2" },
       light: { kw: "#859900", str: "#2aa198", num: "#d33682", com: "#93a1a1", fn: "#268bd2" } },
   };
-  state.appearance = { syntaxTheme: "default", userColor: "", bubbleIntensity: "normal", colorBlindDiffs: false };
+  state.appearance = { syntaxTheme: "default", userColor: "", bubbleIntensity: "normal", colorBlindDiffs: false, showTimestamps: false };
 
   function applyAppearance(m) {
     state.appearance = {
@@ -915,9 +1007,11 @@
       userColor: m.userColor || "",
       bubbleIntensity: m.bubbleIntensity || "normal",
       colorBlindDiffs: !!m.colorBlindDiffs,
+      showTimestamps: !!m.showTimestamps,
     };
     const cl = document.documentElement.classList;
     cl.toggle("diffs-cb", state.appearance.colorBlindDiffs);
+    cl.toggle("show-timestamps", state.appearance.showTimestamps); // the .msg-time labels (settings window)
     ["off", "subtle", "strong"].forEach((b) => cl.toggle("bubbles-" + b, state.appearance.bubbleIntensity === b));
     applyThemeDependentColors();
   }
@@ -962,12 +1056,32 @@
   }
 
   function applyAuth(m) {
+    const was = state.loggedIn;
     state.loggedIn = !!m.loggedIn;
     state.authMode = m.mode || "none";
-    if (state.messages.length === 0) renderEmptyOrSignin();
+    state.account = m;
+    // every tab that shows only the welcome / sign-in view switches between the two (never a conversation)
+    if (was !== state.loggedIn || !isTabEmpty(T)) {
+      tabs.forEach((tab) => inTab(tab, () => { if (isTabEmpty(tab)) renderEmptyOrSignin(); }));
+    } else {
+      renderEmptyOrSignin();
+    }
+    // signed in again → the "Sign in again" cards are done
+    if (state.loggedIn) document.querySelectorAll(".auth-card:not(.done)").forEach((c) => {
+      c.classList.add("done");
+      const b = c.querySelector(".auth-card-btn");
+      if (b) { b.disabled = true; b.textContent = "Signed in ✓"; }
+    });
+  }
+
+  /** True when the tab's transcript shows nothing but the welcome / sign-in view. */
+  function isTabEmpty(tab) {
+    return Array.prototype.every.call(tab.inner.children,
+      (c) => c.classList.contains("empty-state") || c.classList.contains("signin-state"));
   }
 
   function applySessionInit(m) {
+    T.mirrorNodes = null;
     setPromptSuggestion(""); // belongs to the conversation being left
     state.sessionId = m.sessionId;
     state.title = m.title || "Untitled";
@@ -997,9 +1111,9 @@
     if (m.checkpoints) state.checkpoints = m.checkpoints;
     refreshRewindButtons();
     state.expiredCheckpoints.clear();
-    lastUserRow = null;
-    transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
+    T.lastUserRow = null;
+    T.inner.innerHTML = "";
+    T.curTurnDivider = null; T.curTurnFooter = null; T.footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     renderEmptyOrSignin();
     updateTitle();
@@ -1026,6 +1140,7 @@
   }
 
   function loadTranscript(m) {
+    T.mirrorNodes = null; // a full load replaces whatever the live mirror drew
     // a stored next-prompt suggestion of this chat comes back (VS restart, solution reload, history switch)
     setPromptSuggestion(m.promptSuggestion && !state.remoteActive && !isTurnActive() ? m.promptSuggestion : "");
     state.sessionId = m.sessionId;
@@ -1035,9 +1150,9 @@
     state.pendingPermissions.clear(); // fresh view — drop any stale open-card ids
     resetTasks(); // rebuilt below from the loaded tool messages
     state.expiredCheckpoints.clear(); // host re-reports pruned snapshots after this load
-    lastUserRow = null;
-    transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
+    T.lastUserRow = null;
+    T.inner.innerHTML = "";
+    T.curTurnDivider = null; T.curTurnFooter = null; T.footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     updateTitle();
     const msgs = m.messages || [];
@@ -1050,13 +1165,47 @@
     scrollToBottom(true);
   }
 
+  /**
+   * host→web transcript.mirror { reset, from, messages }: the live mirror of a Remote Control session. `reset` rebuilds
+   * the view from the remote transcript; otherwise only message `from` onwards is redrawn (normally the newest one, or a
+   * tool card whose result arrived) — no flicker, and the scroll position stays unless you were at the bottom.
+   */
+  function applyTranscriptMirror(m) {
+    const msgs = m.messages || [];
+    const atBottom = isNearBottom();
+    if (m.reset || !T.mirrorNodes) {
+      T.mirrorNodes = [];
+      T.inner.innerHTML = "";
+      T.lastUserRow = null;
+      T.curTurnDivider = null; T.curTurnFooter = null; T.footerChain = null;
+      if (m.title) { state.title = m.title; updateTitle(); }
+    } else {
+      const from = Math.max(0, Math.min(m.from || 0, T.mirrorNodes.length));
+      for (let i = T.mirrorNodes.length - 1; i >= from; i--) T.mirrorNodes[i].forEach((n) => n.remove());
+      T.mirrorNodes.length = from;
+    }
+    // the working rocket stays last (it is not part of the transcript)
+    const rocket = T.workingEl && T.workingEl.parentNode === T.inner ? T.workingEl : null;
+    if (rocket) rocket.remove();
+    msgs.forEach((msg) => {
+      const before = T.inner.lastChild;
+      renderHistoricMessage(msg);
+      const nodes = [];
+      for (let n = before ? before.nextSibling : T.inner.firstChild; n; n = n.nextSibling) nodes.push(n);
+      T.mirrorNodes.push(nodes);
+    });
+    if (rocket) T.inner.appendChild(rocket);
+    if (!T.inner.firstChild) renderEmptyOrSignin();
+    if (atBottom) scrollToBottom(true);
+    else updateJumpPill();
+  }
+
   // -------------------------------------------------------------------------
   // File checkpoints / rewind
   // A snapshot is taken host-side before each prompt and at the end of each turn. Hovering a user
   // message reveals a rewind button; its menu offers the same three scopes as the Claude desktop
   // app (code / conversation / both), with a diff preview and per-file selection first.
   // -------------------------------------------------------------------------
-  let lastUserRow = null;   // most recently rendered user bubble — receives checkpoint.created
   let cpPreview = null;     // open rewind modal: {sha, scope, backdrop, listEl, files, selected}
 
   function applyCheckpointSettings(m) {
@@ -1109,15 +1258,15 @@
   }
 
   function checkpointCreated(m) {
-    if (!m.sha || !lastUserRow) return;
-    if (m.messageId) lastUserRow.dataset.msgId = m.messageId;
-    attachRewindButton(lastUserRow, m.sha);
+    if (!m.sha || !T.lastUserRow) return;
+    if (m.messageId) T.lastUserRow.dataset.msgId = m.messageId;
+    attachRewindButton(T.lastUserRow, m.sha);
   }
 
   function checkpointExpired(shas) {
     shas.forEach((s) => state.expiredCheckpoints.add(s));
     Array.prototype.forEach.call(
-      transcriptInner.querySelectorAll(".msg-user[data-checkpoint]"), markExpiredRewind);
+      T.inner.querySelectorAll(".msg-user[data-checkpoint]"), markExpiredRewind);
   }
 
   /** Rewind dialog: asks the host what a rewind would change, then offers the three scopes. */
@@ -1130,6 +1279,11 @@
     modal.appendChild(el("div", "modal-title", "Rewind to this point"));
     const body = el("div", "modal-body", "Checking what changed since this message…");
     modal.appendChild(body);
+    if (tabs.length > 1) {
+      // the checkpoints cover the whole workspace — the other tabs' edits are in them too
+      modal.appendChild(el("div", "cp-tabs-hint",
+        "Other chat tabs work in this workspace too — rewinding files can also undo changes made there."));
+    }
     const list = el("div", "cp-files");
     modal.appendChild(list);
     const actions = el("div", "modal-actions cp-actions");
@@ -1291,20 +1445,23 @@
     // Flatten any existing collapse first, so rewinding to a message inside one behaves the same as
     // rewinding to a top-level one; the runs are re-wrapped with the next prompt.
     unwrapRewoundGroups();
-    const target = transcriptInner.querySelector('.msg-user[data-checkpoint="' + sha + '"]');
+    const target = T.inner.querySelector('.msg-user[data-checkpoint="' + sha + '"]');
     if (!target) return;
     let seen = false;
-    Array.prototype.forEach.call(transcriptInner.children, (node) => {
+    Array.prototype.forEach.call(T.inner.children, (node) => {
       if (node === target) seen = true;
-      if (seen && node !== workingEl) node.classList.add("rewound");
+      if (seen && node !== T.workingEl) node.classList.add("rewound");
     });
     if (!target.previousSibling || !target.previousSibling.classList
       || !target.previousSibling.classList.contains("cp-rewind-marker")) {
       const marker = el("div", "cp-rewind-marker", "Rewound to here — the turns below are discarded");
-      transcriptInner.insertBefore(marker, target);
+      T.inner.insertBefore(marker, target);
     }
     const prompt = target.dataset.prompt || "";
-    if (prompt) {
+    if (prompt && !isActiveTab()) {
+      // the user switched tabs meanwhile — the prompt waits in that tab's composer
+      T.composer = { text: prompt, selStart: prompt.length, selEnd: prompt.length };
+    } else if (prompt) {
       input.value = prompt;
       autoGrow();
       updateSendEnabled();
@@ -1319,7 +1476,7 @@
    * leaves a run that nothing follows expanded, so a reload right after a rewind looks the same.
    */
   function collapseRewoundRuns(onlyIfFollowed) {
-    const nodes = Array.prototype.slice.call(transcriptInner.children);
+    const nodes = Array.prototype.slice.call(T.inner.children);
     let i = 0;
     while (i < nodes.length) {
       const node = nodes[i];
@@ -1341,10 +1498,10 @@
 
   /** Moves every collapsed run's nodes back to the top level and drops the wrappers. */
   function unwrapRewoundGroups() {
-    Array.prototype.forEach.call(transcriptInner.querySelectorAll(".rewound-group"), (group) => {
+    Array.prototype.forEach.call(T.inner.querySelectorAll(".rewound-group"), (group) => {
       const body = group.querySelector(".rewound-body");
       if (body) {
-        while (body.firstChild) transcriptInner.insertBefore(body.firstChild, group);
+        while (body.firstChild) T.inner.insertBefore(body.firstChild, group);
       }
       if (group.parentNode) group.parentNode.removeChild(group);
     });
@@ -1365,7 +1522,7 @@
     toggle.addEventListener("click", () => group.classList.toggle("collapsed"));
     const body = el("div", "rewound-body");
 
-    transcriptInner.insertBefore(group, first);
+    T.inner.insertBefore(group, first);
     group.appendChild(toggle);
     group.appendChild(body);
     run.forEach((n) => body.appendChild(n));
@@ -1436,25 +1593,26 @@
   function applyStatus(s, text, detail) {
     const prev = state.status;
     state.status = s;
+    T.statusText = text;
+    T.statusDetail = detail;
     // A new turn is starting (idle/error → working, not a mid-turn permission round-trip) → forget the
     // previous turn's footer refs so its footer stays put and only THIS turn's footer collapses.
     if (s === "working" && prev !== "working" && prev !== "waiting-permission") {
-      curTurnDivider = null;
-      curTurnFooter = null;
+      T.curTurnDivider = null;
+      T.curTurnFooter = null;
       setPromptSuggestion(""); // a suggestion predicts the prompt for the turn that just ended
-      stopRequested = false;
+      T.stopRequested = false;
     }
     // Turn no longer active (ended / errored / interrupted) → clear the running-agents list; a stray
     // agent whose result was missed can't outlive the turn.
     if (s !== "working" && s !== "waiting-permission") clearRunningAgents();
-    statusbar.setAttribute("data-state", s);
-    statusText.textContent = text || STATUS_TEXT[s] || s;
-    statusText.title = detail || "";
+    renderStatusChrome();
     if (s === "working" || s === "waiting-permission") showWorkingIndicator(s === "waiting-permission");
     else hideWorkingIndicator();
     updateSendEnabled(); // send ↔ queue ↔ un-queue
     updateTurnLocks();
     const wasActive = prev === "working" || prev === "waiting-permission";
+    if (wasActive && !isTurnActive() && !isActiveTab()) { T.unseen = true; renderTabStrip(); }
     if (wasActive && !isTurnActive()) sendQueuedPrompt(s);
     // permission expiry: status moved away while one or more cards are still open
     // (host abandoned them — e.g. turn ended/errored). Expire every still-pending card.
@@ -1469,6 +1627,15 @@
     if (s === "ready" || s === "error") finalizeRunningToolCards();
   }
 
+  /** The statusbar's state dot + text show the active tab's status. */
+  function renderStatusChrome() {
+    if (!isActiveTab()) return;
+    const s = state.status;
+    statusbar.setAttribute("data-state", s);
+    statusText.textContent = T.statusText || STATUS_TEXT[s] || s;
+    statusText.title = T.statusDetail || "";
+  }
+
   // "Working" indicator — a flying rocket + a random Space-Astrogator one-liner, pinned to the
   // bottom of the transcript while a turn runs (appendNode keeps it last). The phrases come from
   // the build-time config (WebUI/config.js → workingPhrases); the fallback keeps it working if
@@ -1477,58 +1644,56 @@
     && CPFC_CFG.workingPhrases.filter((p) => typeof p === "string" && p.trim()).length)
     ? CPFC_CFG.workingPhrases.filter((p) => typeof p === "string" && p.trim())
     : ["Working…"];
-  let workingEl = null;
-  let workingPhraseIdx = -1;
   function randomWorkingPhrase() {
     if (WORKING_PHRASES.length <= 1) return WORKING_PHRASES[0] || "";
     let i;
-    do { i = Math.floor(Math.random() * WORKING_PHRASES.length); } while (i === workingPhraseIdx);
-    workingPhraseIdx = i;
+    do { i = Math.floor(Math.random() * WORKING_PHRASES.length); } while (i === T.workingPhraseIdx);
+    T.workingPhraseIdx = i;
     return WORKING_PHRASES[i];
   }
   // Shown for the whole turn — also while it waits for an approval/answer (`waiting`: the rocket rests, the
   // line says so). Its stop button is the turn's stop: the send button stays free for queuing the next prompt.
   function showWorkingIndicator(waiting) {
-    if (!workingEl || !workingEl.parentNode) {
-      workingEl = el("div", "working-indicator");
-      workingEl.appendChild(el("span", "rocket", "🚀"));
-      workingEl.appendChild(el("span", "wi-text", randomWorkingPhrase()));
-      workingEl.appendChild(el("span", "wi-dots"));
+    if (!T.workingEl || !T.workingEl.parentNode) {
+      T.workingEl = el("div", "working-indicator");
+      T.workingEl.appendChild(el("span", "rocket", "🚀"));
+      T.workingEl.appendChild(el("span", "wi-text", randomWorkingPhrase()));
+      T.workingEl.appendChild(el("span", "wi-dots"));
       const stop = el("button", "wi-stop");
       stop.type = "button";
       stop.appendChild(svg('<rect x="6" y="6" width="12" height="12" rx="2"/>', { width: 10, height: 10, fill: "currentColor", stroke: "none" }));
       stop.appendChild(el("span", null, "Stop"));
       stop.addEventListener("click", requestStop);
-      workingEl.appendChild(stop);
+      T.workingEl.appendChild(stop);
       clearEmptyState();
       const atBottom = isNearBottom();
-      transcriptInner.appendChild(workingEl);
+      T.inner.appendChild(T.workingEl);
       if (atBottom) scrollToBottom();
     }
-    const wasWaiting = workingEl.classList.contains("waiting");
-    workingEl.classList.toggle("waiting", !!waiting);
-    const t = workingEl.querySelector(".wi-text");
+    const wasWaiting = T.workingEl.classList.contains("waiting");
+    T.workingEl.classList.toggle("waiting", !!waiting);
+    const t = T.workingEl.querySelector(".wi-text");
     if (waiting) t.textContent = "Waiting for your answer";
     else if (wasWaiting) t.textContent = randomWorkingPhrase(); // back to work
     updateStopTitle();
   }
   function updateStopTitle() {
-    const b = workingEl && workingEl.querySelector(".wi-stop");
+    const b = T.workingEl && T.workingEl.querySelector(".wi-stop");
     if (b) b.title = state.queued ? "Stop the turn — the queued prompt is not sent and stays in the input" : "Stop the turn";
   }
   // swap the rocket's one-liner whenever new content lands in the transcript
   function refreshWorkingPhrase() {
-    if (!workingEl || workingEl.classList.contains("waiting")) return;
-    const t = workingEl.querySelector(".wi-text");
+    if (!T.workingEl || T.workingEl.classList.contains("waiting")) return;
+    const t = T.workingEl.querySelector(".wi-text");
     if (t) t.textContent = randomWorkingPhrase();
   }
   function hideWorkingIndicator() {
-    if (workingEl && workingEl.parentNode) {
+    if (T.workingEl && T.workingEl.parentNode) {
       const atBottom = isNearBottom();
-      workingEl.parentNode.removeChild(workingEl);
+      T.workingEl.parentNode.removeChild(T.workingEl);
       if (atBottom) scrollToBottom(); // stay pinned after the rocket leaves the bottom
     }
-    workingEl = null;
+    T.workingEl = null;
   }
 
   /** ≥75% warn (yellow), ≥90% crit (red) — applied to the S/W usage meters. */
@@ -1593,7 +1758,7 @@
   }
 
   function renderContextMeter() {
-    if (!statusContext) return;
+    if (!statusContext || !isActiveTab()) return;
     const f = contextFigures();
     if (!f) {
       meterContext.style.width = "0%";
@@ -1860,11 +2025,11 @@
     root.classList.toggle("v-compact", state.verbosity === "compact");
     root.classList.toggle("v-detailed", state.verbosity === "detailed");
     const expand = state.verbosity === "detailed";
-    transcriptInner.querySelectorAll(".thinking-card, .tool-card:not(.todo-card)")
+    T.inner.querySelectorAll(".thinking-card, .tool-card:not(.todo-card)")
       .forEach((c) => c.classList.toggle("collapsed", !expand));
     // re-apply attachment-preview defaults for the new verbosity (lazy-loads any newly opened),
     // then the row fit again (more than ATT_MAX_ROWS rows → the group collapses)
-    transcriptInner.querySelectorAll(".msg-attachments").forEach((group) => {
+    T.inner.querySelectorAll(".msg-attachments").forEach((group) => {
       group.dataset.userToggled = "";
       group.querySelectorAll(":scope > .att-item.att-expandable").forEach((item) => {
         if (typeof item.attSetOpen === "function") item.attSetOpen(attDefaultOpen(item.dataset.kind || ""));
@@ -1874,9 +2039,192 @@
   }
   function formatNum(n) { return (Number(n) || 0).toLocaleString("en-US"); }
 
+  // -------------------------------------------------------------------------
+  // Tab strip (header) — up to three chat tabs. The host owns the list (tabs.state); a click switches at
+  // once and tells the host (tab.select). Each tab shows its title and a status marker: working (spinner),
+  // needs you (permission / question / plan, orange), finished while you were elsewhere (green), error (red).
+  // Rename: the pencil of the active tab or a double-click on its title.
+  // -------------------------------------------------------------------------
+  const tabStripEl = $("tab-strip");
+  const transcriptHost = firstTranscriptInner.parentNode; // where the tabs' transcript containers live
+  let maxTabs = 3;
+
+  function tabMarker(tab) {
+    if (tab.remoteActive) return "remote";
+    if (tab.status === "waiting-permission") return "attention";
+    if (tab.status === "working") return "working";
+    if (tab.status === "error" && tab !== activeTab) return "error";
+    if (tab.unseen) return "done";
+    return "";
+  }
+  const TAB_MARKER_TITLES = {
+    remote: "Remote control runs in this tab",
+    attention: "Claude needs you here (approval, question or plan)",
+    working: "Claude is working",
+    error: "The last turn ended with an error",
+    done: "Finished — not seen yet",
+  };
+
+  function renderTabStrip() {
+    if (!tabStripEl) return;
+    tabs.forEach((tab, i) => {
+      let node = tab.stripEl;
+      if (!node) {
+        node = tab.stripEl = el("div", "chat-tab");
+        node.setAttribute("role", "tab");
+        node.appendChild(el("span", "chat-tab-mark"));
+        node.appendChild(el("span", "chat-tab-title"));
+        const rename = el("button", "chat-tab-btn chat-tab-rename");
+        rename.type = "button";
+        rename.title = "Rename this chat";
+        rename.setAttribute("aria-label", "Rename this chat");
+        rename.appendChild(svg('<path d="M4 20h4L18 10l-4-4L4 16z"/><path d="M13 7l4 4"/>', { width: 11, height: 11, "stroke-width": 1.8 }));
+        rename.addEventListener("click", (e) => { e.stopPropagation(); if (tab === activeTab) openRenameModal(); });
+        node.appendChild(rename);
+        const close = el("button", "chat-tab-btn chat-tab-close");
+        close.type = "button";
+        close.title = "Close this tab (the chat stays in the history)";
+        close.setAttribute("aria-label", "Close tab");
+        close.appendChild(svg('<path d="M6 6l12 12M18 6L6 18"/>', { width: 11, height: 11, "stroke-width": 2 }));
+        close.addEventListener("click", (e) => { e.stopPropagation(); requestCloseTab(tab); });
+        node.appendChild(close);
+        node.addEventListener("click", () => selectTab(tab));
+        node.addEventListener("dblclick", (e) => {
+          if (tab !== activeTab || e.target.closest(".chat-tab-btn")) return;
+          openRenameModal();
+        });
+      }
+      if (tabStripEl.children[i] !== node) tabStripEl.insertBefore(node, tabStripEl.children[i] || null);
+      const title = tab.title || "Untitled";
+      node.querySelector(".chat-tab-title").textContent = title;
+      const marker = tabMarker(tab);
+      const mark = node.querySelector(".chat-tab-mark");
+      mark.className = "chat-tab-mark" + (marker ? " " + marker : "");
+      node.title = title + (marker ? " — " + TAB_MARKER_TITLES[marker] : "");
+      node.classList.toggle("active", tab === activeTab);
+      node.setAttribute("aria-selected", tab === activeTab ? "true" : "false");
+      node.classList.toggle("single", tabs.length === 1); // one tab = the old title: no ✕
+    });
+    // drop nodes of closed tabs, keep the "+" last
+    Array.prototype.slice.call(tabStripEl.children).forEach((node) => {
+      if (node.classList.contains("chat-tab") && !tabs.some((tab) => tab.stripEl === node)) node.remove();
+    });
+    let add = tabStripEl.querySelector(".chat-tab-add");
+    if (!add) {
+      add = el("button", "icon-btn small chat-tab-add");
+      add.type = "button";
+      add.title = "New tab — another chat side by side";
+      add.setAttribute("aria-label", "New tab");
+      add.appendChild(svg('<path d="M12 5v14M5 12h14"/>', { width: 13, height: 13, "stroke-width": 2 }));
+      add.addEventListener("click", () => { if (tabs.length < maxTabs) post("tab.new", {}); });
+    }
+    if (tabStripEl.lastChild !== add) tabStripEl.appendChild(add);
+    add.hidden = tabs.length >= maxTabs;
+  }
+
+  /** host→web tabs.state: the tab list (strip order) and the active tab. */
+  function applyTabsState(m) {
+    const ids = (m.tabs || []).map((x) => x && x.id).filter(Boolean);
+    if (!ids.length) return;
+    if (m.max) maxTabs = m.max;
+    ids.forEach((id) => { if (!tabById(id)) createTab(id); });
+    tabs.slice().forEach((tab) => { if (ids.indexOf(tab.id) < 0) removeTab(tab); });
+    tabs.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+    const target = tabById(m.activeId) || tabs[0];
+    if (target !== activeTab) showTab(target);
+    renderTabStrip();
+  }
+
+  function removeTab(tab) {
+    const i = tabs.indexOf(tab);
+    if (i < 0) return;
+    tabs.splice(i, 1);
+    if (jumpPillRo) jumpPillRo.unobserve(tab.inner);
+    tab.inner.remove();
+    if (tab.stripEl) tab.stripEl.remove();
+    if (tab === activeTab) {
+      activeTab = null;
+      if (tabs.length) showTab(tabs[Math.min(i, tabs.length - 1)]);
+    }
+  }
+
+  /** A click on a tab: switch right away, the host follows. */
+  function selectTab(tab) {
+    if (!tab || tab === activeTab) return;
+    showTab(tab);
+    post("tab.select", { id: tab.id });
+  }
+
+  /** Puts `tab` on screen: the composer, scroll position and every bar swap over to it. */
+  function showTab(tab) {
+    const prev = activeTab;
+    closeAllOverlays();
+    closeSlashAutocomplete();
+    closeAtAutocomplete();
+    if (prev && prev !== tab && tabs.indexOf(prev) >= 0) {
+      inTab(prev, () => {
+        prev.atBottom = isNearBottom();
+        prev.scrollTop = transcript.scrollTop;
+        prev.composer = { text: input.value, selStart: input.selectionStart, selEnd: input.selectionEnd };
+      });
+      prev.inner.hidden = true;
+    }
+    activeTab = T = tab;
+    tab.inner.hidden = false;
+    tab.unseen = false;
+    const c = tab.composer;
+    tab.composer = null; // the active tab's composer is the input itself
+    input.value = c ? c.text : "";
+    if (c) { input.selectionStart = c.selStart; input.selectionEnd = c.selEnd; }
+    renderTabChrome();
+    if (tab.atBottom) scrollToBottom(true);
+    else { transcript.scrollTop = tab.scrollTop; updateJumpPill(); }
+  }
+
+  /** Re-renders everything outside the transcript that shows the active tab. */
+  function renderTabChrome() {
+    updateTitle();
+    updateModelModeLabel();
+    renderStatusChrome();
+    renderContextMeter();
+    renderTasksBanner();
+    renderRunningAgents();
+    renderBackgroundTasksChrome();
+    renderTurnReview();
+    renderAttachments();
+    setPromptSuggestion(T.promptSuggestion);
+    setQueued(T.queued);
+    renderRemoteChrome();
+    autoGrow();
+    refreshSuggestionHint();
+    updateSendEnabled();
+    updateTurnLocks();
+    renderTabStrip();
+  }
+
+  /** ✕ on a tab: while its turn runs (or a review / queued prompt would be lost) ask first. */
+  function requestCloseTab(tab) {
+    if (tab.remoteActive) {
+      showNotify({ level: "warning", message: "End remote control before closing this tab.", autoClose: 6000 });
+      return;
+    }
+    const busy = tab.status === "working" || tab.status === "waiting-permission";
+    const review = tab.turnReview && tab.turnReview.files.length > 0;
+    if (!busy && !review) { post("tab.close", { id: tab.id }); return; }
+    openConfirmModal({
+      title: "Close this tab?",
+      message: busy
+        ? "Claude is still working in \"" + (tab.title || "Untitled") + "\". Closing the tab stops the turn; the chat stays in the history."
+        : "The changed files of \"" + (tab.title || "Untitled") + "\" are still waiting for review. Closing the tab keeps the changes as they are.",
+      confirmLabel: busy ? "Stop and close" : "Close tab",
+      danger: busy,
+      onConfirm: () => post("tab.close", { id: tab.id }),
+    });
+  }
+
+  /** The chat title lives in the tab strip now (was the header title). */
   function updateTitle() {
-    titleEl.textContent = state.title || "Untitled";
-    titleEl.title = state.title || "Untitled";
+    renderTabStrip();
   }
 
   // Host-reported picker list (§3 `models.list`). Mutates MODELS in place — the popover reads it
@@ -1898,6 +2246,7 @@
   }
 
   function updateModelModeLabel() {
+    if (!isActiveTab()) return;
     const md = MODELS.find((x) => x.id === state.model);
     const modeLabel = state.planMode ? "Plan" : PERMISSION_LABELS[state.permissionMode] || "Ask";
     let full = (md ? md.label : state.model) + " · " + modeLabel;
@@ -1915,16 +2264,17 @@
   // Empty / sign-in state (§5.2)
   // -------------------------------------------------------------------------
   function renderEmptyOrSignin() {
-    transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
+    T.inner.innerHTML = "";
+    T.curTurnDivider = null; T.curTurnFooter = null; T.footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     if (!state.loggedIn) {
       const wrap = el("div", "signin-state");
-      wrap.appendChild(el("div", "msg-line", "Not signed in to Claude Code"));
-      const btn = el("button", "signin-btn", "Sign in");
-      btn.addEventListener("click", () => post("slash.run", { command: "/login" }));
+      const noCli = state.account && state.account.noCli;
+      wrap.appendChild(el("div", "msg-line", noCli ? "Claude Code CLI not found" : "Not signed in to Claude Code"));
+      const btn = el("button", "signin-btn", noCli ? "Set the CLI path…" : "Sign in");
+      btn.addEventListener("click", () => (noCli ? post("options.open", {}) : startLogin(false)));
       wrap.appendChild(btn);
-      transcriptInner.appendChild(wrap);
+      T.inner.appendChild(wrap);
       return;
     }
     const wrap = el("div", "empty-state");
@@ -1933,7 +2283,7 @@
     wrap.appendChild(wm);
     wrap.appendChild(buildLogo());
     wrap.appendChild(el("div", "empty-todo", "// pre-flight check complete. where to, captain?"));
-    transcriptInner.appendChild(wrap);
+    T.inner.appendChild(wrap);
   }
 
   // Extension logo (astrogator robot); served from the WebUI folder (virtual host / file://).
@@ -1949,7 +2299,7 @@
   }
 
   function clearEmptyState() {
-    const es = transcriptInner.querySelector(".empty-state, .signin-state");
+    const es = T.inner.querySelector(".empty-state, .signin-state");
     if (es) es.remove();
   }
 
@@ -1968,9 +2318,20 @@
     return n;
   }
 
-  function makeMsgRow(role, gutterGlyph) {
+  /** Date + time of a message for its hover tooltip (the OS locale's format, e.g. "23.11.2026, 14:35"). */
+  function formatMsgTime(ts) {
+    const d = ts == null || ts === "" ? new Date() : new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    try { return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); }
+    catch (e) { return d.toLocaleString(); }
+  }
+
+  // `ts`: when the message was written (stored/mirrored messages); absent for a live one = now
+  function makeMsgRow(role, gutterGlyph, ts) {
     const row = el("div", "msg msg-" + role);
     const bubble = el("div", "msg-body");      // tinted card (bg/padding live here)
+    const when = formatMsgTime(ts);
+    if (when) bubble.title = when;
     // role glyph — now INSIDE the card; assistant uses the head logo instead of a glyph
     const g = el("div", "gutter");
     if (role === "assistant") {
@@ -1987,6 +2348,8 @@
     const content = el("div", "msg-content");
     bubble.appendChild(g);
     bubble.appendChild(content);
+    // the same time as a small label above the bubble — shown only with "Always show date and time" (:root.show-timestamps)
+    if (when && role !== "system") row.appendChild(el("div", "msg-time", when));
     row.appendChild(bubble);
     return { row, body: content };
   }
@@ -2029,11 +2392,11 @@
     clearEmptyState();
     const atBottom = isNearBottom();
     // keep the "working" rocket pinned to the very bottom — new content goes above it
-    if (workingEl && workingEl.parentNode === transcriptInner) {
-      transcriptInner.insertBefore(node, workingEl);
+    if (T.workingEl && T.workingEl.parentNode === T.inner) {
+      T.inner.insertBefore(node, T.workingEl);
       refreshWorkingPhrase(); // new chat content → swap the rocket's one-liner
     } else {
-      transcriptInner.appendChild(node);
+      T.inner.appendChild(node);
     }
     if (atBottom) scrollToBottom();
     else updateJumpPill();
@@ -2051,7 +2414,7 @@
     // Kept verbatim so a conversation rewind can put this prompt back into the composer.
     row.dataset.prompt = text || "";
     if (meta && meta.rewound) row.classList.add("rewound");
-    lastUserRow = row;                                  // receives checkpoint.created
+    T.lastUserRow = row;                                  // receives checkpoint.created
     if (meta && meta.checkpointSha) attachRewindButton(row, meta.checkpointSha);
     appendNode(row);
     return row;
@@ -2392,7 +2755,7 @@
     // even though the answer was accepted. If an interactive card for this id already exists, it
     // already represents the call → skip the tool card. (The forward order is handled by
     // permissionRequest/questionRequest removing the tool card.)
-    if (m.id != null && transcriptInner.querySelector(
+    if (m.id != null && T.inner.querySelector(
         '.q-card[data-request-id="' + cssEscape(m.id) + '"], .perm-card[data-request-id="' + cssEscape(m.id) + '"]'))
       return;
 
@@ -2459,7 +2822,7 @@
   function planCard(m) {
     // Reverse-order race: if the permission card for this plan already landed (it renders the
     // plan markdown itself), don't add a duplicate plan-card beside it.
-    if (m.id != null && transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(m.id) + '"]'))
+    if (m.id != null && T.inner.querySelector('.perm-card[data-request-id="' + cssEscape(m.id) + '"]'))
       return;
     const card = el("div", "plan-card");
     card.dataset.toolId = m.id;
@@ -2481,7 +2844,7 @@
 
   function toolOutput(m) {
     if (!m.id || (!m.text && !m.start)) return;
-    const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
+    const card = T.inner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     // A late chunk after the result (host posts race) must not re-open a finished console.
     if (!card || isToolCardFinished(card)) return;
     ensureToolStopButton(card); // a live console = a running shell command the host can kill
@@ -2546,7 +2909,7 @@
 
   /** Host could not kill the command (already gone / process not found) — re-arm the button. */
   function toolStopFailed(m) {
-    const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
+    const card = T.inner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     if (!card) return;
     delete card.dataset.stopRequested;
     const btn = card.querySelector(".tool-stop-btn");
@@ -2570,7 +2933,7 @@
   // stopped the turn mid-command (the killed CLI sends nothing more). Without this the spinner and
   // "waiting for output…" would run forever.
   function finalizeRunningToolCards() {
-    transcriptInner.querySelectorAll(".tool-card").forEach((card) => {
+    T.inner.querySelectorAll(".tool-card").forEach((card) => {
       if (isToolCardFinished(card) || !card.querySelector(".tool-status .spinner")) return;
       markToolCardStopped(card);
     });
@@ -2600,7 +2963,7 @@
   function toolResult(m) {
     reconcileTaskId(m.id, m.summary); // assign a TaskCreate its real "#N" id (no-op for other tools)
     agentEnd(m.id); // if this result is for a running Task agent, drop it from the live list
-    const card = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
+    const card = T.inner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.id) + '"]');
     if (!card || card.classList.contains("tool-stopped")) return;
     const stopBtn = card.querySelector(".tool-stop-btn");
     if (stopBtn) stopBtn.remove();
@@ -2752,7 +3115,7 @@
     // the permission card represents the same call, so drop the redundant tool card.
     // ExitPlanMode renders as a .plan-card (not .tool-card); catch both so the markdown
     // plan isn't left behind as a duplicate beside the permission card.
-    const existingTool = transcriptInner.querySelector(
+    const existingTool = T.inner.querySelector(
       '.tool-card[data-tool-id="' + cssEscape(m.requestId) + '"], .plan-card[data-tool-id="' + cssEscape(m.requestId) + '"]');
     if (existingTool) existingTool.remove();
     // guard against a second permission.request for the same tool_use_id. This happens when the
@@ -2760,7 +3123,7 @@
     // the still-running process (launched in the old mode) also fires the real permission hook.
     // The latest request wins — drop the earlier perm-card so we never leave an orphaned card with
     // live Approve/Reject buttons that setPermCardState/applyPermissionResult (first-match) miss.
-    const existingPerm = transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(m.requestId) + '"]');
+    const existingPerm = T.inner.querySelector('.perm-card[data-request-id="' + cssEscape(m.requestId) + '"]');
     if (existingPerm) existingPerm.remove();
 
     // auto-approved = pre-decided, nothing to answer (Compact hides it like a finished tool card)
@@ -2938,7 +3301,7 @@
   }
 
   function setPermCardState(requestId, status) {
-    const card = transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(requestId) + '"]');
+    const card = T.inner.querySelector('.perm-card[data-request-id="' + cssEscape(requestId) + '"]');
     if (!card || card.classList.contains("decided")) return null;
     card.classList.add("decided", status, permStatusClass(status));
     card.classList.remove("expanded"); // collapse the diff + hide the buttons
@@ -2961,7 +3324,7 @@
 
   // host→web permission.result: an approved edit finished executing (applied / failed)
   function applyPermissionResult(m) {
-    const card = transcriptInner.querySelector('.perm-card[data-request-id="' + cssEscape(m.requestId) + '"]');
+    const card = T.inner.querySelector('.perm-card[data-request-id="' + cssEscape(m.requestId) + '"]');
     if (!card) return;
     card.classList.remove("approved", "applied", "rejected", "failed");
     card.classList.add("decided", m.status, permStatusClass(m.status));
@@ -3004,7 +3367,7 @@
   // Mark an open question card as expired (host abandoned/timed it out): collapse it and make it
   // read-only by reusing the "answered" styling, but with an "Expired" summary and no answer sent.
   function expireQuestionCard(requestId) {
-    const card = transcriptInner.querySelector('.q-card[data-request-id="' + cssEscape(requestId) + '"]');
+    const card = T.inner.querySelector('.q-card[data-request-id="' + cssEscape(requestId) + '"]');
     if (!card || card.classList.contains("answered")) return;
     card.classList.add("answered", "expired"); // answered → collapses + disables the options/input
     card.classList.remove("expanded");
@@ -3271,7 +3634,7 @@
 
   function questionRequest(m) {
     // CLI emits the tool_use before the prompt — the question card represents it
-    const existingTool = transcriptInner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.requestId) + '"]');
+    const existingTool = T.inner.querySelector('.tool-card[data-tool-id="' + cssEscape(m.requestId) + '"]');
     if (existingTool) existingTool.remove();
     const card = buildQuestionCard(m.requestId, m.questions || [], null);
     state.pendingPermissions.add(m.requestId);
@@ -3362,7 +3725,7 @@
     if (m.contextTokens != null) state.contextTokens = m.contextTokens; // /compact note + Context meter
     if (m.contextWindow) state.contextWindow = m.contextWindow;
     if (m.limits) state.limits = m.limits;
-    taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
+    T.taskBatchClosed = true; // next turn's first TaskCreate starts a fresh task list
     clearRunningAgents();   // turn ended → no agents can still be running
     updateStatusbar();
     // Turns the CLI starts by itself while background tasks run (followUp: each reported task event gets
@@ -3370,40 +3733,40 @@
     // moves below the newest message and sums duration, tokens and cost. A prompt you send starts a new sum.
     const cur = { d: m.durationMs || 0, t: m.turnOutputTokens || 0, c: m.costUsd || 0, n: 1 };
     let base = { d: 0, t: 0, c: 0, n: 0 };
-    if (m.followUp && footerChain) {
-      if (curTurnFooter) {
-        base = footerChain.base;            // another result of the same follow-up turn → replace, don't add
+    if (m.followUp && T.footerChain) {
+      if (T.curTurnFooter) {
+        base = T.footerChain.base;            // another result of the same follow-up turn → replace, don't add
       } else {
-        base = footerChain.total;           // first result of this follow-up → the chain so far is the base
-        if (footerChain.divider) footerChain.divider.remove();
-        if (footerChain.footer) footerChain.footer.remove();
+        base = T.footerChain.total;           // first result of this follow-up → the chain so far is the base
+        if (T.footerChain.divider) T.footerChain.divider.remove();
+        if (T.footerChain.footer) T.footerChain.footer.remove();
       }
     }
     // Collapse multiple result events in one turn (subagent results + the main total) to a single
-    // footer: drop the previous one from THIS turn, then render the latest (see curTurnFooter note).
-    if (curTurnDivider) { curTurnDivider.remove(); curTurnDivider = null; }
-    if (curTurnFooter) { curTurnFooter.remove(); curTurnFooter = null; }
+    // footer: drop the previous one from THIS turn, then render the latest (see T.curTurnFooter note).
+    if (T.curTurnDivider) { T.curTurnDivider.remove(); T.curTurnDivider = null; }
+    if (T.curTurnFooter) { T.curTurnFooter.remove(); T.curTurnFooter = null; }
     const total = { d: base.d + cur.d, t: base.t + cur.t, c: base.c + cur.c, n: base.n + cur.n };
     // turn separator + footer: elapsed time · tokens generated this turn · cost
-    curTurnDivider = el("hr", "turn-divider");
-    appendNode(curTurnDivider);
+    T.curTurnDivider = el("hr", "turn-divider");
+    appendNode(T.curTurnDivider);
     const parts = [];
     if (m.durationMs != null || total.d) parts.push(formatDuration(total.d));
     if (total.t) parts.push(formatNum(total.t) + " tok");
     // costUsd = this turn's share (host: session total minus the previous total; null when unknown)
     if (total.c) parts.push(formatCost(total.c));
     if (parts.length) {
-      curTurnFooter = el("div", "sys-note turn-footer", parts.join(" · "));
+      T.curTurnFooter = el("div", "sys-note turn-footer", parts.join(" · "));
       const tip = [total.n > 1
         ? "Duration · tokens generated · cost of this turn and the " + (total.n - 1)
           + " follow-up turn" + (total.n > 2 ? "s" : "") + " background tasks triggered"
         : "Duration · tokens generated in this turn · its cost"];
       if (m.sessionCostUsd) tip.push("Session total so far: " + formatCost(m.sessionCostUsd));
       tip.push("Cost at API list prices — with a Claude subscription this is not billed.");
-      curTurnFooter.title = tip.join("\n");
-      appendNode(curTurnFooter);
+      T.curTurnFooter.title = tip.join("\n");
+      appendNode(T.curTurnFooter);
     }
-    footerChain = { base, total, divider: curTurnDivider, footer: curTurnFooter };
+    T.footerChain = { base, total, divider: T.curTurnDivider, footer: T.curTurnFooter };
   }
 
   // -------------------------------------------------------------------------
@@ -3422,11 +3785,12 @@
     if (state.runningAgents.length !== before) renderRunningAgents();
   }
   function clearRunningAgents() {
-    if (!state.runningAgents.length && agentsRunningEl.hidden) return;
+    if (!state.runningAgents.length && (!isActiveTab() || agentsRunningEl.hidden)) return;
     state.runningAgents = [];
     renderRunningAgents();
   }
   function renderRunningAgents() {
+    if (!isActiveTab()) return;
     agentsRunningEl.innerHTML = "";
     if (!state.runningAgents.length) { agentsRunningEl.hidden = true; return; }
     agentsRunningEl.hidden = false;
@@ -3448,6 +3812,12 @@
   // button (web→host background.stop). Host-driven: the list is replaced on every message.
   // -------------------------------------------------------------------------
   function renderBackgroundTasks(tasks) {
+    T.backgroundTasks = Array.isArray(tasks) ? tasks.slice() : [];
+    renderBackgroundTasksChrome();
+  }
+  function renderBackgroundTasksChrome() {
+    if (!isActiveTab()) return;
+    const tasks = T.backgroundTasks;
     bgTasksEl.innerHTML = "";
     if (!tasks.length) { bgTasksEl.hidden = true; return; }
     bgTasksEl.hidden = false;
@@ -3593,10 +3963,10 @@
   // -------------------------------------------------------------------------
   function renderHistoricMessage(msg) {
     // Everything this message renders is greyed out when it was rewound past (host sets `rewound`).
-    const before = transcriptInner.lastChild;
+    const before = T.inner.lastChild;
     renderHistoricMessageInner(msg);
     if (!msg.rewound) return;
-    let node = before ? before.nextSibling : transcriptInner.firstChild;
+    let node = before ? before.nextSibling : T.inner.firstChild;
     while (node) {
       if (node.classList) node.classList.add("rewound");
       node = node.nextSibling;
@@ -3606,29 +3976,29 @@
   function renderHistoricMessageInner(msg) {
     switch (msg.role) {
       case "user": {
-        const { row, body } = makeMsgRow("user", "›");
+        const { row, body } = makeMsgRow("user", "›", msg.ts);
         body.classList.add("md");
         body.appendChild(renderMarkdown(msg.text || ""));
         appendMsgAttachments(body, msg.attachments);
         row.dataset.prompt = msg.text || "";
         if (msg.id) row.dataset.msgId = msg.id;
         if (msg.rewound) row.classList.add("rewound");
-        lastUserRow = row;
+        T.lastUserRow = row;
         if (msg.checkpointSha) attachRewindButton(row, msg.checkpointSha);
-        transcriptInner.appendChild(row);
+        T.inner.appendChild(row);
         break;
       }
       case "assistant": {
-        const { row, body } = makeMsgRow("assistant", "✳");
+        const { row, body } = makeMsgRow("assistant", "✳", msg.ts);
         body.classList.add("md");
         body.appendChild(renderMarkdown(msg.text || ""));
         addCopyMarkdownButton(body, msg.text || "");
-        transcriptInner.appendChild(row);
+        T.inner.appendChild(row);
         break;
       }
       case "question": {
         const card = buildQuestionCard(msg.id, msg.questions || [], msg.answers || []);
-        transcriptInner.appendChild(card);
+        T.inner.appendChild(card);
         break;
       }
       case "tool": {
@@ -3652,7 +4022,7 @@
         fillToolBody(bodyWrap, msg.toolName, msg.input);
         card.appendChild(head); card.appendChild(bodyWrap);
         head.addEventListener("click", () => card.classList.toggle("collapsed"));
-        transcriptInner.appendChild(card);
+        T.inner.appendChild(card);
         break;
       }
       case "permission": {
@@ -3679,25 +4049,25 @@
         }
         card.appendChild(body);
         head.addEventListener("click", () => card.classList.toggle("expanded"));
-        transcriptInner.appendChild(card);
+        T.inner.appendChild(card);
         break;
       }
       case "error": {
-        transcriptInner.appendChild(el("div", "error-block", msg.text || "Error"));
+        T.inner.appendChild(el("div", "error-block", msg.text || "Error"));
         break;
       }
       case "system": {
-        transcriptInner.appendChild(el("div", "sys-note", msg.text || ""));
+        T.inner.appendChild(el("div", "sys-note", msg.text || ""));
         break;
       }
       case "rewind": {
-        transcriptInner.appendChild(buildRewindNote(msg.text || "", msg.files || []));
+        T.inner.appendChild(buildRewindNote(msg.text || "", msg.files || []));
         break;
       }
       default: {
-        const { row, body } = makeMsgRow("system", "");
+        const { row, body } = makeMsgRow("system", "", msg.ts);
         body.textContent = msg.text || "";
-        transcriptInner.appendChild(row);
+        T.inner.appendChild(row);
       }
     }
   }
@@ -4039,14 +4409,18 @@
   // Auto-scroll (§5.2 / §7)
   // -------------------------------------------------------------------------
   function isNearBottom() {
+    if (!isActiveTab()) return T.atBottom;
     return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
   }
   function scrollToBottom(force) {
+    if (!isActiveTab()) { T.atBottom = true; return; } // applied when the tab is shown again
     transcript.scrollTop = transcript.scrollHeight;
     showJumpPill(false);
     // re-pin after layout settles (markdown re-render, code highlight, fonts, table reflow,
     // or the working rocket being added/removed can change height in the same frame)
+    const tab = T;
     requestAnimationFrame(() => {
+      if (tab !== activeTab) return; // switched away in the meantime
       transcript.scrollTop = transcript.scrollHeight;
       showJumpPill(false);
     });
@@ -4056,7 +4430,7 @@
   /// The pill's visibility is a pure function of scroll position: it is there whenever the view is not
   /// at the bottom, whether or not anything new arrived. (It used to be shown ONLY by appendNode, so
   /// scrolling up by hand never revealed it and it vanished for good once the turn went quiet.)
-  function updateJumpPill() { showJumpPill(!isNearBottom()); }
+  function updateJumpPill() { if (isActiveTab()) showJumpPill(!isNearBottom()); }
 
   transcript.addEventListener("scroll", updateJumpPill);
   jumpPill.addEventListener("click", () => scrollToBottom(true));
@@ -4067,8 +4441,8 @@
   // Both can move the view off (or back to) the bottom silently. `.jump-pill` is position:absolute,
   // so toggling it cannot resize the observed elements → no observer feedback loop.
   if (window.ResizeObserver) {
-    const jumpPillRo = new ResizeObserver(updateJumpPill);
-    jumpPillRo.observe(transcriptInner); // content height
+    jumpPillRo = new ResizeObserver(updateJumpPill);
+    tabs.forEach((tab) => jumpPillRo.observe(tab.inner)); // content height (new tabs observe theirs in createTab)
     jumpPillRo.observe(transcript);      // viewport height
   }
 
@@ -4079,15 +4453,23 @@
     // a turn is running while it works or waits for a permission decision (the CLI process is alive)
     return state.status === "working" || state.status === "waiting-permission";
   }
+  /** The composer text of the tab in context (the input for the active tab, the saved text otherwise). */
+  function composerText() {
+    if (isActiveTab()) return input.value;
+    return T.composer ? T.composer.text : "";
+  }
   function hasPromptContent() {
     // text OR an attachment — a screenshot alone is a valid prompt
-    return input.value.trim().length > 0 || state.attachments.length > 0;
+    return composerText().trim().length > 0 || state.attachments.length > 0;
   }
   function canSend() {
     // A pending post-turn edit review no longer blocks the next prompt: the host keeps collecting the
     // changes of the following turns into the same list (cumulative against the first baseline).
-    return hasPromptContent() && !state.remoteActive && !isTurnActive();
+    if (state.remoteActive) return hasPromptContent() && remoteCanPrompt() && !T.remoteSend;
+    return hasPromptContent() && !isTurnActive();
   }
+  /** The remote session takes prompts from the panel (background variant — remote.state canPrompt). */
+  function remoteCanPrompt() { return !!(state.remoteActive && T.remoteMsg && T.remoteMsg.canPrompt); }
   function canQueue() {
     return hasPromptContent() && !state.remoteActive && isTurnActive() && !state.queued;
   }
@@ -4096,11 +4478,14 @@
     return isTurnActive() || state.turnReview.files.length > 0;
   }
   function updateTurnLocks() {
+    if (!isActiveTab()) return;
     const blocked = isBlocked();
     // while a turn runs, Claude may be editing the very files under review — no Keep/Discard/Finish then
     turnReviewEl.classList.toggle("locked", isTurnActive());
     $("btn-new").disabled = blocked || state.remoteActive;
-    btnRemote.disabled = blocked;
+    // Remote Control runs in one tab at a time; during a turn it can be armed (starts when the turn ends)
+    // (a pending end-of-turn review is kept as it is when remote control starts)
+    btnRemote.disabled = tabs.some((x) => x !== activeTab && (x.remoteActive || (x.remoteMsg && x.remoteMsg.state === "pending")));
     // The history button stays clickable while blocked — the dropdown opens, but loading a session
     // is disabled inside it (delete stays available). renderHistoryList reflects the current state,
     // so refresh it if it's open.
@@ -4110,6 +4495,13 @@
   // The send button has three faces: Send (idle), Queue (a turn runs — the prompt waits for its end) and
   // ✕ (a prompt is queued — click to take it back). Stop lives in the working indicator in the transcript.
   function updateSendEnabled() {
+    renderTabStrip(); // status markers follow every status change
+    if (!isActiveTab()) return;
+    if (state.remoteActive) { updateRemoteSendFace(); return; }
+    queueHint.textContent = QUEUE_HINT_TEXT;
+    input.placeholder = T.promptSuggestion ? "" : defaultPlaceholder;
+    input.readOnly = !!state.queued; // a remote prompt may have left it read-only
+    composer.classList.toggle("queued", !!state.queued);
     const active = isTurnActive();
     sendBtn.classList.toggle("queue", active && !state.queued);
     sendBtn.classList.toggle("unqueue", state.queued);
@@ -4133,6 +4525,7 @@
   // ── Prompt queue: one prompt written during a turn, sent by itself when the turn ends ──
   function setQueued(on) {
     state.queued = !!on;
+    if (!isActiveTab()) return;
     input.readOnly = state.queued; // the queued text is what will be sent — ✕ / Esc to edit it again
     composer.classList.toggle("queued", state.queued);
     updateSendEnabled();
@@ -4151,8 +4544,8 @@
   // The running turn ended (status left working/waiting-permission). A normal end sends the queued prompt;
   // after Stop or an error it stays in the input — sending on would rarely be what the user wants then.
   function sendQueuedPrompt(endState) {
-    const stopped = stopRequested;
-    stopRequested = false;
+    const stopped = T.stopRequested;
+    T.stopRequested = false;
     if (!state.queued) return;
     setQueued(false);
     if (stopped || endState === "error") {
@@ -4165,13 +4558,16 @@
       return;
     }
     // after the rest of this status update (finalized cards, locks) — then exactly like pressing Send
-    setTimeout(sendPrompt, 0);
+    // (in the tab whose turn ended — it may be in the background by now)
+    const tab = T;
+    setTimeout(() => inTab(tab, sendPrompt), 0);
   }
 
   function sendPrompt() {
     if (!canSend()) return;
+    if (state.remoteActive) { sendRemotePrompt(); return; }
     collapseRewoundRuns(false); // the conversation moves on → fold away what a rewind discarded
-    const text = input.value;
+    const text = composerText();
     const attachments = state.attachments.slice();
     // also surface the auto-attached active editor file (host appends it as an @-reference),
     // so the sent bubble reflects exactly what was sent — matching the host-persisted record
@@ -4184,13 +4580,74 @@
     }
     renderUserMessage(text, display);
     scrollToBottom(); // the user just sent → always pin to bottom (even after a long prompt)
+    maybeHintParallelTurns();
     post("prompt.send", { text, attachments: attachments.length ? attachments : undefined });
     setPromptSuggestion("");
-    input.value = "";
     state.attachments = [];
+    if (!isActiveTab()) { // a queued prompt of a background tab went out — its saved composer is empty now
+      T.composer = null;
+      return;
+    }
+    input.value = "";
     renderAttachments();
     autoGrow();
     updateSendEnabled();
+  }
+
+  // Two tabs work in the same workspace at once: they can change the same files — say so once per window.
+  let parallelHintShown = false;
+  function maybeHintParallelTurns() {
+    if (parallelHintShown || !tabs.some((x) => x !== T && (x.status === "working" || x.status === "waiting-permission"))) return;
+    parallelHintShown = true;
+    showNotify({
+      level: "info",
+      message: "Another tab is working in this workspace too — both sessions can change the same files.",
+      autoClose: 8000,
+    });
+  }
+
+  // ── Prompts into a running Remote Control session (host: RemotePromptSender types them into the session) ──
+  // The prompt stays in the input until the host reports it sent; the live mirror then shows it in the transcript.
+  function sendRemotePrompt() {
+    const text = composerText();
+    const attachments = state.attachments.slice();
+    T.remoteSend = "sending";
+    post("prompt.send", { text, attachments: attachments.length ? attachments : undefined });
+    updateSendEnabled();
+  }
+  function onRemotePrompt(m) {
+    const s = m.state || "";
+    if (s === "sending" || s === "queued") {
+      T.remoteSend = s;
+    } else {
+      T.remoteSend = null;
+      if (s === "sent") {
+        state.attachments = [];
+        if (isActiveTab()) { input.value = ""; renderAttachments(); autoGrow(); }
+        else if (T.composer) T.composer = null;
+      } else if (s === "error" && m.message) {
+        showNotify({ level: "warning", message: m.message, autoClose: 10000 });
+      }
+    }
+    updateSendEnabled();
+  }
+  function updateRemoteSendFace() {
+    const can = remoteCanPrompt();
+    const pending = T.remoteSend;
+    input.readOnly = !!pending;
+    composer.classList.toggle("queued", !!pending);
+    sendBtn.classList.remove("queue");
+    sendBtn.classList.toggle("unqueue", pending === "queued");
+    sendBtn.disabled = pending === "queued" ? false : !canSend();
+    const title = pending === "queued" ? "Take the waiting prompt back (Esc)"
+      : can ? "Send to the remote session" : "Remote control is active";
+    sendBtn.title = title;
+    sendBtn.setAttribute("aria-label", title);
+    queueHint.hidden = !pending;
+    queueHint.textContent = pending === "queued"
+      ? "Waiting · goes to the remote session when Claude is done there"
+      : "Sending to the remote session…";
+    if (can && !input.value && !T.promptSuggestion) input.placeholder = "Message the remote session…";
   }
 
   // Enter / the send button: send, or queue while a turn runs
@@ -4201,6 +4658,7 @@
   }
 
   sendBtn.addEventListener("click", () => {
+    if (state.remoteActive && T.remoteSend === "queued") { post("remote.cancelPrompt", {}); return; }
     if (state.queued) { setQueued(false); input.focus(); return; }
     submitComposer();
   });
@@ -4208,7 +4666,7 @@
   // the working indicator's stop button
   function requestStop() {
     if (!isTurnActive()) return;
-    stopRequested = true;
+    T.stopRequested = true;
     post("turn.stop", {});
   }
 
@@ -4231,7 +4689,11 @@
       setQueued(false); // take the queued prompt back — editable again
       return;
     }
-    if (e.key === "Escape" && promptSuggestion && input.value === "") {
+    if (e.key === "Escape" && state.remoteActive && T.remoteSend === "queued") {
+      post("remote.cancelPrompt", {}); // the waiting remote prompt comes back into the input
+      return;
+    }
+    if (e.key === "Escape" && T.promptSuggestion && input.value === "") {
       setPromptSuggestion("");
       post("prompt.suggestionDismissed", {}); // the host forgets it too (else it returns after a restart)
       return;
@@ -4249,7 +4711,8 @@
       // a popover/modal above the plugins panel closes first; the next Esc closes the panel
       const hadOverlay = !!openOverlay || !!openModalEl;
       closeAllOverlays();
-      if (!hadOverlay) closeManagePanel();
+      if (!hadOverlay && loginUi) closeLoginDialog(true);
+      else if (!hadOverlay) closeManagePanel();
     }
   });
 
@@ -4306,23 +4769,24 @@
     setPromptSuggestion(text);
   }
   function setPromptSuggestion(text) {
-    promptSuggestion = (text || "").trim();
-    suggestionText.textContent = promptSuggestion;
+    T.promptSuggestion = (text || "").trim();
+    if (!isActiveTab()) return;
+    suggestionText.textContent = T.promptSuggestion;
     // the overlay replaces the placeholder while a suggestion exists (else both would show)
-    input.placeholder = promptSuggestion ? "" : defaultPlaceholder;
-    composer.classList.toggle("has-suggestion", !!promptSuggestion);
+    input.placeholder = T.promptSuggestion ? "" : defaultPlaceholder;
+    composer.classList.toggle("has-suggestion", !!T.promptSuggestion);
     refreshSuggestionHint();
   }
   function refreshSuggestionHint() {
     // ghost text + Tab hint only while the input is empty — typing hides them
-    const show = !!(promptSuggestion && input.value === "");
+    const show = !!(T.promptSuggestion && input.value === "");
     if (suggestionGhost.hidden === !show) return;
     suggestionGhost.hidden = !show;
     autoGrow(); // a long suggestion may wrap — make room for it (and shrink back once it's gone)
   }
   function acceptPromptSuggestion() {
-    if (!promptSuggestion || input.value !== "") return false;
-    const text = promptSuggestion;
+    if (!T.promptSuggestion || input.value !== "") return false;
+    const text = T.promptSuggestion;
     setPromptSuggestion(""); // consumed — clearing the input again shows the normal placeholder
     input.value = text;
     input.selectionStart = input.selectionEnd = text.length;
@@ -4371,6 +4835,7 @@
     renderAttachments();
   }
   function renderAttachments() {
+    if (!isActiveTab()) return;
     attachmentsEl.innerHTML = "";
     updateSendEnabled(); // an attachment alone makes the prompt sendable (and removing the last one not)
     if (!state.attachments.length) { attachmentsEl.hidden = true; return; }
@@ -4424,6 +4889,7 @@
     updateTurnLocks();
   }
   function renderTurnReview() {
+    if (!isActiveTab()) return;
     turnReviewEl.innerHTML = "";
     const files = state.turnReview.files;
     if (!files.length) { turnReviewEl.hidden = true; return; }
@@ -4817,7 +5283,6 @@
     field.select();
   }
 
-  $("btn-rename").addEventListener("click", openRenameModal);
 
   /** Generic confirmation modal (reused for destructive actions like deleting a session). */
   function openConfirmModal(opts) {
@@ -4865,17 +5330,50 @@
 
   /** Locks everything except the remote panel: header actions (rename, history,
       new chat) and the composer controls (+, /, Model·Mode, attachment chips). */
-  function setRemoteLocked(locked) {
-    [$("btn-rename"), $("btn-history"), $("btn-new"), $("btn-plus"), $("btn-slash"), modelModeBtn, activeFileChip]
-      .forEach((b) => { if (b) b.disabled = locked; });
-    input.disabled = locked;
-    root.classList.toggle("remote-locked", locked);
+  // canPrompt (background remote session): the composer, attachments and the active-file chip stay usable — prompts
+  // go into the remote session. Rename / history / new chat / slash commands / Model · Mode belong to the local
+  // session and stay locked either way.
+  function setRemoteLocked(locked, canPrompt) {
+    [$("btn-history"), $("btn-new"), $("btn-slash"), modelModeBtn].forEach((b) => { if (b) b.disabled = locked; });
+    const composerLocked = locked && !canPrompt;
+    [$("btn-plus"), activeFileChip].forEach((b) => { if (b) b.disabled = composerLocked; });
+    input.disabled = composerLocked;
+    root.classList.toggle("remote-locked", composerLocked);
   }
 
   function applyRemoteState(m) {
     const s = m.state || "";
+    if (s === "pending") {
+      // armed during a turn: a banner with Cancel, nothing locked, the turn's status stays
+      T.remoteMsg = m;
+      renderRemoteChrome();
+      updateTurnLocks();
+      return;
+    }
     if (s === "stopped") {
+      const wasPending = T.remoteMsg && T.remoteMsg.state === "pending";
       state.remoteActive = false;
+      T.remoteMsg = null;
+      renderRemoteChrome();
+      if (wasPending) updateTurnLocks(); // cancelled before it started — the turn (if any) goes on
+      else applyStatus("ready");
+      return;
+    }
+
+    const wasActive = state.remoteActive;
+    state.remoteActive = true;
+    T.remoteMsg = m;
+    setPromptSuggestion(""); // the remote session owns the conversation now
+    if (!wasActive && isActiveTab()) closeAllOverlays(); // not on every status poll
+    renderRemoteChrome();
+    applyStatus("remote", m.activity === "busy" ? "Remote: Claude is working…" : "Remote control active");
+  }
+
+  /** The Remote Control panel + composer lock of the active tab (the panel shows only on the tab running it). */
+  function renderRemoteChrome() {
+    if (!isActiveTab()) return;
+    const m = T.remoteMsg;
+    if (!m) {
       remotePanel.hidden = true;
       remotePanel.classList.remove("min");
       remoteLink.removeAttribute("href"); // the next session draws its own code
@@ -4884,19 +5382,30 @@
       btnRemote.classList.remove("active");
       setRemoteLocked(false);
       btnRemoteEnd.disabled = false;
-      applyStatus("ready");
+      T.remoteSend = null;
+      updateSendEnabled();
       return;
     }
-
-    const wasActive = state.remoteActive;
-    state.remoteActive = true;
-    setPromptSuggestion(""); // the remote session owns the conversation now
+    const s = m.state || "";
+    if (s === "pending") {
+      remotePanel.hidden = false;
+      btnRemote.classList.add("active");
+      setRemoteLocked(false);
+      remoteLink.hidden = true;
+      btnRemoteCopy.hidden = true;
+      remoteQr.hidden = true;
+      btnRemoteTerminal.hidden = true;
+      remoteActivity.hidden = true;
+      remoteStatus.classList.remove("error");
+      remoteStatus.textContent = m.message || "Remote control starts as soon as Claude has finished this turn.";
+      btnRemoteEnd.disabled = false;
+      btnRemoteEnd.textContent = "Cancel";
+      return;
+    }
     remotePanel.hidden = false; // a banner above the transcript — the conversation below stays visible
     btnRemote.classList.add("active");
-    setRemoteLocked(true);
+    setRemoteLocked(true, !!m.canPrompt);
     btnRemoteEnd.disabled = false;
-    if (!wasActive) closeAllOverlays(); // not on every status poll
-    applyStatus("remote", m.activity === "busy" ? "Remote: Claude is working…" : "Remote control active");
     remoteStatus.classList.toggle("error", s === "error");
     btnRemoteEnd.textContent = s === "error" ? "Close" : "End remote session";
 
@@ -4921,8 +5430,9 @@
     } else if (s === "error") {
       remoteStatus.textContent = m.message || "Remote control failed.";
     } else { // ready
-      remoteStatus.textContent = m.message
-        || "Running in the terminal — scan the QR code or open the link shown there to connect from the Claude app or claude.ai/code.";
+      remoteStatus.textContent = (m.message
+        || "Running in the terminal — scan the QR code or open the link shown there to connect from the Claude app or claude.ai/code.")
+        + (m.canPrompt ? " You can also keep writing here — your prompts go into the remote session." : "");
     }
   }
 
@@ -4959,9 +5469,12 @@
   remotePanel.querySelector(".remote-actions").addEventListener("click", (e) => e.stopPropagation());
 
   btnRemote.addEventListener("click", () => {
-    if (state.remoteActive || isTurnActive()) return;
+    if (state.remoteActive || (T.remoteMsg && T.remoteMsg.state === "pending")) return;
     post("remote.start", {});
-    applyRemoteState({ state: "starting" }); // optimistic — host confirms
+    // optimistic — host confirms; while a turn runs it only arms the start (no lock, the turn goes on)
+    applyRemoteState(isTurnActive()
+      ? { state: "pending", message: "Remote control starts as soon as Claude has finished this turn." }
+      : { state: "starting" });
   });
 
   btnRemoteEnd.addEventListener("click", () => {
@@ -5780,10 +6293,19 @@
         isTurnActive() ? "Stop the current turn to switch sessions."
                        : "Review the changed files before switching sessions."));
     sessions.forEach((s) => {
+      // open in another tab → a click selects that tab (one chat, one tab) — allowed even while this tab is busy
+      const otherTab = tabs.find((x) => x !== activeTab && x.sessionId === s.id) || null;
+      const blockedHere = loadBlocked && !otherTab;
       // A div (not a button) so the delete button can nest inside without invalid markup.
-      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : "") + (loadBlocked ? " disabled" : ""));
+      const item = el("div", "history-item" + (s.id === state.sessionId ? " active" : "")
+        + (otherTab ? " in-tab" : "") + (blockedHere ? " disabled" : ""));
       const top = el("div", "hi-top");
       top.appendChild(el("span", "hi-title", s.title || "Untitled"));
+      if (otherTab) {
+        const badge = el("span", "hi-tab", "open");
+        badge.title = "Open in another tab — click to switch to it";
+        top.appendChild(badge);
+      }
       top.appendChild(el("span", "hi-time", relativeTime(s.updatedAt)));
       // Delete stays available even while loading is blocked.
       const del = el("button", "hi-delete");
@@ -5794,7 +6316,9 @@
       top.appendChild(del);
       item.appendChild(top);
       if (s.preview) item.appendChild(el("div", "hi-preview", s.preview));
-      if (!loadBlocked) {
+      if (otherTab) {
+        item.addEventListener("click", () => { closeAllOverlays(); selectTab(otherTab); });
+      } else if (!loadBlocked) {
         item.addEventListener("click", () => {
           post("session.load", { sessionId: s.id });
           closeAllOverlays();
@@ -5811,8 +6335,8 @@
     state.messages = [];
     state.title = "Untitled";
     state.activeAssistant = null;
-    transcriptInner.innerHTML = "";
-    curTurnDivider = null; curTurnFooter = null; footerChain = null; // transcript cleared → drop stale turn-footer refs
+    T.inner.innerHTML = "";
+    T.curTurnDivider = null; T.curTurnFooter = null; T.footerChain = null; // transcript cleared → drop stale turn-footer refs
     clearRunningAgents(); // transcript cleared → drop any running-agents list
     updateTitle();
     renderEmptyOrSignin();
@@ -5928,8 +6452,233 @@
     return wrap;
   }
 
+  // -------------------------------------------------------------------------
+  // Sign-in (auth.*) — the host runs `claude auth login` (docs/NOTES.md "Sign-in"). The dialog offers both of the
+  // CLI's ways in: "Open sign-in page" opens a URL that reports back to the CLI by itself (this PC), and a QR
+  // code / link for another device, whose page shows a code to paste here. Its own element in #overlay-layer
+  // (like the plugins sheet), so a tab switch or a popover does not close it; Esc / Cancel does (auth.cancel).
+  // -------------------------------------------------------------------------
+  let loginUi = null; // { backdrop, statusEl, openBtn, qr, qrWrap, copyBtn, codeInput, codeBtn, consoleBtn, console, manualUrl }
+
+  const LOGIN_STATUS = {
+    starting: "Starting the sign-in…",
+    waiting: "Waiting for you to confirm in the browser — this closes by itself.",
+    verifying: "Checking the sign-in…",
+  };
+
+  function startLogin(consoleMode) {
+    openLoginDialog(!!consoleMode);
+    post("auth.login", { console: !!consoleMode });
+  }
+
+  function openLoginDialog(consoleMode) {
+    if (loginUi) { setLoginStatus("starting"); return; }
+    const backdrop = el("div", "modal-backdrop login-backdrop");
+    const modal = el("div", "modal login-modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-label", "Sign in to Claude");
+    modal.appendChild(el("div", "modal-title", "Sign in to Claude"));
+    const intro = el("div", "modal-body login-intro");
+    modal.appendChild(intro);
+
+    const openBtn = el("button", "modal-btn primary login-open", "Open sign-in page");
+    openBtn.type = "button";
+    openBtn.disabled = true;
+    openBtn.title = "Opens the sign-in page in your browser. Confirm there — this dialog closes by itself.";
+    openBtn.addEventListener("click", () => post("auth.open", {}));
+    modal.appendChild(openBtn);
+
+    // another device: QR + the code the page shows afterwards
+    const other = el("div", "login-other");
+    const qrWrap = el("div", "login-qr-wrap");
+    const qr = document.createElement("canvas");
+    qr.className = "remote-qr login-qr";
+    qr.width = 120;
+    qr.height = 120;
+    qr.hidden = true;
+    qr.title = "Scan with your phone";
+    qrWrap.appendChild(qr);
+    other.appendChild(qrWrap);
+    const otherText = el("div", "login-other-text");
+    otherText.appendChild(el("div", "login-other-title", "On another device"));
+    otherText.appendChild(el("div", "login-other-hint",
+      "Scan the code (or copy the link), sign in there, then paste the code the page shows:"));
+    const codeRow = el("div", "login-code-row");
+    const codeInput = document.createElement("input");
+    codeInput.type = "text";
+    codeInput.className = "modal-input login-code";
+    codeInput.placeholder = "Paste the code";
+    codeInput.spellcheck = false;
+    codeInput.autocomplete = "off";
+    const codeBtn = el("button", "modal-btn login-code-btn", "Sign in");
+    codeBtn.type = "button";
+    codeBtn.disabled = true;
+    const submitCode = () => {
+      const code = codeInput.value.trim();
+      if (!code) return;
+      post("auth.code", { code });
+      setLoginStatus("verifying");
+    };
+    codeInput.addEventListener("input", () => { codeBtn.disabled = !codeInput.value.trim(); });
+    codeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submitCode(); } });
+    codeBtn.addEventListener("click", submitCode);
+    codeRow.appendChild(codeInput);
+    codeRow.appendChild(codeBtn);
+    otherText.appendChild(codeRow);
+    const copyBtn = el("button", "login-link-btn", "Copy link");
+    copyBtn.type = "button";
+    copyBtn.hidden = true;
+    copyBtn.addEventListener("click", () => {
+      if (!loginUi || !loginUi.manualUrl) return;
+      copyText(loginUi.manualUrl);
+      copyBtn.textContent = "Copied";
+      setTimeout(() => { copyBtn.textContent = "Copy link"; }, 1500);
+    });
+    otherText.appendChild(copyBtn);
+    other.appendChild(otherText);
+    modal.appendChild(other);
+
+    const statusEl = el("div", "login-status");
+    modal.appendChild(statusEl);
+
+    const actions = el("div", "modal-actions login-actions");
+    const consoleBtn = el("button", "login-link-btn login-console", "");
+    consoleBtn.type = "button";
+    consoleBtn.addEventListener("click", () => startLogin(!loginUi.console));
+    actions.appendChild(consoleBtn);
+    const cancel = el("button", "modal-btn", "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => closeLoginDialog(true));
+    actions.appendChild(cancel);
+    modal.appendChild(actions);
+
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) closeLoginDialog(true); });
+    modal.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeLoginDialog(true); }
+    });
+    overlayLayer.appendChild(backdrop);
+    loginUi = { backdrop, intro, statusEl, openBtn, qr, copyBtn, codeInput, codeBtn, consoleBtn, console: consoleMode, manualUrl: "" };
+    applyLoginMode(consoleMode);
+    setLoginStatus("starting");
+    openBtn.focus();
+  }
+
+  function applyLoginMode(consoleMode) {
+    if (!loginUi) return;
+    loginUi.console = consoleMode;
+    loginUi.intro.textContent = consoleMode
+      ? "Sign in with your Anthropic Console account — usage is billed through the API."
+      : "Sign in with your Claude account (Pro, Max, Team or Enterprise).";
+    loginUi.consoleBtn.textContent = consoleMode
+      ? "Use a Claude subscription instead"
+      : "Use an Anthropic Console account (API billing) instead";
+  }
+
+  function setLoginStatus(stateName, message) {
+    if (!loginUi) return;
+    const error = stateName === "error";
+    loginUi.statusEl.classList.toggle("error", error);
+    loginUi.statusEl.textContent = error
+      ? "Sign-in failed: " + (message || "unknown error")
+      : (message || LOGIN_STATUS[stateName] || "");
+  }
+
+  function closeLoginDialog(cancel) {
+    if (!loginUi) return;
+    loginUi.backdrop.remove();
+    loginUi = null;
+    if (cancel) post("auth.cancel", {});
+  }
+
+  /** host→web auth.login: progress of `claude auth login`. */
+  function onAuthLogin(m) {
+    const s = m.state || "";
+    if (s === "cancelled") { closeLoginDialog(false); return; }
+    if (s === "done") {
+      closeLoginDialog(false);
+      showNotify({ level: "info", message: m.message || "Signed in.", autoClose: 5000 });
+      return;
+    }
+    if (!loginUi) openLoginDialog(!!m.console);
+    applyLoginMode(!!m.console);
+    if (m.manualUrl && m.manualUrl !== loginUi.manualUrl) {
+      loginUi.manualUrl = m.manualUrl;
+      drawQr(loginUi.qr, m.manualUrl);
+      loginUi.copyBtn.hidden = false;
+    }
+    loginUi.openBtn.disabled = !m.hasLink;
+    if (s === "error") {
+      // the CLI process is gone — a fresh attempt needs a new one
+      loginUi.openBtn.disabled = false;
+      loginUi.openBtn.textContent = "Try again";
+      loginUi.openBtn.onclick = (e) => { e.stopImmediatePropagation(); loginUi.openBtn.onclick = null; loginUi.openBtn.textContent = "Open sign-in page"; startLogin(loginUi.console); };
+    }
+    setLoginStatus(s, m.message);
+  }
+
+  /** host→web auth.required (a tab's turn failed: not signed in / login expired) → a card with one click to fix it. */
+  function onAuthRequired(m) {
+    const card = el("div", "auth-card");
+    card.appendChild(el("div", "auth-card-title", "Claude is not signed in"));
+    card.appendChild(el("div", "auth-card-text",
+      (m.message ? m.message.replace(/\s*·?\s*Please run \/login\.?/i, "") + " — " : "")
+      + "your login is missing or has expired. Sign in again, then send your prompt once more."));
+    const btn = el("button", "modal-btn primary auth-card-btn", "Sign in again");
+    btn.type = "button";
+    btn.addEventListener("click", () => startLogin(false));
+    card.appendChild(btn);
+    appendNode(card);
+    if (isActiveTab()) startLogin(false); // straight into the dialog — the quickest way back
+  }
+
+  function confirmLogout() {
+    const a = state.account || {};
+    openConfirmModal({
+      title: "Sign out",
+      message: "Sign out of Claude (" + (a.email || "this account") + ")? This signs the Claude Code CLI out on this PC — "
+        + "in the terminal too. You can sign in again any time.",
+      confirmLabel: "Sign out",
+      danger: true,
+      onConfirm: () => post("auth.logout", {}),
+    });
+  }
+
+  // the gear popover's account section
+  function buildAccountSection() {
+    const wrap = el("div", "account-section");
+    wrap.appendChild(el("div", "appearance-title", "Account"));
+    const a = state.account || {};
+    const row = el("div", "account-row");
+    const info = el("div", "account-info");
+    if (state.loggedIn) {
+      const who = a.email || (a.mode === "apiKey" ? "API key" : a.mode === "provider" ? (a.provider || "Cloud provider") : "Signed in");
+      info.appendChild(el("div", "account-who", who));
+      const details = [a.org, a.plan ? a.plan.charAt(0).toUpperCase() + a.plan.slice(1) + " plan" : ""].filter(Boolean).join(" · ");
+      if (details) info.appendChild(el("div", "account-details", details));
+      if (a.mode === "apiKey" && !a.canLogout) info.appendChild(el("div", "account-details", "From ANTHROPIC_API_KEY or the CLI settings"));
+    } else {
+      info.appendChild(el("div", "account-who", a.noCli ? "Claude CLI not found" : "Not signed in"));
+    }
+    row.appendChild(info);
+    if (!state.loggedIn && !a.noCli) {
+      const b = el("button", "modal-btn primary account-btn", "Sign in");
+      b.addEventListener("click", () => { closeAllOverlays(); startLogin(false); });
+      row.appendChild(b);
+    } else if (a.canLogout) {
+      const b = el("button", "modal-btn account-btn", "Sign out");
+      b.title = "Sign the Claude Code CLI out on this PC (claude auth logout) — also affects the terminal";
+      b.addEventListener("click", () => { closeAllOverlays(); confirmLogout(); });
+      row.appendChild(b);
+    }
+    wrap.appendChild(row);
+    wrap.appendChild(el("div", "appearance-divider"));
+    return wrap;
+  }
+
   $("btn-settings").addEventListener("click", function () {
     const pop = el("div", "popover appearance-pop");
+    pop.appendChild(buildAccountSection());
     pop.appendChild(el("div", "appearance-title", "Appearance"));
     const seg = el("div", "segmented");
     [["dark", "Dark"], ["light", "Light"], ["auto", "Auto"]].forEach(([mode, label]) => {
@@ -6034,7 +6783,9 @@
   });
 
   function runSlash(command) {
-    post("slash.run", { command });
+    if (command === "/login") startLogin(false);           // the sign-in dialog (host: claude auth login)
+    else if (command === "/logout") confirmLogout();
+    else post("slash.run", { command });
     if (input.value.trim().startsWith("/")) { unqueueForEdit(); input.value = ""; autoGrow(); updateSendEnabled(); }
   }
 
@@ -6511,13 +7262,69 @@
   // -------------------------------------------------------------------------
   let mock = null;
   if (!hasHost) {
-    mock = createMock();
+    // one simulated session per tab, plus the tab list the host would keep
+    const mocks = {};
+    const mockTabs = ["t1"];
+    let mockActive = "t1";
+    let mockNextTab = 2;
+    const mockFor = (id) => mocks[id] || (mocks[id] = createMock(id));
+    const mockTabsState = () => setTimeout(() => handle({ type: "tabs.state", tabs: mockTabs.map((id) => ({ id })), activeId: mockActive, max: 3 }), 0);
+    mock = {
+      receive(msg) {
+        switch (msg.type) {
+          case "ready":
+            mockTabsState();
+            return mockFor("t1").receive(msg);
+          case "tab.new": {
+            if (mockTabs.length >= 3) return mockTabsState();
+            const id = "t" + mockNextTab++;
+            mockTabs.push(id);
+            mockActive = id;
+            mockTabsState();
+            return mockFor(id).receive({ type: "session.new", tab: id });
+          }
+          case "tab.select":
+            mockActive = msg.id;
+            return;
+          case "tab.close": {
+            const i = mockTabs.indexOf(msg.id);
+            if (i < 0) return;
+            mockTabs.splice(i, 1);
+            if (mocks[msg.id]) mocks[msg.id].dispose();
+            delete mocks[msg.id];
+            if (!mockTabs.length) {
+              const id = "t" + mockNextTab++;
+              mockTabs.push(id);
+              mockActive = id;
+              mockTabsState();
+              return mockFor(id).receive({ type: "session.new", tab: id });
+            }
+            if (mockActive === msg.id) mockActive = mockTabs[Math.min(i, mockTabs.length - 1)];
+            return mockTabsState();
+          }
+        }
+        const id = msg.tab && !isPanelMessage(msg.type) && mockTabs.indexOf(msg.tab) >= 0 ? msg.tab : mockActive;
+        return mockFor(id).receive(msg);
+      },
+    };
     // Browser-only hook to stage exact UI states (e.g. for README screenshots): inject host→web messages
     // directly, bypassing the mock's timeline. Never present inside Visual Studio (hasHost).
     window.astrogatorMock = { send: (m) => handle(m) };
   }
 
-  function createMock() {
+  /** The mock's way into the dispatcher (createMock shadows `handle` to tag its messages with the tab). */
+  function handleFromMock(m) { return handle(m); }
+
+  function createMock(tabId) {
+    const handle = (m) => {
+      const result = handleFromMock(m.tab ? m : Object.assign({ tab: tabId }, m));
+      // remote control armed during a turn starts once the turn is over (the host does it on TurnReleased)
+      if (m.type === "status" && m.state === "ready" && mockRemotePending) {
+        mockRemotePending = false;
+        setTimeout(onRemoteStart, 50);
+      }
+      return result;
+    };
     let idc = 0;
     const nid = (p) => p + "-" + (++idc);
     let stopped = false;
@@ -6634,7 +7441,21 @@
       // web -> host (mock handles)
       switch (msg.type) {
         case "ready": return onReady();
-        case "prompt.send": return runTurn(msg.text);
+        case "prompt.send":
+          if (mockRemote) return onRemotePrompt(msg.text || "");
+          if (/expired/i.test(msg.text || "")) { // the turn fails like a CLI whose login ran out
+            const id = nid("a");
+            sendIn("status", { state: "working" }, 0);
+            sendIn("assistant.start", { id }, 150);
+            sendIn("assistant.delta", { id, text: "Not logged in · Please run /login" }, 200);
+            sendIn("assistant.end", { id }, 250);
+            sendIn("auth.required", { message: "Not logged in · Please run /login" }, 300);
+            sendIn("auth.state", mockAccount(false, "expired"), 320);
+            return sendIn("status", { state: "ready" }, 350);
+          }
+          // the host titles a new chat after its first prompt (session.title → the tab strip)
+          if (state.title === "Untitled" && msg.text) sendIn("session.title", { title: msg.text.length > 48 ? msg.text.slice(0, 48) + "…" : msg.text }, 10);
+          return runTurn(msg.text);
         case "turn.stop": return onStop();
         // the host kills the command's shell → the CLI answers with a failed result (exit code 1)
         case "tool.stop": return sendIn("tool.result", { id: msg.id, status: "error", summary: "Exit code 1" }, 150);
@@ -6642,6 +7463,24 @@
           sendIn("background.tasks", { tasks: [] }, 200);
           return sendIn("system.note", { id: nid("n"), text: "Background tasks stopped" }, 220);
         case "session.new": return onNew();
+        case "auth.login":
+          sendIn("auth.login", { state: "starting", console: !!msg.console }, 0);
+          return sendIn("auth.login", { state: "waiting", console: !!msg.console, hasLink: true,
+            manualUrl: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock" }, 700);
+        case "auth.open":
+          clearTimeout(mockLoginTimer);
+          mockLoginTimer = setTimeout(mockFinishLogin, 1500); // "confirmed in the browser"
+          return;
+        case "auth.code":
+          if (/^bad/i.test(msg.code || "")) {
+            return sendIn("auth.login", { state: "error", message: "That code wasn't accepted. It may be incomplete, expired, already used, or from an earlier sign-in attempt. Sign in again to get a new code." }, 600);
+          }
+          return mockFinishLogin();
+        case "auth.cancel": clearTimeout(mockLoginTimer); return;
+        case "auth.logout":
+          sendIn("auth.state", mockAccount(false, "signedOut"), 400);
+          return sendIn("notify", { level: "info", message: "Signed out of Claude.", autoClose: 5000 }, 420);
+        case "auth.refresh": return sendIn("auth.state", mockAccount(state.loggedIn), 100);
         case "session.listRequest": return sendIn("session.list", { sessions: fakeSessions }, 120);
         case "manage.load": return mockManageLoad(msg.tab);
         case "manage.action": {
@@ -6768,8 +7607,15 @@
         case "editor.openFile":
           return sendIn("notify", { level: "error", autoClose: 10000,
             message: "File not found: " + (msg.path || "(unknown)") }, 60);
-        case "remote.start": return onRemoteStart();
-        case "remote.stop": return onRemoteStop();
+        case "remote.start":
+          if (state.status === "working" || state.status === "waiting-permission") {
+            mockRemotePending = true;
+            return sendIn("remote.state", { state: "pending", message: "Remote control starts as soon as Claude has finished this turn." }, 50);
+          }
+          return onRemoteStart();
+        case "remote.stop":
+          if (mockRemotePending) { mockRemotePending = false; return sendIn("remote.state", { state: "stopped" }, 50); }
+          return onRemoteStop();
         case "activeFile.setEnabled":
           mockActiveFileEnabled = !!msg.enabled; // session-only in the mock too
           return sendIn("activeFile", { name: "OrderService.cs", path: "C:/src/SampleShop/Services/OrderService.cs", optionEnabled: true, enabled: mockActiveFileEnabled, lines: "42-58" }, 60);
@@ -6782,10 +7628,33 @@
     // ── remote control mock — a CLI background session: banner, link + QR after "connecting",
     //    then the "phone" works (busy) and goes idle again ──
     let mockRemote = false;
+    let mockRemotePending = false; // armed during a turn — starts at the turn's "ready" (see the status hook below)
+    let mockMirror = null; // what the "remote transcript" holds (null = the page shows the local record)
+    // a prompt from the panel during Remote Control: "typed into the session", then mirrored back incrementally
+    function onRemotePrompt(text) {
+      sendIn("remote.prompt", { state: "sending" }, 0);
+      sched(() => {
+        if (!mockRemote) return;
+        handle({ type: "remote.prompt", tab: tabId, state: "sent" });
+        const reset = !mockMirror;
+        if (reset) mockMirror = [{ role: "user", id: "rm-0", text: "Earlier prompt from the phone", ts: new Date().toISOString() },
+          { role: "assistant", id: "rm-1", text: "Earlier answer, mirrored from the remote transcript.", ts: new Date().toISOString() }];
+        const from = reset ? 0 : mockMirror.length;
+        mockMirror.push({ role: "user", id: nid("rm"), text, ts: new Date().toISOString() });
+        handle({ type: "transcript.mirror", tab: tabId, reset, from, messages: mockMirror.slice(from) });
+        sched(() => {
+          if (!mockRemote) return;
+          const at = mockMirror.length;
+          mockMirror.push({ role: "assistant", id: nid("rm"), text: "(mock) Done in the remote session — the panel only redraws this new message.", ts: new Date().toISOString() });
+          handle({ type: "transcript.mirror", tab: tabId, reset: false, from: at, messages: mockMirror.slice(at) });
+        }, 1800);
+      }, 1200);
+    }
     function onRemoteStart() {
       mockRemote = true;
       const url = "https://claude.ai/code/session_01AstrogatorDemoSession42";
-      const base = { inTerminal: false, canOpenTerminal: true };
+      const base = { inTerminal: false, canOpenTerminal: true, canPrompt: true };
+      mockMirror = null;
       sendIn("remote.state", Object.assign({ state: "starting" }, base), 100);
       sendIn("remote.state", Object.assign({ state: "ready", message: "Connecting to Remote Control…", activity: "idle" }, base), 600);
       const live = "This chat is live for Remote Control. Scan the code or open the link in the Claude app / claude.ai/code — what happens there shows up below. \"End remote session\" returns the chat to this window.";
@@ -6816,7 +7685,7 @@
       sendIn("system.note", { id: nid("note"), text: "Remote session imported" }, 800);
     }
 
-    function sendIn(type, payload, ms) { sched(() => handle(Object.assign({ type }, payload)), ms || 0); }
+    function sendIn(type, payload, ms) { sched(() => handle(Object.assign({ type, tab: tabId }, payload)), ms || 0); }
 
     // reset times for the meter tooltips (session in ~3h, weekly in ~4d)
     function mockLimits(sessionPct, weeklyPct) {
@@ -6829,6 +7698,20 @@
       };
     }
 
+    // fictional account (SampleShop) — the sign-in dialog is exercised with auth.login / auth.open / auth.code
+    function mockAccount(loggedIn, reason) {
+      return loggedIn
+        ? { loggedIn: true, mode: "oauth", method: "claude.ai", provider: "firstParty", email: "dev@sampleshop.example",
+            org: "SampleShop Ltd", plan: "team", canLogout: true, reason }
+        : { loggedIn: false, mode: "none", method: "none", provider: "firstParty", canLogout: false, reason };
+    }
+    let mockLoginTimer = null;
+    function mockFinishLogin() {
+      sendIn("auth.login", { state: "verifying" }, 300);
+      sendIn("auth.state", mockAccount(true, "signedIn"), 900);
+      sendIn("auth.login", { state: "done", message: "Signed in as dev@sampleshop.example." }, 950);
+    }
+
     function onRename(msg) {
       const s = fakeSessions.find((x) => x.id === msg.sessionId);
       if (s) s.title = msg.title;
@@ -6837,7 +7720,7 @@
     function onReady() {
       const resolved = darkOrLight();
       sendIn("theme", { mode: "auto", resolved, vars: {} }, 0);
-      sendIn("auth.state", { loggedIn: true, mode: "oauth" }, 10);
+      sendIn("auth.state", mockAccount(true), 10);
       sendIn("session.init", {
         sessionId: "mock-1", title: "Untitled", model: "claude-opus-5-5",
         effort: "high", planMode: false, ultracode: false, permissionMode: "ask",
@@ -7215,7 +8098,7 @@
       else if (mq.addListener) mq.addListener(onChange);
     }
 
-    return { receive };
+    return { receive, dispose: () => { stopped = true; clearTimers(); } };
   }
 
   // -------------------------------------------------------------------------

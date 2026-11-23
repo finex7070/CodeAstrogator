@@ -95,6 +95,71 @@ namespace CodeAstrogator.Core
             }
         }
 
+        private const string AttachedFilesHeader = "Attached files:";
+
+        /// <summary>
+        /// A user message from a prompt as the panel sends it: the typed text, then (when there are any)
+        /// "\n\nAttached files:" with one reference per line — <c>@path</c> / <c>@"path with spaces"</c>, a
+        /// <c>#L10-20</c> line range, or <c>path (image, included in this message)</c> — and maybe a hint paragraph.
+        /// The references become attachment chips again (like the live bubble), the text stays what was typed.
+        /// </summary>
+        internal static JObject BuildUserMessage(string text, string id, string ts)
+        {
+            var msg = new JObject { ["role"] = "user", ["id"] = id, ["ts"] = ts };
+            var at = text.StartsWith(AttachedFilesHeader, StringComparison.Ordinal) ? 0
+                : text.IndexOf("\n\n" + AttachedFilesHeader, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                msg["text"] = text;
+                return msg;
+            }
+            var typed = text.Substring(0, at).Trim();
+            var rest = text.Substring(at).TrimStart('\n').Substring(AttachedFilesHeader.Length).TrimStart('\r', '\n');
+            var attachments = new JArray();
+            foreach (var raw in rest.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0)
+                    break; // a blank line ends the list (a hint paragraph may follow)
+                const string inlineImage = " (image, included in this message)";
+                if (line.EndsWith(inlineImage, StringComparison.Ordinal))
+                    line = line.Substring(0, line.Length - inlineImage.Length);
+                if (line.StartsWith("@", StringComparison.Ordinal))
+                    line = line.Substring(1);
+                var suffix = "";
+                if (line.StartsWith("\"", StringComparison.Ordinal))
+                {
+                    var close = line.IndexOf('"', 1);
+                    if (close > 0)
+                    {
+                        suffix = line.Substring(close + 1);
+                        line = line.Substring(1, close - 1);
+                    }
+                }
+                else
+                {
+                    var hash = line.LastIndexOf("#L", StringComparison.Ordinal);
+                    if (hash > 0)
+                    {
+                        suffix = line.Substring(hash);
+                        line = line.Substring(0, hash);
+                    }
+                }
+                if (line.Length == 0)
+                    continue;
+                var name = Path.GetFileName(line.TrimEnd('\\', '/'));
+                if (suffix.StartsWith("#L", StringComparison.Ordinal))
+                    name += ":" + suffix.Substring(2);
+                attachments.Add(new JObject { ["name"] = name, ["path"] = line + suffix });
+            }
+            msg["text"] = typed;
+            if (attachments.Count > 0)
+                msg["attachments"] = attachments;
+            else
+                msg["text"] = text; // not our format after all — keep everything
+            return msg;
+        }
+
         /// <summary>
         /// Imports a session transcript. Returns null when the file holds no
         /// displayable conversation (e.g. the pre-created but unused session).
@@ -159,14 +224,35 @@ namespace CodeAstrogator.Core
                     }
                     else if (message["content"] is JArray blocks)
                     {
+                        // A prompt the panel sent (stream-json input, since 2026-10-08) is stored as content blocks —
+                        // text (+ images) — not as a string like a prompt typed in the terminal / the app. Skipping
+                        // those dropped every panel prompt from an imported/mirrored transcript.
+                        var prompt = new System.Text.StringBuilder();
+                        var images = 0;
                         foreach (var block in blocks.OfType<JObject>())
                         {
-                            if (block.Value<string>("type") == "tool_result")
+                            switch (block.Value<string>("type"))
                             {
-                                var id = block.Value<string>("tool_use_id");
-                                if (!string.IsNullOrEmpty(id))
-                                    toolResults[id!] = block.Value<bool?>("is_error") ?? false;
+                                case "tool_result":
+                                    var id = block.Value<string>("tool_use_id");
+                                    if (!string.IsNullOrEmpty(id))
+                                        toolResults[id!] = block.Value<bool?>("is_error") ?? false;
+                                    break;
+                                case "text":
+                                    var part = block.Value<string>("text") ?? "";
+                                    if (part.Trim().Length > 0 && !part.TrimStart().StartsWith("<", StringComparison.Ordinal))
+                                        prompt.Append(prompt.Length > 0 ? "\n\n" : "").Append(part);
+                                    break;
+                                case "image":
+                                    images++;
+                                    break;
                             }
+                        }
+                        if (prompt.Length > 0 || images > 0)
+                        {
+                            session.Messages.Add(BuildUserMessage(prompt.ToString().Trim(),
+                                obj.Value<string>("uuid") ?? Guid.NewGuid().ToString("n"), ts));
+                            lastAssistant = null;
                         }
                     }
                 }

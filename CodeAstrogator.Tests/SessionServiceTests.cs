@@ -307,6 +307,24 @@ namespace CodeAstrogator.Tests
         }
 
         [Fact]
+        public async Task TurnReleased_FiresAfterTurnCompleted_WithTheBusyFlagDown()
+        {
+            // TurnCompleted runs while the session is still busy (the UI gets "ready" from it); TurnReleased is the
+            // moment a prompt sent right then can actually start — the queued-prompt race (1.4.1).
+            foreach (var executable in new[] { SuggestingExecutable(), FakeExecutable() })
+            {
+                var session = new ClaudeSessionService(new FixtureProcessHost("turn-success.ndjson"));
+                var order = new List<string>();
+                session.TurnCompleted += (_, __) => order.Add("completed busy=" + session.IsBusy);
+                session.TurnReleased += () => order.Add("released busy=" + session.IsBusy);
+
+                await session.RunTurnAsync("hi", executable, null);
+
+                Assert.Equal(new[] { "completed busy=True", "released busy=False" }, order);
+            }
+        }
+
+        [Fact]
         public async Task PromptSuggestionsOff_FlagOmitted_TurnEndsAtExit()
         {
             var host = new ObservingProcessHost("turn-prompt-suggestion.ndjson");

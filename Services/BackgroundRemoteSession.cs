@@ -39,8 +39,29 @@ namespace CodeAstrogator.Services
         /// <summary>The CLI's short id of the background session.</summary>
         public string? BackgroundId => _id;
 
+        /// <summary>Session-only settings of a remote session (<c>--settings</c>): lift the background-session worktree
+        /// guard so it can edit the workspace (see <see cref="StartAsync"/>).</summary>
+        internal const string RemoteSessionSettings = "{\"worktree\":{\"bgIsolation\":\"none\"}}";
+
         public event Action? Ended;
         public event Action? Changed;
+
+        /// <summary><c>--bg [--resume id] --settings {…} --remote-control [name]</c>.</summary>
+        internal static string BuildStartArguments(string? resumeSessionId, string? name)
+        {
+            var args = "--bg";
+            if (!string.IsNullOrEmpty(resumeSessionId))
+                args += " --resume " + ClaudeCliProcessHost.Quote(resumeSessionId!);
+            // Background sessions may not edit the main checkout by default (CLI 2.1.33x: worktree.bgIsolation =
+            // "worktree" — Edit/Write blocked until the session moves into a git worktree). A remote session continues
+            // the user's own chat on their workspace, so it edits it like the panel does — for this session only
+            // (the daemon forwards --settings to the session; measured 2.1.330), no settings file is touched.
+            args += " --settings " + ClaudeCliProcessHost.Quote(RemoteSessionSettings);
+            args += " --remote-control";
+            if (!string.IsNullOrWhiteSpace(name))
+                args += " " + ClaudeCliProcessHost.Quote(name!.Trim());
+            return args;
+        }
 
         public async Task<bool> StartAsync(string claudeExe, string? resumeSessionId, string? workingDirectory, string? name, CancellationToken ct)
         {
@@ -53,13 +74,7 @@ namespace CodeAstrogator.Services
             _cwd = workingDirectory;
             SessionId = string.IsNullOrEmpty(resumeSessionId) ? null : resumeSessionId;
 
-            var args = "--bg";
-            if (!string.IsNullOrEmpty(resumeSessionId))
-                args += " --resume " + ClaudeCliProcessHost.Quote(resumeSessionId!);
-            args += " --remote-control";
-            if (!string.IsNullOrWhiteSpace(name))
-                args += " " + ClaudeCliProcessHost.Quote(name!.Trim());
-
+            var args = BuildStartArguments(resumeSessionId, name);
             var run = await ClaudeBackgroundSessions.RunAsync(claudeExe, args, workingDirectory, StartTimeoutMs, ct).ConfigureAwait(false);
             var id = ClaudeBackgroundSessions.ParseStartedId(run.Output);
             if (id == null)
@@ -135,7 +150,11 @@ namespace CodeAstrogator.Services
                         if (me != null)
                         {
                             Activity = me.Status;
-                            if (SessionId == null && !string.IsNullOrEmpty(me.SessionId))
+                            // the registry's session id wins: `--resume` of a session that is still running (e.g. the
+                            // panel's own process finishing its turn) starts a COPY under a new id (CLI 2.1.33x) —
+                            // the remote conversation is written there, so that is the transcript to mirror
+                            if (!string.IsNullOrEmpty(me.SessionId)
+                                && !string.Equals(SessionId, me.SessionId, StringComparison.OrdinalIgnoreCase))
                                 SessionId = me.SessionId;
                         }
                     }

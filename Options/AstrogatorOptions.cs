@@ -49,6 +49,9 @@ namespace CodeAstrogator.Options
         /// <summary>Diffs in blue/orange instead of green/red — panel and inline editor review (settings window).</summary>
         public bool ColorBlindDiffs { get; set; }
 
+        /// <summary>Show each message's date + time on the bubble itself, not only on hover (settings window).</summary>
+        public bool ShowMessageTimestamps { get; set; }
+
         /// <summary>How strongly message bubbles are tinted: <c>off</c> | <c>subtle</c> | <c>normal</c> | <c>strong</c>.</summary>
         public string BubbleIntensity { get; set; } = "normal";
         public static readonly string[] BubbleIntensities = { "off", "subtle", "normal", "strong" };

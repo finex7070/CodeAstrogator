@@ -4,6 +4,38 @@ All notable changes to Code Astrogator are documented in this file.
 
 ---
 
+## [1.4.0] – 2026-11-18
+
+### Added
+- **Up to three chats side by side, as tabs.** The chat title in the header is now a tab strip: click **+** to start another chat next to the current one, click a tab to switch. Each tab is its own Claude session, so one can work on a task while you write or review in another.
+  - Each tab shows what is going on in it: a spinner while Claude works, orange when it needs you (an approval, a question or a plan), green when it finished while you were in another tab, red after an error.
+  - Everything that belongs to a conversation stays with its tab: the transcript, what you typed but did not send yet, a queued prompt, the task list, background tasks, the changed-files review and plan mode. Model, effort and permission mode stay the same for all tabs.
+  - Rename a chat with the pencil on its tab or by double-clicking the title. **✕** closes a tab and asks first if Claude is still working there; the chat stays in the history.
+  - The open tabs come back after a restart of Visual Studio, with the same tab selected (when "Restore last session" is on).
+  - Clicking a Windows notification opens the tab it is about.
+- **Sign in and out of Claude right in the panel — no terminal needed.**
+  - **Sign in** opens a small dialog: **Open sign-in page** takes you to the sign-in page in your browser; confirm there and the dialog closes by itself. To sign in on another device, scan the QR code (or copy the link) and paste the code the page shows. A Console account (API billing) works too.
+  - The gear menu shows which account you are signed in with (email, organization, plan) and has **Sign out**. `/login` and `/logout` do the same.
+  - **When your login runs out,** the turn that failed shows a "Sign in again" card and the sign-in dialog opens right away — after signing in, just send your prompt once more.
+- **Keep writing in Visual Studio while Remote Control runs.** Your prompts go straight into the remote session, so you can continue the same conversation from the panel, your phone or claude.ai/code. If Claude is still working there, your prompt waits and goes out as soon as it is done (Esc takes it back). If the remote session is waiting for an approval or an answer, the panel tells you to answer it in the Claude app first.
+
+- **See when a message was written.** Hover over a message in the chat to see its date and time — or turn on "Always show date and time on messages" in the settings window to see it on every message.
+
+### Changed
+- **A chat is open in only one tab.** Picking a chat in the history that is already open in another tab switches to that tab; the history marks those chats as "open".
+- **Tabs share the workspace.** When a second tab starts working while another one runs, a short hint says that both can change the same files. The rewind dialog warns that rewinding files can also undo changes from another tab, and a file that is already waiting for review in one tab is not reviewed a second time in another.
+- **Remote Control runs in one tab at a time;** the other tabs stay usable meanwhile.
+- **Turn on Remote Control while Claude is still working.** It starts by itself as soon as the current turn is done; until then a banner says so and lets you cancel. Changed files still waiting for your review no longer stop it — they are kept as they are, like "Keep all".
+- **The remote conversation shows up in the panel right away** — within a moment of each new message instead of every few seconds, and without redrawing the whole chat, so it no longer flickers or jumps back to the bottom while you scroll.
+- **Opening another solution or folder** waits until no tab is working; then the new workspace's chats and tabs come back.
+
+### Fixed
+- **Remote Control no longer ends after every reply.** With newer Claude Code versions the remote session was closed and its conversation loaded back ("Remote session imported") after each turn. It now keeps running until you end it.
+- **The live conversation shows up in the panel again during Remote Control.** When it was started right after a turn, newer Claude Code versions continued the chat as a copy the panel did not follow, so nothing appeared until the session ended ("2 sessions imported"). It now continues the same chat, and the panel follows it live.
+- **Claude can edit your files again during Remote Control.** Newer Claude Code versions keep background sessions out of your project folder unless they move into a separate git worktree, so a remote session could not change files. The remote session now gets permission to work in your project — only for that session, no settings file is changed.
+- **Your prompts are no longer missing after a remote session.** Prompts you had written in the panel disappeared from the chat once the remote session's conversation was loaded back (for example the first prompt of the chat). They now show up again, with their attached files.
+- **A queued prompt is now always sent when Claude finishes.** Sometimes it showed up in the chat but never reached Claude, and nothing happened. It now goes out as soon as Claude Code is ready for it.
+
 ## [1.3.1] – 2026-11-12
 
 ### Fixed

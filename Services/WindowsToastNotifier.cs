@@ -30,7 +30,7 @@ namespace CodeAstrogator.Services
         private const string Group = "codeastrogator";
         private const string WinRt = ", Windows.UI.Notifications, ContentType=WindowsRuntime";
 
-        private readonly Action _onActivated;
+        private readonly Action<string?> _onActivated;
         private readonly Action<string> _onError;
         private readonly object _gate = new object();
         // Every WinRT call runs here, one after the other, on thread-pool (MTA) threads. Show/Remove are called
@@ -50,9 +50,9 @@ namespace CodeAstrogator.Services
         // Activated handler alive, so a click still reaches us. Only touched inside the queue.
         private readonly Dictionary<string, object> _live = new Dictionary<string, object>(StringComparer.Ordinal);
 
-        /// <param name="onActivated">A toast was clicked (thread pool).</param>
+        /// <param name="onActivated">A toast was clicked (thread pool) — with its (process-scoped) tag, null if unknown.</param>
         /// <param name="onError">Showing failed — called once, with the reason.</param>
-        public WindowsToastNotifier(Action onActivated, Action<string> onError)
+        public WindowsToastNotifier(Action<string?> onActivated, Action<string> onError)
         {
             _onActivated = onActivated;
             _onError = onError;
@@ -166,7 +166,9 @@ namespace CodeAstrogator.Services
 
         private void OnToastActivated(object sender, object args)
         {
-            try { _onActivated(); }
+            string? tag = null;
+            try { tag = _toastType?.GetProperty("Tag")?.GetValue(sender) as string; } catch { }
+            try { _onActivated(tag); }
             catch { /* never let an exception escape into the WinRT callback */ }
         }
 

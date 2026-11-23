@@ -10,12 +10,8 @@
   <div id="root" class="root">
     <!-- Header -->
     <header class="header" id="header">
-      <div class="title-wrap">
-        <div class="title" id="title" title="Untitled">Untitled</div>
-        <button class="icon-btn small rename-btn" id="btn-rename" title="Rename session" aria-label="Rename session" aria-haspopup="dialog">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18 10l-4-4L4 16z"/><path d="M13 7l4 4"/></svg>
-        </button>
-      </div>
+      <!-- Chat tabs (up to 3): title + status marker each, rename via pencil / double-click, ✕, "+" -->
+      <div class="tab-strip" id="tab-strip" role="tablist" aria-label="Chats"></div>
       <div class="header-actions">
         <button class="icon-btn" id="btn-remote" title="Remote control" aria-label="Remote control">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>

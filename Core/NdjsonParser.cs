@@ -28,6 +28,7 @@ namespace CodeAstrogator.Core
         // A system/task_notification opened this run: the next zero-turn result belongs to the queued
         // notification, not to the user's prompt (see NotificationTurnResultEvent).
         private bool _notificationPending;
+        private bool _authFailed; // an assistant message of this turn reported "authentication_failed"
 
         /// <summary>Maximum length of a tool-result summary forwarded to the UI
         /// (the UI collapses long output behind a "Show more" toggle).</summary>
@@ -273,6 +274,10 @@ namespace CodeAstrogator.Core
 
         private void ParseAssistantMessage(JObject obj, List<ClaudeEvent> events)
         {
+            // not signed in / login expired: the CLI answers with a synthetic message tagged with this error
+            if (string.Equals(obj.Value<string>("error"), "authentication_failed", StringComparison.Ordinal))
+                _authFailed = true;
+
             // Each assistant message carries the usage of that single API call — the last one's
             // input(+cache)+output is the real context size after the turn (see ParseResult).
             if (obj["message"]?["usage"] is JObject usage)
@@ -377,11 +382,16 @@ namespace CodeAstrogator.Core
             input += usage?.Value<long?>("cache_read_input_tokens") ?? 0;
             input += usage?.Value<long?>("cache_creation_input_tokens") ?? 0;
 
+            var isError = obj.Value<bool?>("is_error") ?? false;
+            var authFailed = _authFailed || (isError && ClaudeAuth.IsAuthFailureText(obj.Value<string>("result")));
+            if (string.IsNullOrEmpty(obj.Value<string>("parent_tool_use_id")))
+                _authFailed = false; // per turn
             events.Add(new TurnResultEvent
             {
+                AuthFailed = authFailed,
                 SessionId = obj.Value<string>("session_id") ?? "",
                 NumTurns = numTurns,
-                IsError = obj.Value<bool?>("is_error") ?? false,
+                IsError = isError,
                 CostUsd = obj.Value<double?>("total_cost_usd") ?? 0,
                 DurationMs = obj.Value<long?>("duration_ms") ?? 0,
                 InputTokens = input,

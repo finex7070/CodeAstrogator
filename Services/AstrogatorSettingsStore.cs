@@ -50,6 +50,7 @@ namespace CodeAstrogator.Services
                 SyntaxTheme = AstrogatorOptions.NormalizeSyntaxTheme(GetString(nameof(AstrogatorOptions.SyntaxTheme), d.SyntaxTheme)),
                 UserMessageColor = GetString(nameof(AstrogatorOptions.UserMessageColor), d.UserMessageColor),
                 ColorBlindDiffs = GetBool(nameof(AstrogatorOptions.ColorBlindDiffs), d.ColorBlindDiffs),
+                ShowMessageTimestamps = GetBool(nameof(AstrogatorOptions.ShowMessageTimestamps), d.ShowMessageTimestamps),
                 BubbleIntensity = AstrogatorOptions.NormalizeBubbleIntensity(GetString(nameof(AstrogatorOptions.BubbleIntensity), d.BubbleIntensity)),
                 // font ids are validated where they are used (they depend on CustomFonts)
                 ChatFont = GetString(nameof(AstrogatorOptions.ChatFont), d.ChatFont),
@@ -117,6 +118,7 @@ namespace CodeAstrogator.Services
             _store.SetString(Collection, nameof(AstrogatorOptions.SyntaxTheme), AstrogatorOptions.NormalizeSyntaxTheme(o.SyntaxTheme));
             _store.SetString(Collection, nameof(AstrogatorOptions.UserMessageColor), o.UserMessageColor ?? "");
             _store.SetBoolean(Collection, nameof(AstrogatorOptions.ColorBlindDiffs), o.ColorBlindDiffs);
+            _store.SetBoolean(Collection, nameof(AstrogatorOptions.ShowMessageTimestamps), o.ShowMessageTimestamps);
             _store.SetString(Collection, nameof(AstrogatorOptions.BubbleIntensity), AstrogatorOptions.NormalizeBubbleIntensity(o.BubbleIntensity));
             _store.SetString(Collection, nameof(AstrogatorOptions.ChatFont), o.ChatFont ?? AstrogatorOptions.DefaultFont);
             _store.SetInt32(Collection, nameof(AstrogatorOptions.ChatFontScale), AstrogatorOptions.ClampFontScale(o.ChatFontScale));

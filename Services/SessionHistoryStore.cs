@@ -55,6 +55,9 @@ namespace CodeAstrogator.Services
     /// Session store with JSON persistence: one file per workspace under
     /// %LocalAppData%\CodeAstrogator\history. The CLI keeps the actual
     /// conversations, so persisted ids stay resumable across VS restarts.
+    /// <para>Several chats can be <b>open</b> at once (one per chat tab): an open record is held by its tab
+    /// and lives in the same list as every other record. Records without messages are never listed or
+    /// persisted, so an empty "new chat" leaves no trace. Not thread-safe — callers lock on the store.</para>
     /// </summary>
     internal sealed class SessionHistoryStore
     {
@@ -62,9 +65,19 @@ namespace CodeAstrogator.Services
         private const int MaxPersistedMessagesPerSession = 400;
 
         private readonly List<SessionRecord> _sessions = new List<SessionRecord>();
+        private readonly List<SessionRecord> _open = new List<SessionRecord>(); // shown in a tab, in tab order
         private string? _path;
 
-        public SessionRecord Current { get; private set; } = new SessionRecord();
+        /// <summary>The records currently shown in a tab (in the order they were opened).</summary>
+        public IReadOnlyList<SessionRecord> OpenRecords => _open;
+
+        /// <summary>The chat of the active tab (set by the panel) — persisted so a restart selects that tab again.</summary>
+        public string? ActiveOpenId { get; set; }
+
+        /// <summary>The chats that were open in tabs when the file was written (tab order), and the active one —
+        /// what the next start restores. Empty for files from before tabs existed.</summary>
+        public IReadOnlyList<string> SavedOpenIds { get; private set; } = Array.Empty<string>();
+        public string? SavedActiveId { get; private set; }
 
         // ── persistence ───────────────────────────────────────────────────────
 
@@ -94,6 +107,10 @@ namespace CodeAstrogator.Services
 
                 var cutoff = retentionDays > 0 ? DateTime.UtcNow.AddDays(-retentionDays) : (DateTime?)null;
                 var root = JObject.Parse(File.ReadAllText(path));
+                store.SavedOpenIds = (root["openTabs"] as JArray ?? new JArray())
+                    .Select(x => x.Type == JTokenType.String ? x.Value<string>() : null)
+                    .Where(x => !string.IsNullOrEmpty(x)).Select(x => x!).ToList();
+                store.SavedActiveId = root.Value<string>("activeTab");
                 foreach (var token in root["sessions"] as JArray ?? new JArray())
                 {
                     if (token is not JObject s)
@@ -131,18 +148,23 @@ namespace CodeAstrogator.Services
         public string? FilePath => _path;
 
         /// <summary>Switches this store to another workspace's history file (the panel followed a solution/folder
-        /// being opened or closed): drops the in-memory sessions and loads that file's, with an empty current
-        /// session. The instance stays the same, so everything that locks on it keeps working. Save first.</summary>
+        /// being opened or closed): drops the in-memory sessions and loads that file's, with nothing open — the
+        /// caller opens the chats its tabs show next. The instance stays the same, so everything that locks on it
+        /// keeps working. Save first.</summary>
         public void ReloadFrom(string path, int retentionDays = 0)
         {
             var other = LoadFrom(path, retentionDays);
             _sessions.Clear();
             _sessions.AddRange(other._sessions);
+            _open.Clear();
             _path = other._path;
-            Current = new SessionRecord();
+            SavedOpenIds = other.SavedOpenIds;
+            SavedActiveId = other.SavedActiveId;
+            ActiveOpenId = null;
         }
 
-        /// <summary>Writes all sessions (incl. the active one). Call under the store lock.</summary>
+        /// <summary>Writes all sessions with messages (open ones first, so they are never cut by the cap). Call
+        /// under the store lock.</summary>
         public void Save()
         {
             if (_path == null)
@@ -173,8 +195,14 @@ namespace CodeAstrogator.Services
                         break;
                 }
 
+                // the open tabs (only chats with messages — an empty tab has nothing to restore)
+                var open = _open.Where(s => s.Messages.Count > 0).Select(s => s.Id).ToList();
+                var root = new JObject { ["sessions"] = sessions, ["openTabs"] = new JArray(open) };
+                if (ActiveOpenId != null && open.Contains(ActiveOpenId))
+                    root["activeTab"] = ActiveOpenId;
+
                 Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-                File.WriteAllText(_path, new JObject { ["sessions"] = sessions }.ToString());
+                File.WriteAllText(_path, root.ToString());
             }
             catch
             {
@@ -208,48 +236,57 @@ namespace CodeAstrogator.Services
 
         // ── session management ───────────────────────────────────────────────
 
+        /// <summary>Opens a fresh, empty chat (a new tab, or "new chat" after <see cref="Close"/> of the old one).
+        /// It shows up in the list once it has a message.</summary>
         public SessionRecord StartNew()
         {
-            ArchiveCurrent();
-            Current = new SessionRecord();
-            return Current;
+            var record = new SessionRecord();
+            _sessions.Add(record);
+            _open.Add(record);
+            return record;
         }
 
-        public SessionRecord? Load(string id)
-        {
-            var found = _sessions.FirstOrDefault(s => s.Id == id);
-            if (found == null)
-                return Current.Id == id ? Current : null;
+        /// <summary>The record with this id (open or not), or null.</summary>
+        public SessionRecord? Find(string id) =>
+            string.IsNullOrEmpty(id) ? null : _sessions.FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
 
-            ArchiveCurrent();
-            _sessions.Remove(found);
-            Current = found;
+        /// <summary>Marks the chat with this id as open (shown in a tab) and returns it; null when unknown. Opening
+        /// an already open chat returns it unchanged — keeping one chat in one tab is the caller's job.</summary>
+        public SessionRecord? Open(string id)
+        {
+            var found = Find(id);
+            if (found != null && !_open.Contains(found))
+                _open.Add(found);
             return found;
         }
 
-        private void ArchiveCurrent()
+        /// <summary>The tab stops showing this chat. An empty one (never got a message) is dropped entirely.</summary>
+        public void Close(SessionRecord record)
         {
-            if (Current.Messages.Count > 0)
-                _sessions.Insert(0, Current);
+            _open.Remove(record);
+            if (record.Messages.Count == 0)
+                _sessions.Remove(record);
         }
 
-        /// <summary>True when the history holds a session with this id (current or archived).</summary>
-        public bool Contains(string id) =>
-            string.Equals(Current.Id, id, StringComparison.OrdinalIgnoreCase)
-            || _sessions.Any(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+        /// <summary>True when this chat is shown in a tab.</summary>
+        public bool IsOpen(string id) =>
+            _open.Any(s => string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>True when the history holds a session with this id (open or not).</summary>
+        public bool Contains(string id) => Find(id) != null;
 
         /// <summary>
         /// Inserts or replaces a session imported from the CLI's own store (remote
         /// control). The transcript is authoritative — existing messages are replaced.
-        /// An existing session keeps its title (it may have been renamed).
+        /// An existing session keeps its title (it may have been renamed). Does not open it.
         /// </summary>
         public SessionRecord Import(string id, string title, IEnumerable<JObject> messages, DateTime updatedAtUtc, long contextTokens = 0)
         {
-            var record = Current.Id == id ? Current : _sessions.FirstOrDefault(s => s.Id == id);
+            var record = Find(id);
             if (record == null)
             {
                 record = new SessionRecord { Id = id, Title = title };
-                _sessions.Insert(0, record);
+                _sessions.Add(record);
             }
             else if (string.IsNullOrWhiteSpace(record.Title) || record.Title == "Untitled")
             {
@@ -264,40 +301,32 @@ namespace CodeAstrogator.Services
         }
 
         /// <summary>
-        /// Deletes a session (archived or the active one). Returns whether anything was removed and
-        /// whether it was the <see cref="Current"/> session — in which case Current is replaced with a
-        /// fresh empty record and the caller should re-init the UI (like "new chat"). The CLI keeps
-        /// its own conversation store, so a deleted session may still be resumable via --resume.
+        /// Deletes a session (open or not). Returns whether anything was removed and whether it was open — in
+        /// which case the tab showing it should start a fresh chat and re-init its UI (like "new chat"). The CLI
+        /// keeps its own conversation store, so a deleted session may still be resumable via --resume.
         /// </summary>
-        public (bool deleted, bool wasCurrent) Delete(string id)
+        public (bool deleted, bool wasOpen) Delete(string id)
         {
-            if (string.IsNullOrEmpty(id))
-                return (false, false);
-            if (Current.Id == id)
-            {
-                Current = new SessionRecord();
-                return (true, true);
-            }
-            var found = _sessions.FirstOrDefault(s => s.Id == id);
+            var found = Find(id);
             if (found == null)
                 return (false, false);
             _sessions.Remove(found);
-            return (true, false);
+            return (true, _open.Remove(found));
         }
 
-        /// <summary>Renames a session (current or archived) without touching its recency.</summary>
+        /// <summary>Renames a session (open or not) without touching its recency.</summary>
         public bool Rename(string id, string title)
         {
             if (string.IsNullOrWhiteSpace(title))
                 return false;
-            var record = Current.Id == id ? Current : _sessions.FirstOrDefault(s => s.Id == id);
+            var record = Find(id);
             if (record == null)
                 return false;
             record.Title = title.Trim();
             return true;
         }
 
-        /// <summary>Payload for session.list (current first, then most recent).</summary>
+        /// <summary>Payload for session.list (open chats first, then most recent).</summary>
         public JArray ToSessionList()
         {
             var arr = new JArray();
@@ -314,12 +343,9 @@ namespace CodeAstrogator.Services
             return arr;
         }
 
-        private IEnumerable<SessionRecord> Enumerate()
-        {
-            if (Current.Messages.Count > 0)
-                yield return Current;
-            foreach (var s in _sessions.OrderByDescending(s => s.UpdatedAtUtc))
-                yield return s;
-        }
+        /// <summary>Every record with messages: the open ones first (most recent first), then the rest.</summary>
+        private IEnumerable<SessionRecord> Enumerate() =>
+            _open.Where(s => s.Messages.Count > 0).OrderByDescending(s => s.UpdatedAtUtc)
+                .Concat(_sessions.Where(s => s.Messages.Count > 0 && !_open.Contains(s)).OrderByDescending(s => s.UpdatedAtUtc));
     }
 }
